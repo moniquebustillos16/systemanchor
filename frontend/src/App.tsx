@@ -1,0 +1,254 @@
+import { useNavigate } from "react-router-dom";
+import { useState } from "react";
+import api from "./api/axios"; // ← change path if needed
+import "./index.css";
+
+function App() {
+  const navigate = useNavigate();
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [remember, setRemember] = useState(false);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleLogin(event: React.FormEvent) {
+    event.preventDefault();
+
+    setError("");
+    setLoading(true);
+
+    try {
+      const response = await api.post("/login", {
+        email,
+        password,
+      });
+
+      const { token, user } = response.data;
+
+      // Store authentication
+      if (remember) {
+        localStorage.setItem("token", token);
+        localStorage.setItem("user", JSON.stringify(user));
+      } else {
+        sessionStorage.setItem("token", token);
+        sessionStorage.setItem("user", JSON.stringify(user));
+      }
+
+      navigate("/dashboard");
+    } catch (error: any) {
+      if (error.response) {
+        setError(error.response.data.message || "Invalid email or password.");
+      } else {
+        setError("Unable to connect to server.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="login-page">
+      {/* ───────── BRAND SIDE ───────── */}
+      <aside className="brand-side">
+        <div className="bg-layers" aria-hidden="true">
+          <div className="bg-base" />
+          <div className="bg-mesh" />
+          <div className="bg-grid" />
+          <div className="bg-ring bg-ring--1" />
+          <div className="bg-ring bg-ring--2" />
+          <div className="bg-ring bg-ring--3" />
+          <div className="bg-blob bg-blob--a" />
+          <div className="bg-blob bg-blob--b" />
+          <div className="bg-blob bg-blob--c" />
+
+          <div className="bg-lines">
+            <span />
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+
+          <div className="bg-noise" />
+        </div>
+
+        <div className="brand-inner">
+          <div className="brand-top">
+            <div className="mark">
+              <svg viewBox="0 0 40 40" fill="none">
+                <path
+                  d="M6 16.5L20 6L34 16.5"
+                  stroke="currentColor"
+                  strokeWidth="2.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <rect
+                  x="9.5"
+                  y="16.5"
+                  width="21"
+                  height="14.5"
+                  rx="2"
+                  stroke="currentColor"
+                  strokeWidth="2.8"
+                />
+                <rect
+                  x="13.5"
+                  y="20.5"
+                  width="4.5"
+                  height="4.5"
+                  rx="0.8"
+                  fill="currentColor"
+                />
+                <rect
+                  x="22"
+                  y="20.5"
+                  width="4.5"
+                  height="4.5"
+                  rx="0.8"
+                  fill="currentColor"
+                />
+                <circle cx="20" cy="34" r="2.6" fill="#d9a653" />
+              </svg>
+            </div>
+            <span className="mark-label">SystemAnchor</span>
+          </div>
+
+          <div className="brand-hero">
+            <p className="hero-kicker">Warehouse OS</p>
+            <h1 className="hero-title">
+              Clarity for every
+              <em> aisle &amp; order.</em>
+            </h1>
+            <p className="hero-body">
+              One platform for inventory, logistics, and operations — built for
+              teams that move fast and stay precise.
+            </p>
+          </div>
+
+          <ul className="brand-points">
+            <li>
+              <span className="point-icon">◇</span>
+              Live stock across all locations
+            </li>
+            <li>
+              <span className="point-icon">◇</span>
+              Alerts before issues escalate
+            </li>
+            <li>
+              <span className="point-icon">◇</span>
+              Secure roles for every team
+            </li>
+          </ul>
+        </div>
+
+        <footer className="brand-foot">
+          <span className="status-pip" />
+          Production-ready · Encrypted · Audit-friendly
+        </footer>
+      </aside>
+
+      {/* ───────── FORM SIDE ───────── */}
+      <main className="form-side">
+        <div className="form-frame">
+          <div className="form-card">
+            <header className="form-header">
+              <h2>Welcome back</h2>
+              <p>Sign in to your workspace</p>
+            </header>
+
+            <form onSubmit={handleLogin} noValidate className="auth-form">
+              {/* Email */}
+              <div className="field">
+                <label htmlFor="email">Email</label>
+                <input
+                  id="email"
+                  type="email"
+                  autoComplete="username"
+                  placeholder="you@company.com"
+                  value={email}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    setError("");
+                  }}
+                  required
+                />
+              </div>
+
+              {/* Password */}
+              <div className="field">
+                <div className="field-head">
+                  <label htmlFor="password">Password</label>
+                  <a href="#" className="text-link">
+                    Forgot?
+                  </a>
+                </div>
+
+                <div className="field-affix">
+                  <input
+                    id="password"
+                    type={showPassword ? "text" : "password"}
+                    autoComplete="current-password"
+                    placeholder="Your password"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setError("");
+                    }}
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="affix"
+                    onClick={() => setShowPassword((v) => !v)}
+                  >
+                    {showPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Remember me */}
+              <label className="remember">
+                <input
+                  type="checkbox"
+                  checked={remember}
+                  onChange={(e) => setRemember(e.target.checked)}
+                />
+                <span>Remember this device</span>
+              </label>
+
+              {/* Error */}
+              {error && (
+                <div className="error-banner" role="alert">
+                  <span className="error-icon">!</span>
+                  {error}
+                </div>
+              )}
+
+              {/* Submit */}
+              <button type="submit" className="cta" disabled={loading}>
+                {loading ? "Signing in..." : "Sign in"}
+              </button>
+            </form>
+
+            <div className="form-meta">
+              <p>
+                Demo ·
+                <kbd>admin@systemanchor.com</kbd> /
+                <kbd>SystemAnchor@123</kbd>
+              </p>
+            </div>
+          </div>
+
+          <p className="fine-print">
+            By continuing, you agree to our Terms and Privacy Policy.
+          </p>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default App;

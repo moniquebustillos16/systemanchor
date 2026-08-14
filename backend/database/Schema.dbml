@@ -1,0 +1,344 @@
+Table roles {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(100) [unique, not null]
+  description varchar(255)
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table users {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(255) [not null]
+  email varchar(255) [unique, not null]
+  password varchar(255) [not null]
+  role_id uuid
+  warehouse_id uuid
+  access_all_warehouses boolean [not null, default: false]
+  status varchar(30) [not null, default: 'active']
+  phone varchar(50)
+  job_title varchar(150)
+  department varchar(150)
+  image_path varchar(500)
+  image_url varchar(1000)
+  last_login_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table user_warehouses {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [not null]
+  warehouse_id uuid [not null]
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, warehouse_id) [unique]
+  }
+}
+
+Table user_settings {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [not null, unique]
+  language varchar(50) [default: 'English']
+  timezone varchar(80) [default: 'Asia/Manila']
+  date_format varchar(20) [default: 'YYYY-MM-DD']
+  theme varchar(20) [default: 'system']
+  email_notifications boolean [default: true]
+  push_notifications boolean [default: true]
+  low_stock_alerts boolean [default: true]
+  order_alerts boolean [default: true]
+  digest_frequency varchar(20) [default: 'daily']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+}
+
+Table categories {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(100) [unique, not null]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table warehouses {
+  id uuid [pk, default: `gen_random_uuid()`]
+  code varchar(50) [unique, not null]
+  name varchar(150) [not null]
+  location varchar(255)
+  manager varchar(150)
+  capacity numeric(12,2)
+  utilized numeric(5,2)
+  zones int [default: 0]
+  bins int [default: 0]
+  status varchar(30) [default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table suppliers {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(255) [not null]
+  contact varchar(150)
+  email varchar(255)
+  phone varchar(50)
+  city varchar(100)
+  score numeric(5,2) [default: 80]
+  status varchar(30) [default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table customers {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(255) [not null]
+  contact varchar(150)
+  email varchar(255)
+  phone varchar(50)
+  city varchar(100)
+  status varchar(30) [default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table products {
+  id uuid [pk, default: `gen_random_uuid()`]
+  sku varchar(100) [unique, not null]
+  name varchar(255) [not null]
+  barcode varchar(100)
+  serial varchar(100)
+  category_id uuid
+  warehouse_id uuid
+  supplier_id uuid
+  qty numeric(18,4) [not null, default: 0]
+  min_stock numeric(18,4) [default: 0]
+  max_stock numeric(18,4) [default: 0]
+  price numeric(18,2) [default: 0]
+  status varchar(30) [not null, default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table product_images {
+  id uuid [pk, default: `gen_random_uuid()`]
+  product_id uuid [not null]
+  image_path varchar(500) [not null]
+  image_url varchar(1000)
+  file_name varchar(255)
+  mime_type varchar(100)
+  file_size bigint
+  is_primary boolean [default: false]
+  sort_order int [default: 0]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table purchase_orders {
+  id uuid [pk, default: `gen_random_uuid()`]
+  po_number varchar(50) [unique, not null]
+  supplier_id uuid [not null]
+  warehouse_id uuid
+  order_date date [not null]
+  items int [default: 1]
+  total numeric(18,2) [not null]
+  status varchar(30) [not null, default: 'pending']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table sales_orders {
+  id uuid [pk, default: `gen_random_uuid()`]
+  so_number varchar(50) [unique, not null]
+  customer_id uuid [not null]
+  warehouse_id uuid
+  order_date date [not null]
+  items int [default: 1]
+  total numeric(18,2) [not null]
+  status varchar(30) [not null, default: 'pending']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table goods_receipts {
+  id uuid [pk, default: `gen_random_uuid()`]
+  receipt_number varchar(50) [unique, not null]
+  purchase_order_id uuid [not null]
+  supplier_id uuid [not null]
+  warehouse_id uuid
+  receiver_id uuid
+  date date [not null]
+  expected numeric(18,4) [not null, default: 0]
+  received numeric(18,4) [not null, default: 0]
+  status varchar(30) [not null, default: 'pending']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table stock_movements {
+  id uuid [pk, default: `gen_random_uuid()`]
+  movement_number varchar(50) [unique, not null]
+  type varchar(20) [not null]
+  product_id uuid [not null]
+  qty numeric(18,4) [not null]
+  from_warehouse_id uuid
+  to_warehouse_id uuid
+  reference varchar(100)
+  notes text
+  performed_by uuid
+  movement_date timestamptz [not null]
+  status varchar(30) [default: 'posted']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+}
+
+Table shipments {
+  id uuid [pk, default: `gen_random_uuid()`]
+  shipment_number varchar(50) [unique, not null]
+  sales_order_id uuid [not null]
+  carrier varchar(100) [not null]
+  tracking varchar(100)
+  warehouse_id uuid
+  packages int [not null, default: 1]
+  date date [not null]
+  status varchar(30) [not null, default: 'shipped']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table returns {
+  id uuid [pk, default: `gen_random_uuid()`]
+  return_number varchar(50) [unique, not null]
+  sales_order_id uuid [not null]
+  warehouse_id uuid
+  reason varchar(100) [not null]
+  disposition varchar(100) [not null]
+  items int [not null, default: 1]
+  date date [not null]
+  status varchar(30) [not null, default: 'processing']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table cycle_counts {
+  id uuid [pk, default: `gen_random_uuid()`]
+  code varchar(50) [unique, not null]
+  warehouse_id uuid [not null]
+  zone varchar(100) [not null]
+  scheduled_date date [not null]
+  started_at varchar(20)
+  ended_at varchar(20)
+  counted numeric(18,4) [not null, default: 0]
+  system_qty numeric(18,4) [not null, default: 0]
+  variance varchar(20)
+  accuracy numeric(5,2)
+  counter varchar(150)
+  status varchar(30) [not null, default: 'draft']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table notifications {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid
+  type varchar(50) [not null]
+  title varchar(255) [not null]
+  message text
+  page varchar(100)
+  is_read boolean [default: false]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+}
+
+Table api_keys {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(150) [not null]
+  key_prefix varchar(20) [not null]
+  key_hash varchar(255) [not null]
+  last_used_at timestamptz
+  status varchar(30) [default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+}
+
+Table company_settings {
+  id uuid [pk, default: `gen_random_uuid()`]
+  company_name varchar(255) [not null, default: 'System Anchor Logistics Inc.']
+  trading_name varchar(255)
+  tin varchar(50)
+  industry varchar(100) [default: 'Warehousing & Logistics']
+  street_address varchar(255)
+  city varchar(100)
+  province varchar(100)
+  region varchar(100)
+  zip_code varchar(20)
+  country varchar(100) [default: 'Philippines']
+  landmark varchar(255)
+  phone varchar(50)
+  email varchar(255)
+  website varchar(255)
+  timezone varchar(80) [default: 'Asia/Manila']
+  currency varchar(10) [default: 'PHP']
+  date_format varchar(20) [default: 'YYYY-MM-DD']
+  language varchar(50) [default: 'English']
+  default_warehouse_id uuid
+  fiscal_year_start varchar(20) [default: 'January']
+  low_stock_threshold numeric(18,4) [default: 15]
+  auto_reorder varchar(50) [default: 'disabled']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+}
+
+// Relationships
+
+Ref: users.role_id > roles.id
+Ref: users.warehouse_id > warehouses.id
+Ref: user_warehouses.user_id > users.id
+Ref: user_warehouses.warehouse_id > warehouses.id
+Ref: user_settings.user_id > users.id
+
+Ref: products.category_id > categories.id
+Ref: products.warehouse_id > warehouses.id
+Ref: products.supplier_id > suppliers.id
+
+Ref: product_images.product_id > products.id
+
+Ref: purchase_orders.supplier_id > suppliers.id
+Ref: purchase_orders.warehouse_id > warehouses.id
+
+Ref: sales_orders.customer_id > customers.id
+Ref: sales_orders.warehouse_id > warehouses.id
+
+Ref: goods_receipts.purchase_order_id > purchase_orders.id
+Ref: goods_receipts.supplier_id > suppliers.id
+Ref: goods_receipts.warehouse_id > warehouses.id
+Ref: goods_receipts.receiver_id > users.id
+
+Ref: stock_movements.product_id > products.id
+Ref: stock_movements.from_warehouse_id > warehouses.id
+Ref: stock_movements.to_warehouse_id > warehouses.id
+Ref: stock_movements.performed_by > users.id
+
+Ref: shipments.sales_order_id > sales_orders.id
+Ref: shipments.warehouse_id > warehouses.id
+
+Ref: returns.sales_order_id > sales_orders.id
+Ref: returns.warehouse_id > warehouses.id
+
+Ref: cycle_counts.warehouse_id > warehouses.id
+
+Ref: notifications.user_id > users.id
+
+Ref: company_settings.default_warehouse_id > warehouses.id
