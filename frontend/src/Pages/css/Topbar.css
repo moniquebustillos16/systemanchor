@@ -615,16 +615,6 @@
   block-size: 12px;
 }
 
-.notif-msg {
-  font-size: 12.5px;
-  color: var(--tb-muted);
-  margin-block-start: 3px;
-  line-height: 1.4;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
 
 .notif-time {
   font-size: 11.5px;

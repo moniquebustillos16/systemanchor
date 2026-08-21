@@ -7,10 +7,15 @@ use App\Models\Notification;
 use App\Models\PurchaseOrder;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class PurchaseOrderController extends Controller
 {
+    private const STATS_CACHE_TTL = 20; // seconds
+
     public function index(Request $request)
     {
         $query = PurchaseOrder::with(['supplier:id,name', 'warehouse:id,code,name'])
@@ -49,16 +54,31 @@ class PurchaseOrderController extends Controller
         return response()->json($query->paginate($perPage));
     }
 
+    /**
+     * One aggregated query + short cache (same pattern as InventoryController::stats).
+     */
     public function stats()
     {
-        $base = PurchaseOrder::whereNull('deleted_at');
+        $payload = Cache::remember('purchase_orders:stats', self::STATS_CACHE_TTL, function () {
+            $row = PurchaseOrder::query()
+                ->whereNull('deleted_at')
+                ->selectRaw("
+                    COUNT(*) as all_count,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as pending,
+                    COALESCE(SUM(CASE WHEN status IN ('completed','received','shipped') THEN 1 ELSE 0 END), 0) as done,
+                    COALESCE(SUM(total), 0) as total_value
+                ")
+                ->first();
 
-        return response()->json([
-            'all'         => (clone $base)->count(),
-            'pending'     => (clone $base)->whereIn('status', ['pending', 'processing'])->count(),
-            'total_value' => (float) (clone $base)->selectRaw('COALESCE(SUM(total), 0) as t')->value('t'),
-            'done'        => (clone $base)->whereIn('status', ['completed', 'received', 'shipped'])->count(),
-        ]);
+            return [
+                'all'         => (int) ($row->all_count ?? 0),
+                'pending'     => (int) ($row->pending ?? 0),
+                'done'        => (int) ($row->done ?? 0),
+                'total_value' => (float) ($row->total_value ?? 0),
+            ];
+        });
+
+        return response()->json($payload);
     }
 
     public function show(string $id)
@@ -73,35 +93,55 @@ class PurchaseOrderController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'po_number'    => 'nullable|string|max:50|unique:purchase_orders,po_number',
-            'supplier_id'  => 'required|uuid|exists:suppliers,id',
-            'warehouse_id' => 'nullable|uuid|exists:warehouses,id',
-            'order_date'   => 'nullable|date',
-            'items'        => 'nullable|integer|min:1',
-            'total'        => 'nullable|numeric|min:0',
-            'status'       => ['nullable', Rule::in([
+            'po_number'      => 'nullable|string|max:50|unique:purchase_orders,po_number',
+            'supplier_id'    => 'required|uuid|exists:suppliers,id',
+            'warehouse_id'   => 'nullable|uuid|exists:warehouses,id',
+            'order_date'     => 'nullable|date',
+            'expected_date'  => 'nullable|date',
+            'reference'      => 'nullable|string|max:255',
+            'notes'          => 'nullable|string|max:2000',
+            'product_name'   => 'nullable|string|max:255',
+            'items'          => 'nullable|numeric|min:0',
+            'total'          => 'nullable|numeric|min:0',
+            'status'         => ['nullable', Rule::in([
                 'pending', 'processing', 'completed', 'received', 'shipped', 'cancelled',
             ])],
         ]);
 
+        // Always generate a unique PO number when the client doesn't send one
+        $poNumber = $validated['po_number'] ?? null;
+        if (empty($poNumber)) {
+            $poNumber = $this->generatePoNumber();
+        }
+
         $po = PurchaseOrder::create([
-            'po_number'    => $validated['po_number'] ?? null,
-            'supplier_id'  => $validated['supplier_id'],
-            'warehouse_id' => $validated['warehouse_id'] ?? null,
-            'order_date'   => $validated['order_date'] ?? now()->toDateString(),
-            'items'        => $validated['items'] ?? 1,
-            'total'        => $validated['total'] ?? 0,
-            'status'       => $validated['status'] ?? 'pending',
+            'po_number'     => $poNumber,
+            'supplier_id'   => $validated['supplier_id'],
+            'warehouse_id'  => $validated['warehouse_id'] ?? null,
+            'order_date'    => $validated['order_date'] ?? now()->toDateString(),
+            'expected_date' => $validated['expected_date'] ?? null,
+            'reference'     => $validated['reference'] ?? null,
+            'notes'         => $validated['notes'] ?? null,
+            'product_name'  => $validated['product_name'] ?? 'Product offer',
+            'items'         => (int) max(1, round((float) ($validated['items'] ?? 1))),
+            'total'         => (float) ($validated['total'] ?? 0),
+            'status'        => $validated['status'] ?? 'pending',
         ]);
 
         $po->load(['supplier:id,name', 'warehouse:id,code,name']);
+        Cache::forget('purchase_orders:stats');
 
-        $this->notifyAll(
-            'info',
-            'Purchase order created',
-            ($po->po_number ?? 'PO') . ' was created',
-            '/purchase-orders'
-        );
+        // Never let notification failure turn a successful create into a 500
+        try {
+            $this->notifyAll(
+                'info',
+                'Purchase order created',
+                ($po->po_number ?? 'PO') . ' was created',
+                '/purchase-orders'
+            );
+        } catch (\Throwable $e) {
+            Log::warning('PO notifyAll failed: ' . $e->getMessage());
+        }
 
         return response()->json([
             'message' => 'Purchase order created',
@@ -115,30 +155,45 @@ class PurchaseOrderController extends Controller
         $oldStatus = $po->status;
 
         $validated = $request->validate([
-            'supplier_id'  => 'sometimes|uuid|exists:suppliers,id',
-            'warehouse_id' => 'sometimes|nullable|uuid|exists:warehouses,id',
-            'order_date'   => 'sometimes|date',
-            'items'        => 'sometimes|integer|min:1',
-            'total'        => 'sometimes|numeric|min:0',
-            'status'       => ['sometimes', Rule::in([
+            'supplier_id'    => 'sometimes|uuid|exists:suppliers,id',
+            'warehouse_id'   => 'sometimes|nullable|uuid|exists:warehouses,id',
+            'order_date'     => 'sometimes|date',
+            'expected_date'  => 'sometimes|nullable|date',
+            'reference'      => 'sometimes|nullable|string|max:255',
+            'notes'          => 'sometimes|nullable|string|max:2000',
+            'items'          => 'sometimes|numeric|min:0',
+            'total'          => 'sometimes|numeric|min:0',
+            'status'         => ['sometimes', Rule::in([
                 'pending', 'processing', 'completed', 'received', 'shipped', 'cancelled',
             ])],
         ]);
 
+        if (array_key_exists('items', $validated)) {
+            $validated['items'] = (int) max(1, round((float) $validated['items']));
+        }
+        if (array_key_exists('total', $validated)) {
+            $validated['total'] = (float) $validated['total'];
+        }
+
         $po->update($validated);
         $po->load(['supplier:id,name', 'warehouse:id,code,name']);
+        Cache::forget('purchase_orders:stats');
 
         if (isset($validated['status']) && $validated['status'] !== $oldStatus) {
             $type = in_array($validated['status'], ['completed', 'received'], true)
                 ? 'success'
                 : ($validated['status'] === 'cancelled' ? 'warning' : 'info');
 
-            $this->notifyAll(
-                $type,
-                'Purchase order updated',
-                ($po->po_number ?? 'PO') . " is now {$validated['status']}",
-                '/purchase-orders'
-            );
+            try {
+                $this->notifyAll(
+                    $type,
+                    'Purchase order updated',
+                    ($po->po_number ?? 'PO') . " is now {$validated['status']}",
+                    '/purchase-orders'
+                );
+            } catch (\Throwable $e) {
+                Log::warning('PO notifyAll failed: ' . $e->getMessage());
+            }
         }
 
         return response()->json([
@@ -151,8 +206,23 @@ class PurchaseOrderController extends Controller
     {
         $po = PurchaseOrder::whereNull('deleted_at')->findOrFail($id);
         $po->delete();
+        Cache::forget('purchase_orders:stats');
 
         return response()->json(['message' => 'Purchase order deleted']);
+    }
+
+    /** Generate a unique PO-YYYYMMDD-XXXX style number */
+    private function generatePoNumber(): string
+    {
+        $prefix = 'PO-' . now()->format('Ymd') . '-';
+        for ($i = 0; $i < 8; $i++) {
+            $candidate = $prefix . strtoupper(Str::random(4));
+            if (!PurchaseOrder::where('po_number', $candidate)->exists()) {
+                return $candidate;
+            }
+        }
+        // ultra-rare fallback
+        return $prefix . strtoupper(Str::random(8));
     }
 
     private function notifyAll(string $type, string $title, string $message, string $page): void

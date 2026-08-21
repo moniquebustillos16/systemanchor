@@ -365,6 +365,19 @@ function formatPeso(amount: number, fractionDigits = 0): string {
   })}`;
 }
 
+/** Pull array from Laravel list payloads (data / nested data / bare array). */
+function extractList<T = unknown>(json: unknown): T[] {
+  if (!json) return [];
+  if (Array.isArray(json)) return json as T[];
+  if (typeof json !== "object") return [];
+  const o = json as Record<string, unknown>;
+  if (Array.isArray(o.data)) return o.data as T[];
+  const nested = o.data as Record<string, unknown> | undefined;
+  if (nested && Array.isArray(nested.data)) return nested.data as T[];
+  if (Array.isArray(o.items)) return o.items as T[];
+  return [];
+}
+
 function formatDate(d: string) {
   if (!d) return "—";
   return d.slice(0, 10);
@@ -394,6 +407,108 @@ function nextStepLabel(status: string): string | null {
   return map[status] ?? null;
 }
 
+
+/* ── List/stats cache (navigate away & back = instant paint) ─ */
+const PO_SOFT_TTL_MS = 60_000;
+const PO_HARD_TTL_MS = 10 * 60_000;
+const SS_PO_LIST = "po:lastList";
+const SS_PO_STATS = "po:lastStats";
+const SS_PO_META = "po:lastMeta";
+
+type PoListSnap = {
+  at: number;
+  key: string;
+  rows: PurchaseOrder[];
+  total: number;
+  lastPage: number;
+};
+type PoStatsSnap = { at: number; data: Stats };
+type PoMetaSnap = {
+  at: number;
+  warehouses: Warehouse[];
+  suppliers: Supplier[];
+  products: ProductOpt[];
+};
+
+type PoStore = {
+  list: PoListSnap | null;
+  stats: PoStatsSnap | null;
+  meta: PoMetaSnap | null;
+  listInflight: Map<string, Promise<void>>;
+  metaInflight: Promise<void> | null;
+};
+
+function poStore(): PoStore {
+  const g = globalThis as unknown as { __saPoCache?: PoStore };
+  if (!g.__saPoCache) {
+    g.__saPoCache = {
+      list: null,
+      stats: null,
+      meta: null,
+      listInflight: new Map(),
+      metaInflight: null,
+    };
+  }
+  return g.__saPoCache;
+}
+
+function isFresh(at: number, ttl: number) {
+  return Date.now() - at < ttl;
+}
+
+function readSS<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+function writeSS(key: string, value: unknown) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* quota */
+  }
+}
+
+function listCacheKey(parts: {
+  page: number;
+  search: string;
+  status: string;
+  wh: string;
+  supplier: string;
+}) {
+  return `p=${parts.page}|s=${parts.search}|st=${parts.status}|w=${parts.wh}|su=${parts.supplier}`;
+}
+
+function bootstrapPoList(key: string): PoListSnap | null {
+  const mem = poStore().list;
+  if (mem && mem.key === key && isFresh(mem.at, PO_HARD_TTL_MS)) return mem;
+  const ss = readSS<PoListSnap>(SS_PO_LIST);
+  if (ss && ss.key === key && isFresh(ss.at, PO_HARD_TTL_MS)) return ss;
+  // any recent list for instant paint (filters may differ)
+  if (mem && isFresh(mem.at, PO_HARD_TTL_MS)) return mem;
+  if (ss && isFresh(ss.at, PO_HARD_TTL_MS)) return ss;
+  return null;
+}
+
+function bootstrapPoStats(): Stats | null {
+  const mem = poStore().stats;
+  if (mem && isFresh(mem.at, PO_HARD_TTL_MS)) return mem.data;
+  const ss = readSS<PoStatsSnap>(SS_PO_STATS);
+  if (ss && isFresh(ss.at, PO_HARD_TTL_MS)) return ss.data;
+  return null;
+}
+
+function bootstrapPoMeta(): PoMetaSnap | null {
+  const mem = poStore().meta;
+  if (mem && isFresh(mem.at, PO_HARD_TTL_MS)) return mem;
+  const ss = readSS<PoMetaSnap>(SS_PO_META);
+  if (ss && isFresh(ss.at, PO_HARD_TTL_MS)) return ss;
+  return null;
+}
+
 function PurchaseOrders() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -404,16 +519,33 @@ function PurchaseOrders() {
   const [page, setPage] = useState(1);
   const pageSize = 15;
 
-  const [orders, setOrders] = useState<PurchaseOrder[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [total, setTotal] = useState(0);
-  const [lastPage, setLastPage] = useState(1);
-  const [loading, setLoading] = useState(true);
+  const bootKey = listCacheKey({
+    page: 1,
+    search: "",
+    status: "all",
+    wh: "all",
+    supplier: "all",
+  });
+  const bootList = bootstrapPoList(bootKey);
+  const bootStats = bootstrapPoStats();
+  const bootMeta = bootstrapPoMeta();
+
+  const [orders, setOrders] = useState<PurchaseOrder[]>(() => bootList?.rows ?? []);
+  const [stats, setStats] = useState<Stats | null>(() => bootStats);
+  const [total, setTotal] = useState(() => bootList?.total ?? 0);
+  const [lastPage, setLastPage] = useState(() => bootList?.lastPage ?? 1);
+  const [loading, setLoading] = useState(() => !(bootList?.rows?.length));
   const [error, setError] = useState<string | null>(null);
 
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [products, setProducts] = useState<ProductOpt[]>([]);
+  const [warehouses, setWarehouses] = useState<Warehouse[]>(
+    () => bootMeta?.warehouses ?? []
+  );
+  const [suppliers, setSuppliers] = useState<Supplier[]>(
+    () => bootMeta?.suppliers ?? []
+  );
+  const [products, setProducts] = useState<ProductOpt[]>(
+    () => bootMeta?.products ?? []
+  );
 
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<PoForm>(emptyForm);
@@ -491,72 +623,165 @@ function PurchaseOrders() {
   }, [search]);
 
   /** Suppliers from SupplierController · Warehouses from LocationController */
-  const fetchMeta = useCallback(async () => {
-    try {
-      const loadWarehouses = async (): Promise<Warehouse[]> => {
-        for (const path of ["/warehouses", "/locations/warehouses"]) {
+  const fetchMeta = useCallback(async (force = false) => {
+    const store = poStore();
+    if (
+      !force &&
+      store.meta &&
+      isFresh(store.meta.at, PO_SOFT_TTL_MS) &&
+      store.meta.warehouses.length > 0
+    ) {
+      setWarehouses(store.meta.warehouses);
+      setSuppliers(store.meta.suppliers);
+      setProducts(store.meta.products);
+      return;
+    }
+    if (store.metaInflight && !force) {
+      await store.metaInflight;
+      const m = store.meta;
+      if (m) {
+        setWarehouses(m.warehouses);
+        setSuppliers(m.suppliers);
+        setProducts(m.products);
+      }
+      return;
+    }
+
+    store.metaInflight = (async () => {
+      try {
+        const loadWarehouses = async (): Promise<Warehouse[]> => {
+          // Real route is GET /api/warehouses (WarehouseController) — not /locations/warehouses
           try {
-            const { data: json } = await api.get(path);
-            const list = Array.isArray(json) ? json : json.data ?? [];
+            const { data: json } = await api.get("/warehouses", {
+              params: { per_page: 200, all: 1 },
+            });
+            const list = extractList<Warehouse>(json);
             return list
-              .map((w: Warehouse) => ({
+              .map((w) => ({
                 id: String(w.id),
-                code: w.code,
+                code: String(w.code ?? w.name ?? w.id),
                 name: w.name,
               }))
-              .sort((a: Warehouse, b: Warehouse) => a.code.localeCompare(b.code));
-          } catch {
-            /* try next */
+              .filter((w) => !!w.id)
+              .sort((a, b) => a.code.localeCompare(b.code));
+          } catch (e) {
+            console.warn("[PurchaseOrders] /warehouses failed:", e);
+            return [];
           }
-        }
-        return [];
-      };
+        };
 
-      const [supSettled, whList] = await Promise.all([
-        api.get("/suppliers", { params: { per_page: 100 } }).then((r) => r.data).catch((e) => {
-          console.warn("[PurchaseOrders] suppliers fetch failed:", e?.response?.status);
-          return null;
-        }),
-        loadWarehouses(),
-      ]);
+        const [supSettled, whList] = await Promise.all([
+          api
+            .get("/suppliers", { params: { per_page: 100 } })
+            .then((r) => r.data)
+            .catch(() => null),
+          loadWarehouses(),
+        ]);
 
-      if (supSettled != null) {
-        const list: Supplier[] = Array.isArray(supSettled) ? supSettled : supSettled.data ?? [];
-        setSuppliers(
-          list
+        let nextSuppliers: Supplier[] = store.meta?.suppliers ?? [];
+        if (supSettled != null) {
+          const list: Supplier[] = extractList<Supplier>(supSettled);
+          nextSuppliers = list
             .map((s) => ({
               id: String(s.id),
               name: s.name,
               product_offers: (s as Supplier).product_offers ?? null,
             }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-        );
-      }
+            .sort((a, b) => a.name.localeCompare(b.name));
+        }
 
-      setWarehouses(whList);
-
-      try {
-        const { data: prodJson } = await api.get("/inventories", { params: { per_page: 200 } });
-        const list: ProductOpt[] = Array.isArray(prodJson) ? prodJson : prodJson.data ?? [];
-        setProducts(
-          list.map((p) => ({
+        let nextProducts: ProductOpt[] = store.meta?.products ?? [];
+        try {
+          const { data: prodJson } = await api.get("/inventories", {
+            params: { per_page: 100 },
+          });
+          const list: ProductOpt[] = extractList<ProductOpt>(prodJson);
+          nextProducts = list.map((p) => ({
             id: String(p.id),
             sku: p.sku,
             name: p.name,
             price: p.price,
             qty: p.qty,
-          }))
-        );
-      } catch {
-        /* inventory optional for create form */
+          }));
+        } catch {
+          /* optional */
+        }
+
+        setWarehouses(whList);
+        setSuppliers(nextSuppliers);
+        setProducts(nextProducts);
+        // Don't cache empty warehouse lists — forces retry next open
+        if (whList.length > 0 || nextSuppliers.length > 0) {
+          const snap: PoMetaSnap = {
+            at: Date.now(),
+            warehouses: whList,
+            suppliers: nextSuppliers,
+            products: nextProducts,
+          };
+          store.meta = snap;
+          writeSS(SS_PO_META, snap);
+        }
+      } catch (e) {
+        console.error("[PurchaseOrders] meta fetch failed:", e);
+      } finally {
+        store.metaInflight = null;
       }
-    } catch (e) {
-      console.error("[PurchaseOrders] meta fetch failed:", e);
-    }
+    })();
+
+    await store.metaInflight;
   }, []);
 
-  const fetchOrders = useCallback(async () => {
-    setLoading(true);
+  const fetchOrders = useCallback(async (opts?: { force?: boolean }) => {
+    const force = !!opts?.force;
+    const key = listCacheKey({
+      page,
+      search: debouncedSearch.trim(),
+      status,
+      wh,
+      supplier: filterSupplier,
+    });
+    const store = poStore();
+
+    // Soft cache hit → paint immediately, refresh in background
+    const cached =
+      (store.list && store.list.key === key && isFresh(store.list.at, PO_SOFT_TTL_MS)
+        ? store.list
+        : null) ||
+      ((): PoListSnap | null => {
+        const ss = readSS<PoListSnap>(SS_PO_LIST);
+        return ss && ss.key === key && isFresh(ss.at, PO_SOFT_TTL_MS) ? ss : null;
+      })();
+
+    if (cached && !force) {
+      setOrders(cached.rows);
+      setTotal(cached.total);
+      setLastPage(cached.lastPage);
+      setLoading(false);
+      if (store.stats && isFresh(store.stats.at, PO_SOFT_TTL_MS)) {
+        setStats(store.stats.data);
+      }
+      // background revalidate (single-flight per key)
+      if (!store.listInflight.has(key)) {
+        store.listInflight.set(
+          key,
+          (async () => {
+            try {
+              await fetchOrders({ force: true });
+            } finally {
+              store.listInflight.delete(key);
+            }
+          })()
+        );
+      }
+      return;
+    }
+
+    // Hard cache for spinner decision
+    const hard =
+      store.list?.key === key && isFresh(store.list.at, PO_HARD_TTL_MS)
+        ? store.list
+        : null;
+    if (!hard) setLoading(true);
     setError(null);
 
     const params: Record<string, string | number> = {
@@ -582,20 +807,15 @@ function PurchaseOrders() {
           `Orders HTTP ${e?.response?.status ?? "?"}: ${String(e?.response?.data?.message || e?.message || "").slice(0, 200)}`
         );
       }
-      if (statsSettled.status === "rejected") {
-        const e: any = statsSettled.reason;
-        throw new Error(`Stats HTTP ${e?.response?.status ?? "?"}`);
-      }
 
       const listJson: Paginated<PurchaseOrder> | PurchaseOrder[] = listSettled.value.data;
-      const statsJson: Stats = statsSettled.value.data;
-
       const rawRows = Array.isArray(listJson) ? listJson : listJson.data ?? [];
       const rows = rawRows.map((row) => {
         const r = row as PurchaseOrder & Record<string, unknown>;
         const lines = extractLines(r);
-        const cached = lines.length === 0 ? readCachedPoLines(String(r.po_number ?? "")) : [];
-        const resolved = lines.length ? lines : cached;
+        const cachedLines =
+          lines.length === 0 ? readCachedPoLines(String(r.po_number ?? "")) : [];
+        const resolved = lines.length ? lines : cachedLines;
         return {
           ...row,
           lines: resolved.length ? resolved : row.lines,
@@ -610,24 +830,43 @@ function PurchaseOrders() {
       setOrders(rows);
       setTotal(totalCount);
       setLastPage(pages);
-      setStats(statsJson);
+
+      const listSnap: PoListSnap = {
+        at: Date.now(),
+        key,
+        rows,
+        total: totalCount,
+        lastPage: pages,
+      };
+      store.list = listSnap;
+      writeSS(SS_PO_LIST, listSnap);
+
+      if (statsSettled.status === "fulfilled") {
+        const statsJson: Stats = statsSettled.value.data;
+        setStats(statsJson);
+        const st: PoStatsSnap = { at: Date.now(), data: statsJson };
+        store.stats = st;
+        writeSS(SS_PO_STATS, st);
+      }
     } catch (e) {
       console.error(e);
-      setError(e instanceof Error ? e.message : "Failed to load purchase orders");
-      setOrders([]);
-      setTotal(0);
-      setLastPage(1);
+      if (!hard) {
+        setError(e instanceof Error ? e.message : "Failed to load purchase orders");
+        setOrders([]);
+        setTotal(0);
+        setLastPage(1);
+      }
     } finally {
       setLoading(false);
     }
   }, [page, debouncedSearch, status, wh, filterSupplier]);
 
   useEffect(() => {
-    fetchOrders();
+    void fetchOrders();
   }, [fetchOrders]);
 
   useEffect(() => {
-    fetchMeta();
+    void fetchMeta();
   }, [fetchMeta]);
 
   useEffect(() => {
@@ -683,16 +922,29 @@ function PurchaseOrders() {
     return partial?.id ?? "";
   };
 
-  const openAdd = (prefill?: Partial<PoForm>) => {
-    if (!canCreate) { showToast("error", "Permission denied", "You cannot create purchase orders."); return; }
-    const supplierId = prefill?.supplier_id ?? suppliers[0]?.id ?? "";
-    const supplier = suppliers.find((s) => s.id === supplierId);
+  const openAdd = async (prefill?: Partial<PoForm>) => {
+    if (!canCreate) {
+      showToast("error", "Permission denied", "You cannot create purchase orders.");
+      return;
+    }
+    // Ensure warehouses are available for the create form
+    if (warehouses.length === 0) {
+      await fetchMeta(true);
+    }
+    const whs = poStore().meta?.warehouses?.length
+      ? poStore().meta!.warehouses
+      : warehouses;
+    const sups = poStore().meta?.suppliers?.length
+      ? poStore().meta!.suppliers
+      : suppliers;
+    const supplierId = prefill?.supplier_id ?? sups[0]?.id ?? "";
+    const supplier = sups.find((s) => s.id === supplierId);
     const offers = parseProductOffers(supplier?.product_offers);
     const firstOffer = offers[0] ?? "";
     setForm({
       ...emptyForm(),
       supplier_id: supplierId,
-      warehouse_id: warehouses[0]?.id ?? "",
+      warehouse_id: prefill?.warehouse_id ?? whs[0]?.id ?? "",
       lines: [emptyLine(firstOffer)],
       ...prefill,
     });
@@ -818,12 +1070,16 @@ function PurchaseOrders() {
     const { items: itemsTotal, total: orderTotal } = formTotals(validLines);
     const primaryOffer = validLines[0].offer.trim();
 
-    // Matches simplified PurchaseOrderController@store
+    // Matches hardened PurchaseOrderController@store
     const payload = {
       supplier_id: form.supplier_id,
       warehouse_id: form.warehouse_id || null,
       order_date: form.order_date || null,
-      items: itemsTotal,
+      expected_date: form.expected_date || null,
+      reference: form.reference.trim() || null,
+      notes: form.notes.trim() || null,
+      product_name: primaryOffer,
+      items: Math.max(1, Math.round(itemsTotal)),
       total: orderTotal,
       status: form.status || "pending",
     };
@@ -925,7 +1181,7 @@ function PurchaseOrders() {
         }, 500);
       }
       setPage(1);
-      await fetchOrders();
+      await fetchOrders({ force: true });
       setViewOrder(created);
       setViewLoading(false);
     } catch (err) {
@@ -1318,7 +1574,7 @@ function PurchaseOrders() {
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  fetchOrders();
+                  void fetchOrders({ force: true });
                   fetchMeta();
                   showToast("success", "Refreshed", "Orders and suppliers reloaded.");
                 }}

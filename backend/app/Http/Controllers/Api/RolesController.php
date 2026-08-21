@@ -5,66 +5,107 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Roles;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 class RolesController extends Controller
 {
+    private const LIST_COLUMNS = ['id', 'name', 'description', 'created_at', 'updated_at'];
+
     /**
      * GET /api/roles
+     * Fast path: paginate=false|all=1 → plain { success, data: [...] }
      */
     public function index(Request $request)
     {
-        $query = Roles::query()->whereNull('deleted_at');
+        try {
+            if (!Schema::hasTable('roles')) {
+                return response()->json(['success' => true, 'data' => []]);
+            }
 
-        // Search
-        if ($search = $request->query('search')) {
-            $query->where(function ($q) use ($search) {
-                $q->where('name', 'like', "%{$search}%")
-                  ->orWhere('description', 'like', "%{$search}%");
-            });
-        }
+            $cols = array_values(array_filter(
+                self::LIST_COLUMNS,
+                fn (string $c) => Schema::hasColumn('roles', $c)
+            ));
+            if ($cols === []) {
+                $cols = ['id', 'name'];
+            }
 
-        // Sorting
-        $sort = $request->query('sort', 'name');
-        $dir  = $request->query('dir', 'asc') === 'desc' ? 'desc' : 'asc';
-        $allowedSorts = ['name', 'description', 'created_at'];
-        if (!in_array($sort, $allowedSorts)) {
-            $sort = 'name';
-        }
-        $query->orderBy($sort, $dir);
+            $query = DB::table('roles')->select($cols);
 
-        $perPage = min(max((int) $request->query('per_page', 50), 1), 200);
+            if (Schema::hasColumn('roles', 'deleted_at')) {
+                $query->whereNull('deleted_at');
+            }
 
-        if ($request->boolean('paginate', true) && !$request->has('all')) {
-            $paginator = $query->paginate($perPage);
+            $search = trim((string) $request->query('search', ''));
+            if ($search !== '') {
+                $driver = DB::getDriverName();
+                $op = $driver === 'pgsql' ? 'ilike' : 'like';
+                $query->where(function ($q) use ($search, $op, $cols) {
+                    if (in_array('name', $cols, true)) {
+                        $q->where('name', $op, "%{$search}%");
+                    }
+                    if (in_array('description', $cols, true)) {
+                        $q->orWhere('description', $op, "%{$search}%");
+                    }
+                });
+            }
+
+            $sort = $request->query('sort', in_array('name', $cols, true) ? 'name' : $cols[0]);
+            if (!in_array($sort, $cols, true)) {
+                $sort = $cols[0];
+            }
+            $dir = $request->query('dir', 'asc') === 'desc' ? 'desc' : 'asc';
+            $query->orderBy($sort, $dir);
+
+            $perPage = min(max((int) $request->query('per_page', 50), 1), 200);
+            $plain = $request->boolean('all')
+                || $request->has('all')
+                || !$request->boolean('paginate', true);
+
+            if ($plain) {
+                $rows = $query->limit($perPage)->get();
+                return response()->json([
+                    'success' => true,
+                    'data'    => $rows,
+                ]);
+            }
+
+            $total = (clone $query)->count();
+            $page  = max((int) $request->query('page', 1), 1);
+            $items = $query->forPage($page, $perPage)->get();
 
             return response()->json([
-                'data'         => $paginator->items(),
-                'current_page' => $paginator->currentPage(),
-                'last_page'    => $paginator->lastPage(),
-                'total'        => $paginator->total(),
-                'per_page'     => $paginator->perPage(),
+                'success'      => true,
+                'data'         => $items,
+                'current_page' => $page,
+                'last_page'    => (int) ceil($total / max($perPage, 1)) ?: 1,
+                'total'        => $total,
+                'per_page'     => $perPage,
             ]);
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to load roles',
+                'error'   => config('app.debug') ? $e->getMessage() : null,
+                'data'    => [],
+            ], 200);
         }
-
-        return response()->json([
-            'data' => $query->limit($perPage)->get(),
-        ]);
     }
 
-    /**
-     * GET /api/roles/{id}
-     */
     public function show(string $id)
     {
-        $role = Roles::findOrFail($id);
-
-        return response()->json(['data' => $role]);
+        try {
+            $role = Roles::query()->select($this->safeSelect())->findOrFail($id);
+            return response()->json(['success' => true, 'data' => $role]);
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json(['success' => false, 'message' => 'Role not found'], 404);
+        }
     }
 
-    /**
-     * POST /api/roles
-     */
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -78,17 +119,15 @@ class RolesController extends Controller
         ]);
 
         return response()->json([
+            'success' => true,
             'message' => 'Role created successfully',
-            'data'    => $role,
+            'data'    => $role->only($this->safeSelect()),
         ], 201);
     }
 
-    /**
-     * PUT / PATCH /api/roles/{id}
-     */
     public function update(Request $request, string $id)
     {
-        $role = Roles::findOrFail($id);
+        $role = Roles::query()->findOrFail($id);
 
         $validated = $request->validate([
             'name' => [
@@ -104,33 +143,48 @@ class RolesController extends Controller
         $role->update($validated);
 
         return response()->json([
+            'success' => true,
             'message' => 'Role updated successfully',
-            'data'    => $role,
+            'data'    => $role->fresh()->only($this->safeSelect()),
         ]);
     }
 
-    /**
-     * DELETE /api/roles/{id}
-     */
     public function destroy(string $id)
     {
-        $role = Roles::findOrFail($id);
-        $role->delete();
-
+        Roles::query()->findOrFail($id)->delete();
         return response()->json([
+            'success' => true,
             'message' => 'Role deleted successfully',
         ]);
     }
 
-    /**
-     * GET /api/roles/stats
-     */
     public function stats()
     {
-        $base = Roles::whereNull('deleted_at');
+        try {
+            $q = DB::table('roles');
+            if (Schema::hasColumn('roles', 'deleted_at')) {
+                $q->whereNull('deleted_at');
+            }
+            return response()->json([
+                'success' => true,
+                'data'    => ['all' => $q->count()],
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['success' => true, 'data' => ['all' => 0]]);
+        }
+    }
 
-        return response()->json([
-            'all' => $base->count(),
-        ]);
+    /** @return string[] */
+    private function safeSelect(): array
+    {
+        try {
+            $cols = array_values(array_filter(
+                self::LIST_COLUMNS,
+                fn (string $c) => Schema::hasColumn('roles', $c)
+            ));
+            return $cols !== [] ? $cols : ['id', 'name'];
+        } catch (\Throwable $e) {
+            return ['id', 'name'];
+        }
     }
 }

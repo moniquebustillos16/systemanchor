@@ -125,14 +125,6 @@ type Stats = {
   inventory_value: number;
 };
 
-type Paginated<T> = {
-  data: T[];
-  current_page?: number;
-  last_page?: number;
-  per_page?: number;
-  total?: number;
-};
-
 type Tab = "products" | "categories";
 type SortKey = "sku" | "name" | "qty" | "price" | "status";
 type DisplayStatus = "active" | "low-stock" | "out-of-stock";
@@ -202,21 +194,68 @@ function getDisplayStatus(p: Product): DisplayStatus {
   return "active";
 }
 
+/** Resolve API origin from axios baseURL (falls back to current page origin). */
+function apiOrigin(): string {
+  const base = String((api as { defaults?: { baseURL?: string } })?.defaults?.baseURL || "");
+  try {
+    if (/^https?:\/\//i.test(base)) return new URL(base).origin;
+  } catch {
+    /* ignore */
+  }
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return window.location.origin;
+  }
+  return "";
+}
+
+/**
+ * Build a working image URL.
+ * - Absolute URLs pointing at localhost/127.0.0.1 are rewritten to the API origin
+ * - Relative /storage/... paths are prefixed with the API origin
+ */
 function normalizeImageUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  let u = url.replace("http://localhost:8000", "http://127.0.0.1:8000");
-  if (u.startsWith("/storage/")) {
-    u = "http://127.0.0.1:8000" + u;
+  const origin = apiOrigin();
+
+  if (/^https?:\/\//i.test(url) || url.startsWith("blob:") || url.startsWith("data:")) {
+    try {
+      const u = new URL(url);
+      if (u.hostname === "localhost" || u.hostname === "127.0.0.1") {
+        return origin ? `${origin}${u.pathname}${u.search}` : u.pathname + u.search;
+      }
+    } catch {
+      /* keep as-is */
+    }
+    return url;
   }
-  return u;
+
+  const path = url.startsWith("/") ? url : `/${url}`;
+  return origin ? `${origin}${path}` : path;
+}
+
+/** Resolve image URL from an image object (supports url, path, camelCase). */
+function imageSrc(img: ProductImage | null | undefined): string | null {
+  if (!img) return null;
+  const raw =
+    img.image_url ||
+    (img as { url?: string }).url ||
+    img.image_path ||
+    null;
+  return normalizeImageUrl(raw);
 }
 
 function getPrimaryImageUrl(p: Product): string | null {
-  const url =
-    p.primary_image?.image_url ??
-    (p.images?.find((i) => i.is_primary) ?? p.images?.[0])?.image_url ??
+  // Support both snake_case and camelCase relation keys from Laravel
+  const primary =
+    p.primary_image ??
+    (p as { primaryImage?: ProductImage | null }).primaryImage ??
     null;
-  return normalizeImageUrl(url);
+  const fromPrimary = imageSrc(primary);
+  if (fromPrimary) return fromPrimary;
+
+  const imgs = p.images ?? [];
+  const preferred = imgs.find((i) => i.is_primary) ?? imgs[0];
+  return imageSrc(preferred);
 }
 
 function getAllImageUrls(p: Product): string[] {
@@ -227,7 +266,7 @@ function getAllImageUrls(p: Product): string[] {
     return (a.sort_order ?? 0) - (b.sort_order ?? 0);
   });
   const urls = sorted
-    .map((i) => normalizeImageUrl(i.image_url))
+    .map((i) => imageSrc(i))
     .filter((u): u is string => !!u);
   if (urls.length === 0) {
     const primary = getPrimaryImageUrl(p);
@@ -236,33 +275,67 @@ function getAllImageUrls(p: Product): string[] {
   return urls;
 }
 
+/** Normalize API product so images always have usable image_url + snake_case keys. */
+function normalizeProductImages(p: Product): Product {
+  const anyP = p as Product & { primaryImage?: ProductImage | null };
+  const primaryRaw = p.primary_image ?? anyP.primaryImage ?? null;
+  const imgsRaw = p.images ?? [];
+
+  const fixImg = (img: ProductImage | null | undefined): ProductImage | null => {
+    if (!img) return null;
+    const path = img.image_path || null;
+    const url = img.image_url || (path ? (path.startsWith("/") ? path : `/storage/${path}`) : null);
+    return { ...img, image_path: path || img.image_path, image_url: url };
+  };
+
+  const images = imgsRaw.map((i) => fixImg(i)!).filter(Boolean);
+  const primary_image = fixImg(primaryRaw) ?? images.find((i) => i.is_primary) ?? images[0] ?? null;
+
+  return {
+    ...p,
+    images,
+    primary_image,
+  };
+}
+
 /* ── Role permissions (from /auth/me or /user) ─────────────── */
 
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: { permissions?: string[]; role?: { permissions?: { name: string }[] } };
-};
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
-  }
-  // nested data.user
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
+function normPerm(s: string): string {
+  return String(s).trim().toLowerCase().replace(/_/g, ".");
 }
 
 function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
-  return needed.some((n) => perms.includes(n));
+  if (!perms || perms.length === 0) return false;
+  const set = new Set(perms.map(normPerm));
+  if (set.has("*")) return true;
+  return needed.some((n) => set.has(normPerm(n)));
+}
+
+function namesFromRolePermsPayload(json: unknown): string[] {
+  if (!json) return [];
+  const root = json as Record<string, unknown>;
+  const candidates = [
+    root.data,
+    root.permissions,
+    (root.data as Record<string, unknown> | undefined)?.permissions,
+    (root.data as Record<string, unknown> | undefined)?.data,
+    root,
+  ];
+  for (const c of candidates) {
+    if (!Array.isArray(c)) continue;
+    const names = c
+      .map((p) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object") {
+          const o = p as { name?: string; permission?: string; permission_name?: string };
+          return o.name || o.permission || o.permission_name || null;
+        }
+        return null;
+      })
+      .filter((x): x is string => !!x && x.length > 0);
+    if (names.length > 0) return names;
+  }
+  return [];
 }
 
 function productToForm(p: Product): ProductForm {
@@ -284,6 +357,115 @@ function productToForm(p: Product): ProductForm {
 
 type Toast = { type: "success" | "error"; title: string; message?: string } | null;
 
+/* ── Module cache (survives Strict Mode remounts) ─────────────── */
+const INV_CACHE_TTL = 60_000;
+const SS_LIST_KEY = "inv:lastList";
+const SS_STATS_KEY = "inv:lastStats";
+const SS_META_KEY = "inv:lastMeta";
+
+type CacheEntry<T> = { data: T; at: number; key?: string };
+const statsCache: { entry: CacheEntry<Stats> | null; inflight: Promise<Stats> | null } = {
+  entry: null,
+  inflight: null,
+};
+const metaCache: {
+  entry: CacheEntry<{ categories: Category[]; warehouses: Warehouse[]; suppliers: Supplier[] }> | null;
+  inflight: Promise<{ categories: Category[]; warehouses: Warehouse[]; suppliers: Supplier[] }> | null;
+} = { entry: null, inflight: null };
+const listCache = new Map<string, CacheEntry<{ rows: Product[]; total: number; lastPage: number }>>();
+const listInflight = new Map<string, Promise<{ rows: Product[]; total: number; lastPage: number }>>();
+const permsCache: { entry: CacheEntry<string[]> | null; inflight: Promise<string[]> | null } = {
+  entry: null,
+  inflight: null,
+};
+let invMetaBootstrapped = false;
+
+function isFresh<T>(e: CacheEntry<T> | null | undefined): e is CacheEntry<T> {
+  return !!e && Date.now() - e.at < INV_CACHE_TTL;
+}
+
+function readSS<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeSS(key: string, value: unknown) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* quota */
+  }
+}
+
+/** Bootstrap list from sessionStorage for instant first paint on revisit */
+function bootstrapList(): { rows: Product[]; total: number; lastPage: number } | null {
+  const snap = readSS<{ rows: Product[]; total: number; lastPage: number; at: number }>(SS_LIST_KEY);
+  if (!snap?.rows?.length) return null;
+  // Accept up to 10 min old for instant paint
+  if (Date.now() - (snap.at || 0) > 10 * 60_000) return null;
+  return { rows: snap.rows, total: snap.total, lastPage: snap.lastPage || 1 };
+}
+
+function bootstrapStats(): Stats | null {
+  const snap = readSS<{ data: Stats; at: number }>(SS_STATS_KEY);
+  if (!snap?.data) return null;
+  if (Date.now() - (snap.at || 0) > 10 * 60_000) return null;
+  return snap.data;
+}
+
+function bootstrapMeta(): {
+  categories: Category[];
+  warehouses: Warehouse[];
+  suppliers: Supplier[];
+} | null {
+  const snap = readSS<{
+    data: { categories: Category[]; warehouses: Warehouse[]; suppliers: Supplier[] };
+    at: number;
+  }>(SS_META_KEY);
+  if (!snap?.data) return null;
+  if (Date.now() - (snap.at || 0) > 30 * 60_000) return null;
+  return snap.data;
+}
+
+type SharedMe = { entry: { data: any; at: number } | null; inflight: Promise<any> | null };
+function sharedMeStore(): SharedMe {
+  const g = globalThis as unknown as { __saMeCache?: SharedMe };
+  if (!g.__saMeCache) g.__saMeCache = { entry: null, inflight: null };
+  return g.__saMeCache;
+}
+
+async function fetchMeShared(): Promise<any> {
+  const store = sharedMeStore();
+  if (store.entry && Date.now() - store.entry.at < INV_CACHE_TTL) {
+    return store.entry.data;
+  }
+  if (store.inflight) return store.inflight;
+  store.inflight = api
+    .get("/me")
+    .then((res) => {
+      const body = res?.data ?? res;
+      store.entry = { data: body, at: Date.now() };
+      return body;
+    })
+    .finally(() => {
+      store.inflight = null;
+    });
+  return store.inflight;
+}
+
+function extractArr<T>(json: any): T[] {
+  if (!json) return [];
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.data)) return json.data;
+  if (Array.isArray(json.data?.data)) return json.data.data;
+  return [];
+}
+
 function Inventory() {
   const [tab, setTab] = useState<Tab>("products");
   const [search, setSearch] = useState("");
@@ -296,17 +478,34 @@ function Inventory() {
   const [page, setPage] = useState(1);
   const pageSize = 50;
 
-  const [products, setProducts] = useState<Product[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [products, setProducts] = useState<Product[]>(() => {
+    if (listCache.size) {
+      const first = listCache.values().next().value;
+      if (first?.data?.rows?.length) return first.data.rows;
+    }
+    return bootstrapList()?.rows ?? [];
+  });
+  const [stats, setStats] = useState<Stats | null>(
+    () => statsCache.entry?.data ?? bootstrapStats()
+  );
+  const [loading, setLoading] = useState(() => {
+    if (listCache.size) return false;
+    return !(bootstrapList()?.rows?.length);
+  });
   const [error, setError] = useState<string | null>(null);
-  const [total, setTotal] = useState(0);
-  const [lastPage, setLastPage] = useState(1);
+  const [total, setTotal] = useState(() => bootstrapList()?.total ?? 0);
+  const [lastPage, setLastPage] = useState(() => bootstrapList()?.lastPage ?? 1);
 
-  // Meta data from dedicated endpoints (Location + Categories + Suppliers APIs)
-  const [allCategories, setAllCategories] = useState<Category[]>([]);
-  const [allWarehouses, setAllWarehouses] = useState<Warehouse[]>([]);
-  const [allSuppliers, setAllSuppliers] = useState<Supplier[]>([]);
+  const bootMeta = bootstrapMeta();
+  const [allCategories, setAllCategories] = useState<Category[]>(
+    () => metaCache.entry?.data.categories ?? bootMeta?.categories ?? []
+  );
+  const [allWarehouses, setAllWarehouses] = useState<Warehouse[]>(
+    () => metaCache.entry?.data.warehouses ?? bootMeta?.warehouses ?? []
+  );
+  const [allSuppliers, setAllSuppliers] = useState<Supplier[]>(
+    () => metaCache.entry?.data.suppliers ?? bootMeta?.suppliers ?? []
+  );
   const [metaLoading, setMetaLoading] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -318,9 +517,10 @@ function Inventory() {
 
   const [imageFiles, setImageFiles] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [existingImages, setExistingImages] = useState<ProductImage[]>([]);
+  const [deletingImageId, setDeletingImageId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Category create/edit modal
   const [catModalOpen, setCatModalOpen] = useState(false);
   const [catName, setCatName] = useState("");
   const [catSaving, setCatSaving] = useState(false);
@@ -339,7 +539,6 @@ function Inventory() {
   const [viewProduct, setViewProduct] = useState<Product | null>(null);
   const [viewImageIndex, setViewImageIndex] = useState(0);
 
-  // Debounce search
   useEffect(() => {
     const t = setTimeout(() => {
       setDebouncedSearch(search);
@@ -354,93 +553,108 @@ function Inventory() {
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
+  const fetchUserPermissions = useCallback(async (force = false) => {
+    const finish = (list: string[], persist = true) => {
+      if (persist) permsCache.entry = { data: list, at: Date.now() };
       setUserPermissions(list);
       setPermsLoaded(true);
+      try {
+        localStorage.setItem("permissions", JSON.stringify(list));
+      } catch {
+        /* ignore quota */
+      }
     };
 
-    // 1) localStorage (set at login) — same keys Roles / axios may rely on
-    try {
-      const rawKeys = [
-        "permissions",
-        "user_permissions",
-        "auth_permissions",
-        "user",
-        "auth_user",
-        "authUser",
-        "currentUser",
-      ];
-      for (const key of rawKeys) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
+    if (!force && permsCache.entry) {
+      setUserPermissions(permsCache.entry.data);
+      setPermsLoaded(true);
+      if (isFresh(permsCache.entry) && !force) {
+        // still revalidate in background below
+      }
+    } else {
+      try {
+        const raw = localStorage.getItem("permissions");
+        if (raw) {
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
-            finish(parsed);
-            return;
+            setUserPermissions(parsed);
+            setPermsLoaded(true);
           }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) {
-            finish(list);
-            return;
-          }
-        } catch {
-          /* not JSON */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    // 2) Auth endpoints via shared axios client (Bearer from interceptor)
-    let roleId: string | null = null;
-    for (const path of ["/user", "/me"]) {
-      try {
-        const { data: json } = await api.get(path);
-        const list = extractPermissions(json);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-        const u = json?.data ?? json?.user ?? json;
-        roleId = u?.role_id || u?.role?.id || json?.role_id || null;
-        if (list.length === 0 && !roleId) {
-          finish([]);
-          return;
-        }
-        break;
-      } catch (err: any) {
-        if (err.response?.status === 404) continue;
-        /* try next */
-      }
-    }
-
-    // 3) Load permissions via role (same route Roles.tsx uses)
-    if (roleId) {
-      try {
-        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-        const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-        if (Array.isArray(perms)) {
-          const names = perms
-            .map((p: { name?: string } | string) =>
-              typeof p === "string" ? p : p?.name
-            )
-            .filter(Boolean) as string[];
-          finish(names);
-          return;
         }
       } catch {
-        /* fall through */
+        /* ignore */
       }
     }
 
-    // 4) Dev fallback
-    finish(["*"]);
+    if (permsCache.inflight && !force) {
+      try {
+        finish(await permsCache.inflight);
+      } catch {
+        setPermsLoaded(true);
+      }
+      return;
+    }
+
+    const work = (async (): Promise<string[]> => {
+      let roleId: string | null = null;
+      try {
+        for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw);
+          const u = parsed?.data ?? parsed?.user ?? parsed;
+          roleId = u?.role_id || u?.role?.id || null;
+          if (roleId) break;
+        }
+      } catch {
+        /* ignore */
+      }
+
+      try {
+        const json = await fetchMeShared();
+        const u = (json as any)?.data ?? (json as any)?.user ?? json;
+        roleId = u?.role_id || u?.role?.id || (json as any)?.role_id || roleId;
+      } catch {
+        /* ignore */
+      }
+
+      if (roleId) {
+        try {
+          const { data: json } = await api.get(`/roles/${roleId}/permissions`);
+          const names = namesFromRolePermsPayload(json);
+          return names;
+        } catch {
+          /* fall through */
+        }
+      }
+
+      return [];
+    })();
+
+    permsCache.inflight = work;
+    try {
+      finish(await work);
+    } catch {
+      setPermsLoaded(true);
+    } finally {
+      permsCache.inflight = null;
+    }
   }, []);
 
+  // Soft revalidate permissions once on enter (uses cache if fresh; single-flight)
   useEffect(() => {
-    fetchUserPermissions();
+    void fetchUserPermissions(false);
+  }, [fetchUserPermissions]);
+
+  // Only re-fetch permissions when tab becomes visible AND cache is stale
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !isFresh(permsCache.entry)) {
+        void fetchUserPermissions(true);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [fetchUserPermissions]);
 
   const canView = can(userPermissions, "inventory.view", "inventories.view", "products.view");
@@ -453,176 +667,322 @@ function Inventory() {
     "categories.update",
     "categories.delete",
     "inventory.create",
-    "inventory.update",
-    "*"
+    "inventory.update"
   );
 
+  const fetchMeta = useCallback(async (force = false) => {
+    if (!force && isFresh(metaCache.entry)) {
+      const m = metaCache.entry.data;
+      setAllCategories(m.categories);
+      setAllWarehouses(m.warehouses);
+      setAllSuppliers(m.suppliers);
+      return;
+    }
+    if (!force && metaCache.entry) {
+      const m = metaCache.entry.data;
+      setAllCategories(m.categories);
+      setAllWarehouses(m.warehouses);
+      setAllSuppliers(m.suppliers);
+    }
+    if (metaCache.inflight && !force) {
+      try {
+        const m = await metaCache.inflight;
+        setAllCategories(m.categories);
+        setAllWarehouses(m.warehouses);
+        setAllSuppliers(m.suppliers);
+      } catch { /* owner handles */ }
+      return;
+    }
 
-  /** Load categories + warehouses + suppliers via shared axios api */
-  const fetchMeta = useCallback(async () => {
     setMetaLoading(true);
-    try {
+    const work = (async () => {
       const loadWarehouses = async (): Promise<Warehouse[]> => {
-        for (const path of ["/warehouses", "/locations/warehouses"]) {
+        // Only real endpoints — /locations/warehouses returns 404
+        const paths = [
+          "/warehouses?paginate=false&per_page=100",
+          "/warehouses?all=1&per_page=100",
+          "/warehouses",
+        ];
+        for (const path of paths) {
           try {
-            const { data: json } = await api.get(path);
-            const list = Array.isArray(json) ? json : json.data ?? [];
-            return list
-              .map((w: Warehouse) => ({
+            const { data: json } = await api.get(path, { timeout: 12000 });
+            const list = extractArr<Warehouse>(json)
+              .map((w) => ({
                 id: String(w.id),
-                code: w.code,
+                code: w.code ?? "",
                 name: w.name,
               }))
-              .sort((a: Warehouse, b: Warehouse) => a.code.localeCompare(b.code));
+              .filter((w) => w.id)
+              .sort((a, b) => (a.code || a.name || "").localeCompare(b.code || b.name || ""));
+            if (list.length > 0) return list;
+            if (json != null) return list;
           } catch {
-            /* try next */
+            /* try next path */
           }
         }
         return [];
       };
 
-      const [catRes, warehouses, supRes] = await Promise.all([
-        api.get("/categories").then((r) => r.data).catch((e) => {
-          console.warn("[Inventory] categories fetch failed:", e?.response?.status);
-          return null;
-        }),
+      // Categories first (usually fast) — paint filter options ASAP
+      const catRes = await api.get("/categories").then((r) => r.data).catch(() => null);
+      const categories = extractArr<Category>(catRes)
+        .map((c) => ({ id: String(c.id), name: c.name }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setAllCategories(categories);
+
+      // Warehouses + suppliers are slow — load in parallel after categories
+      const [warehouses, supRes] = await Promise.all([
         loadWarehouses(),
-        api.get("/suppliers", { params: { per_page: 100 } }).then((r) => r.data).catch((e) => {
-          console.warn("[Inventory] suppliers fetch failed:", e?.response?.status);
-          return null;
-        }),
+        api.get("/suppliers", { params: { per_page: 100 }, timeout: 12000 }).then((r) => r.data).catch(() => null),
       ]);
+      const suppliers = extractArr<Supplier>(supRes)
+        .map((s) => ({ id: String(s.id), name: s.name }))
+        .sort((a, b) => a.name.localeCompare(b.name));
 
-      if (catRes != null) {
-        const list: Category[] = Array.isArray(catRes) ? catRes : catRes.data ?? [];
-        setAllCategories(
-          list
-            .map((c) => ({ id: String(c.id), name: c.name }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-        );
-      }
+      return { categories, warehouses, suppliers };
+    })();
 
-      setAllWarehouses(warehouses);
-      if (warehouses.length === 0) {
-        console.warn("[Inventory] warehouses: no data from /warehouses or /locations/warehouses");
-      }
-
-      if (supRes != null) {
-        const list: Supplier[] = Array.isArray(supRes) ? supRes : supRes.data ?? [];
-        setAllSuppliers(
-          list
-            .map((s) => ({ id: String(s.id), name: s.name }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-        );
-      }
+    metaCache.inflight = work;
+    try {
+      const m = await work;
+      metaCache.entry = { data: m, at: Date.now() };
+      setAllCategories(m.categories);
+      setAllWarehouses(m.warehouses);
+      setAllSuppliers(m.suppliers);
+      writeSS(SS_META_KEY, { data: m, at: Date.now() });
     } catch (e) {
       console.error("[Inventory] meta fetch failed:", e);
     } finally {
+      metaCache.inflight = null;
       setMetaLoading(false);
     }
   }, []);
 
-  const fetchInventory = useCallback(async () => {
-    setLoading(true);
+  const bustListCaches = useCallback(() => {
+    listCache.clear();
+    statsCache.entry = null;
+  }, []);
+
+  const refreshStatsBg = useCallback(() => {
+    statsCache.entry = null;
+    api
+      .get("/inventories/stats")
+      .then((r) => {
+        const s = r.data as Stats;
+        statsCache.entry = { data: s, at: Date.now() };
+        setStats(s);
+      })
+      .catch(() => {});
+  }, []);
+
+  /** Abort previous in-flight list when filters change */
+  const listAbortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Fast list fetch strategy:
+   * 1. Paint any cached rows immediately (even stale) — no blank screen.
+   * 2. Phase A: fetch WITHOUT with_images (fast text/numbers) → paint ASAP.
+   * 3. Phase B: background fetch WITH with_images → merge thumbnails by id.
+   * 4. Stats run in parallel, never block the table.
+   */
+  const fetchInventory = useCallback(async (force = false) => {
     setError(null);
 
-    const params: Record<string, string | number> = {
+    const baseParams: Record<string, string | number | boolean> = {
       per_page: pageSize,
       page,
       sort: sortKey === "status" ? "sku" : sortKey,
       dir: sortAsc ? "asc" : "desc",
-      with: "images,primaryImage,category,warehouse,supplier",
+      paginate: true,
     };
-    if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
-    if (filterCat !== "all") params.category_id = filterCat;
-    if (filterWh !== "all") params.warehouse_id = filterWh;
-    if (filterStatus !== "all") params.status = filterStatus;
+    if (debouncedSearch.trim()) baseParams.search = debouncedSearch.trim();
+    if (filterCat !== "all") baseParams.category_id = filterCat;
+    if (filterWh !== "all") baseParams.warehouse_id = filterWh;
+    if (filterStatus !== "all") baseParams.status = filterStatus;
+
+    // Cache key ignores with_images so fast + image passes share one entry
+    const cacheKey = JSON.stringify(baseParams);
+    const cached = listCache.get(cacheKey);
+
+    // Instant paint from cache (fresh or stale)
+    if (cached) {
+      setProducts(cached.data.rows);
+      setTotal(cached.data.total);
+      setLastPage(cached.data.lastPage);
+      setLoading(false);
+      if (!force && isFresh(cached)) {
+        // Still refresh stats in background if needed
+        if (!isFresh(statsCache.entry)) refreshStatsBg();
+        return;
+      }
+    } else {
+      setProducts((prev) => {
+        if (prev.length === 0) setLoading(true);
+        return prev;
+      });
+    }
+
+    if (!force && isFresh(statsCache.entry)) {
+      setStats(statsCache.entry.data);
+    }
+
+    // Coalesce identical in-flight requests
+    if (!force && listInflight.has(cacheKey)) {
+      try {
+        const result = await listInflight.get(cacheKey)!;
+        setProducts(result.rows);
+        setTotal(result.total);
+        setLastPage(result.lastPage);
+      } catch {
+        /* owner */
+      }
+      setLoading(false);
+      return;
+    }
+
+    // Cancel previous list request when filters/page change
+    listAbortRef.current?.abort();
+    const ac = new AbortController();
+    listAbortRef.current = ac;
+
+    const parseList = (listJson: any): { rows: Product[]; total: number; lastPage: number } => {
+      const body = listJson;
+      const rawRows: Product[] = Array.isArray(body) ? body : body?.data ?? [];
+      const rows = rawRows.map((p) => normalizeProductImages(p));
+      const totalCount = Array.isArray(body) ? rows.length : body?.total ?? rows.length;
+      const pages = Array.isArray(body) ? 1 : body?.last_page ?? 1;
+      return { rows, total: totalCount, lastPage: pages };
+    };
+
+    // Phase A — fast list (no images)
+    const fastPromise = (async () => {
+      const { data: listJson } = await api.get("/inventories", {
+        params: { ...baseParams, with_images: false },
+        signal: ac.signal,
+      });
+      return parseList(listJson);
+    })();
+
+    listInflight.set(cacheKey, fastPromise);
+
+    // Stats in parallel (non-blocking for table)
+    const statsPromise = (async () => {
+      if (!force && statsCache.inflight) return statsCache.inflight;
+      if (!force && isFresh(statsCache.entry)) return statsCache.entry!.data;
+      const p = api.get("/inventories/stats").then((r) => r.data as Stats);
+      statsCache.inflight = p;
+      try {
+        const s = await p;
+        statsCache.entry = { data: s, at: Date.now() };
+        return s;
+      } finally {
+        statsCache.inflight = null;
+      }
+    })();
 
     try {
-      const [listSettled, statsSettled, imagesSettled] = await Promise.allSettled([
-        api.get("/inventories", { params }),
-        api.get("/inventories/stats"),
-        api.get("/product-images", { params: { per_page: 500 } }),
-      ]);
+      const listResult = await fastPromise;
+      if (ac.signal.aborted) return;
 
-      if (listSettled.status === "rejected") {
-        const e = listSettled.reason;
-        const status = e?.response?.status;
-        const body = e?.response?.data;
-        const msg =
-          (typeof body === "string" ? body : body?.message) ||
-          e?.message ||
-          "Failed to load inventory";
-        throw new Error(status ? `Inventories HTTP ${status}: ${String(msg).slice(0, 200)}` : msg);
-      }
-      if (statsSettled.status === "rejected") {
-        const e = statsSettled.reason;
-        const status = e?.response?.status;
-        throw new Error(`Stats HTTP ${status ?? "?"}: ${e?.message || "failed"}`);
-      }
-
-      const listJson: Paginated<Product> | Product[] = listSettled.value.data;
-      const statsJson: Stats = statsSettled.value.data;
-
-      let allImages: ProductImage[] = [];
-      if (imagesSettled.status === "fulfilled") {
-        const imgJson = imagesSettled.value.data;
-        allImages = Array.isArray(imgJson) ? imgJson : imgJson.data ?? [];
-      }
-
-      const imagesByProductId = new Map<string, ProductImage[]>();
-      const imagesBySku = new Map<string, ProductImage[]>();
-
-      allImages.forEach((img) => {
-        const pid = String(img.product_id ?? "");
-        if (pid) {
-          const list = imagesByProductId.get(pid) ?? [];
-          list.push(img);
-          imagesByProductId.set(pid, list);
-        }
-        const sku = img.product?.sku;
-        if (sku) {
-          const list = imagesBySku.get(sku) ?? [];
-          list.push(img);
-          imagesBySku.set(sku, list);
-        }
+      listCache.set(cacheKey, { data: listResult, at: Date.now(), key: cacheKey });
+      setProducts(listResult.rows);
+      setTotal(listResult.total);
+      setLastPage(listResult.lastPage);
+      setLoading(false);
+      writeSS(SS_LIST_KEY, {
+        rows: listResult.rows,
+        total: listResult.total,
+        lastPage: listResult.lastPage,
+        at: Date.now(),
       });
 
-      let rows = Array.isArray(listJson) ? listJson : listJson.data ?? [];
-      const totalCount = Array.isArray(listJson) ? rows.length : listJson.total ?? rows.length;
-      const pages = Array.isArray(listJson) ? 1 : listJson.last_page ?? 1;
+      // Stats resolve independently
+      void statsPromise
+        .then((s) => {
+          if (s && !ac.signal.aborted) {
+            setStats(s);
+            writeSS(SS_STATS_KEY, { data: s, at: Date.now() });
+          }
+        })
+        .catch(() => {});
 
-      rows = rows.map((p) => {
-        let imgs = imagesByProductId.get(String(p.id)) ?? [];
-        if (imgs.length === 0 && p.sku) {
-          imgs = imagesBySku.get(p.sku) ?? [];
+      // Phase B — enrich with images in background (does not block UI)
+      void (async () => {
+        try {
+          const { data: imgJson } = await api.get("/inventories", {
+            params: { ...baseParams, with_images: true },
+            signal: ac.signal,
+          });
+          if (ac.signal.aborted) return;
+          const withImgs = parseList(imgJson);
+          const byId = new Map(withImgs.rows.map((r) => [r.id, r]));
+
+          setProducts((prev) =>
+            prev.map((p) => {
+              const full = byId.get(p.id);
+              if (!full) return p;
+              return {
+                ...p,
+                images: full.images ?? p.images,
+                primary_image: full.primary_image ?? p.primary_image,
+              };
+            })
+          );
+
+          // Update cache with image-enriched rows
+          listCache.set(cacheKey, {
+            data: {
+              rows: withImgs.rows,
+              total: withImgs.total,
+              lastPage: withImgs.lastPage,
+            },
+            at: Date.now(),
+            key: cacheKey,
+          });
+          writeSS(SS_LIST_KEY, {
+            rows: withImgs.rows,
+            total: withImgs.total,
+            lastPage: withImgs.lastPage,
+            at: Date.now(),
+          });
+        } catch {
+          /* images are optional — table already visible */
         }
-        const primary = imgs.find((i) => i.is_primary) ?? (imgs.length > 0 ? imgs[0] : null);
-        return { ...p, images: imgs, primary_image: primary };
-      });
-
-      setProducts(rows);
-      setTotal(totalCount);
-      setLastPage(pages);
-      setStats(statsJson);
-    } catch (e) {
+      })();
+    } catch (e: any) {
+      if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || ac.signal.aborted) {
+        return;
+      }
       console.error("[Inventory] fetch failed:", e);
-      setError(e instanceof Error ? e.message : "Failed to load inventory");
-      setProducts([]);
-      setTotal(0);
-      setLastPage(1);
+      if (!cached) {
+        setError(e instanceof Error ? e.message : "Failed to load inventory");
+        setProducts([]);
+        setTotal(0);
+        setLastPage(1);
+      }
     } finally {
+      listInflight.delete(cacheKey);
       setLoading(false);
     }
-  }, [page, debouncedSearch, filterCat, filterWh, filterStatus, sortKey, sortAsc]);
+  }, [page, debouncedSearch, filterCat, filterWh, filterStatus, sortKey, sortAsc, refreshStatsBg]);
 
   useEffect(() => {
-    fetchInventory();
+    if (!invMetaBootstrapped) {
+      invMetaBootstrapped = true;
+      void fetchMeta();
+    } else if (metaCache.entry) {
+      setAllCategories(metaCache.entry.data.categories);
+      setAllWarehouses(metaCache.entry.data.warehouses);
+      setAllSuppliers(metaCache.entry.data.suppliers);
+    } else {
+      void fetchMeta();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void fetchInventory();
   }, [fetchInventory]);
-
-  useEffect(() => {
-    fetchMeta();
-  }, [fetchMeta]);
 
   useEffect(() => {
     return () => {
@@ -631,7 +991,6 @@ function Inventory() {
     };
   }, [imagePreviews]);
 
-  // Prefer full lists from API; fall back to values embedded on products
   const categories = useMemo((): Category[] => {
     if (allCategories.length > 0) return allCategories;
     const map = new Map<string, Category>();
@@ -678,7 +1037,6 @@ function Inventory() {
   const categoryCards = useMemo(() => {
     const map = new Map<string, { id: string; name: string; count: number; value: number }>();
 
-    // Seed with every category from the Categories API so empty ones still appear
     categories.forEach((c) => {
       map.set(c.id, { id: c.id, name: c.name, count: 0, value: 0 });
     });
@@ -722,6 +1080,100 @@ function Inventory() {
     imagePreviews.forEach((url) => URL.revokeObjectURL(url));
     setImageFiles([]);
     setImagePreviews([]);
+    setExistingImages([]);
+    setDeletingImageId(null);
+  };
+
+  /** Delete a saved product image — optimistic remove, rollback on failure. */
+  const removeExistingImage = async (img: ProductImage) => {
+    if (!img?.id) return;
+    setDeletingImageId(img.id);
+
+    const prevExisting = existingImages;
+    const prevProducts = products;
+    const prevView = viewProduct;
+
+    // Optimistic: remove from UI immediately
+    setExistingImages((prev) => prev.filter((i) => i.id !== img.id));
+    setProducts((prev) =>
+      prev.map((p) => {
+        if (!p.images?.some((i) => i.id === img.id) && p.primary_image?.id !== img.id) {
+          return p;
+        }
+        const images = (p.images ?? []).filter((i) => i.id !== img.id);
+        const primary =
+          p.primary_image?.id === img.id
+            ? images.find((i) => i.is_primary) ?? images[0] ?? null
+            : p.primary_image;
+        return { ...p, images, primary_image: primary };
+      })
+    );
+    setViewProduct((vp) => {
+      if (!vp) return vp;
+      if (!vp.images?.some((i) => i.id === img.id) && vp.primary_image?.id !== img.id) return vp;
+      const images = (vp.images ?? []).filter((i) => i.id !== img.id);
+      const primary =
+        vp.primary_image?.id === img.id
+          ? images.find((i) => i.is_primary) ?? images[0] ?? null
+          : vp.primary_image;
+      return { ...vp, images, primary_image: primary };
+    });
+    showToast("success", "Image deleted", "The product image was removed.");
+
+    try {
+      await api.delete(`/product-images/${img.id}`);
+    } catch (err: any) {
+      // Rollback
+      setExistingImages(prevExisting);
+      setProducts(prevProducts);
+      setViewProduct(prevView);
+      const body = err?.response?.data;
+      showToast(
+        "error",
+        "Delete failed",
+        (typeof body === "string" ? body : body?.message) || err?.message || "Could not delete image"
+      );
+    } finally {
+      setDeletingImageId(null);
+    }
+  };
+
+  /** Set an existing image as primary — optimistic, rollback on failure. */
+  const setImageAsPrimary = async (img: ProductImage) => {
+    if (!img?.id || img.is_primary) return;
+
+    const prevExisting = existingImages;
+    const prevProducts = products;
+
+    // Optimistic: mark as primary in UI immediately
+    setExistingImages((prev) =>
+      prev.map((i) => ({ ...i, is_primary: i.id === img.id }))
+    );
+    setProducts((prev) =>
+      prev.map((p) => {
+        if (!p.images?.some((i) => i.id === img.id)) return p;
+        const images = (p.images ?? []).map((i) => ({
+          ...i,
+          is_primary: i.id === img.id,
+        }));
+        const primary = images.find((i) => i.id === img.id) ?? null;
+        return { ...p, images, primary_image: primary };
+      })
+    );
+    showToast("success", "Primary image updated", "This image is now the primary.");
+
+    try {
+      await api.post(`/product-images/${img.id}/primary`);
+    } catch (err: any) {
+      setExistingImages(prevExisting);
+      setProducts(prevProducts);
+      const body = err?.response?.data;
+      showToast(
+        "error",
+        "Update failed",
+        (typeof body === "string" ? body : body?.message) || err?.message || "Could not set primary"
+      );
+    }
   };
 
   const openAdd = () => {
@@ -772,42 +1224,79 @@ function Inventory() {
     }
     setCatSaving(true);
     setCatError(null);
+
+    const editing = editingCategory;
+    const prevCategories = allCategories;
+
+    // Optimistic UI: update local list + close modal immediately
+    if (editing) {
+      setAllCategories((prev) =>
+        prev.map((c) => (c.id === editing.id ? { ...c, name } : c))
+      );
+      showToast("success", "Category updated", `"${name}" has been saved.`);
+    } else {
+      const tempId = `temp-cat-${Date.now()}`;
+      setAllCategories((prev) =>
+        [...prev, { id: tempId, name }].sort((a, b) => a.name.localeCompare(b.name))
+      );
+      showToast("success", "Category created", `"${name}" is now available.`);
+    }
+    setCatModalOpen(false);
+    setCatName("");
+    setEditingCategory(null);
+    setCatSaving(false);
+
     try {
-      if (editingCategory) {
-        await api.put(`/categories/${editingCategory.id}`, { name });
-        showToast("success", "Category updated", `"${name}" has been saved.`);
+      if (editing) {
+        await api.put(`/categories/${editing.id}`, { name });
       } else {
-        await api.post("/categories", { name });
-        showToast("success", "Category created", `"${name}" is now available.`);
+        const { data } = await api.post("/categories", { name });
+        const body = data?.data ?? data;
+        const realId = body?.id ? String(body.id) : null;
+        if (realId) {
+          setAllCategories((prev) =>
+            prev
+              .map((c) => (c.id.startsWith("temp-cat-") && c.name === name ? { id: realId, name } : c))
+              .sort((a, b) => a.name.localeCompare(b.name))
+          );
+        }
       }
-      closeCatModal();
-      await fetchMeta();
+      metaCache.entry = null;
+      void fetchMeta(true);
     } catch (err: any) {
+      setAllCategories(prevCategories);
       const body = err.response?.data;
       const msg =
         (body?.errors && Object.values(body.errors).flat().join(" ")) ||
         body?.message ||
         err.message ||
         "Failed to save category";
-      setCatError(msg);
-    } finally {
-      setCatSaving(false);
+      showToast("error", "Category save failed", msg);
     }
   };
 
   const handleDeleteCategory = async () => {
     if (!confirmDeleteCat) return;
+    const doomed = confirmDeleteCat;
     setDeletingCat(true);
+
+    const prevCategories = allCategories;
+    // Optimistic remove
+    setAllCategories((prev) => prev.filter((c) => c.id !== doomed.id));
+    setConfirmDeleteCat(null);
+    if (filterCat === doomed.id) setFilterCat("all");
+    showToast("success", "Category deleted", `"${doomed.name}" was removed.`);
+    setDeletingCat(false);
+
     try {
-      await api.delete(`/categories/${confirmDeleteCat.id}`);
-      showToast("success", "Category deleted", `"${confirmDeleteCat.name}" was removed.`);
-      setConfirmDeleteCat(null);
-      if (filterCat === confirmDeleteCat.id) {
-        setFilterCat("all");
-      }
-      await fetchMeta();
-      await fetchInventory();
+      await api.delete(`/categories/${doomed.id}`);
+      metaCache.entry = null;
+      listCache.clear();
+      statsCache.entry = null;
+      void fetchMeta(true);
+      void fetchInventory(true);
     } catch (err: any) {
+      setAllCategories(prevCategories);
       const body = err.response?.data;
       showToast(
         "error",
@@ -816,8 +1305,6 @@ function Inventory() {
           err.message ||
           "Could not delete category"
       );
-    } finally {
-      setDeletingCat(false);
     }
   };
 
@@ -832,11 +1319,41 @@ function Inventory() {
     setFormError(null);
     clearImages();
     setModalOpen(true);
+
+    const applyImages = (prod: Product) => {
+      const imgs = [...(prod.images ?? [])].sort((a, b) => {
+        if (a.is_primary && !b.is_primary) return -1;
+        if (!a.is_primary && b.is_primary) return 1;
+        return (a.sort_order ?? 0) - (b.sort_order ?? 0);
+      });
+      setExistingImages(imgs);
+    };
+
+    if (p.images && p.images.length > 0) {
+      applyImages(p);
+    } else {
+      api
+        .get(`/inventories/${p.id}`)
+        .then((res) => {
+          const full = (res.data?.data ?? res.data) as Product;
+          if (full?.images) applyImages(full);
+        })
+        .catch(() => {});
+    }
   };
 
   const openView = (p: Product) => {
     setViewProduct(p);
     setViewImageIndex(0);
+    if (!(p.images && p.images.length > 0) && p.id) {
+      api
+        .get(`/inventories/${p.id}`)
+        .then((res) => {
+          const full = res.data?.data ?? res.data;
+          if (full && full.id) setViewProduct(full as Product);
+        })
+        .catch(() => {});
+    }
   };
 
   const closeView = () => {
@@ -898,28 +1415,58 @@ function Inventory() {
     status: form.status || "active",
   });
 
-  const uploadImages = async (productId: string) => {
-    if (imageFiles.length === 0) return;
-    const formData = new FormData();
-    formData.append("product_id", productId);
-    imageFiles.forEach((file) => formData.append("images[]", file));
-    formData.append("is_primary", "1");
+  const enrichProduct = useCallback(
+    (raw: Partial<Product> & { id: string }): Product => {
+      const catId = raw.category_id ?? raw.category?.id ?? null;
+      const whId = raw.warehouse_id ?? raw.warehouse?.id ?? null;
+      const supId = raw.supplier_id ?? raw.supplier?.id ?? null;
+      const category =
+        raw.category ??
+        (catId ? allCategories.find((c) => c.id === String(catId)) ?? null : null);
+      const warehouse =
+        raw.warehouse ??
+        (whId ? allWarehouses.find((w) => w.id === String(whId)) ?? null : null);
+      const supplier =
+        raw.supplier ??
+        (supId ? allSuppliers.find((s) => s.id === String(supId)) ?? null : null);
+      const qty = num(raw.qty);
+      const price = num(raw.price);
+      const min = num(raw.min_stock);
+      let display_status: DisplayStatus = "active";
+      if (qty <= 0) display_status = "out-of-stock";
+      else if (qty < min) display_status = "low-stock";
+      return {
+        id: raw.id,
+        sku: raw.sku ?? "",
+        name: raw.name ?? "",
+        barcode: raw.barcode ?? null,
+        serial: raw.serial ?? null,
+        category_id: catId ? String(catId) : null,
+        warehouse_id: whId ? String(whId) : null,
+        supplier_id: supId ? String(supId) : null,
+        qty: raw.qty ?? 0,
+        min_stock: raw.min_stock ?? 0,
+        max_stock: raw.max_stock ?? 0,
+        price: raw.price ?? 0,
+        status: raw.status || "active",
+        display_status,
+        stock_value: qty * price,
+        category: category as Category | null,
+        warehouse: warehouse as Warehouse | null,
+        supplier: supplier as Supplier | null,
+        images: raw.images,
+        primary_image: raw.primary_image,
+      };
+    },
+    [allCategories, allWarehouses, allSuppliers]
+  );
 
-    try {
-      await api.post("/product-images", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-    } catch (err: any) {
-      const status = err.response?.status;
-      const body = err.response?.data;
-      const errText =
-        (typeof body === "string" ? body : body ? JSON.stringify(body) : "") ||
-        err.message ||
-        "upload failed";
-      throw new Error(`Image upload failed (${status ?? "?"}): ${String(errText).slice(0, 300)}`);
-    }
-  };
-
+  /**
+   * Create / Update product — optimistic UI.
+   * - UI updates immediately (list + close modal + toast).
+   * - API runs in background; on failure: rollback list + error toast.
+   * - Create uses a temporary id until the server returns the real one.
+   */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
@@ -930,10 +1477,31 @@ function Inventory() {
     }
 
     const payload = buildPayload();
+    const pendingImages = [...imageFiles];
     setSaving(true);
 
-    try {
-      if (modalMode === "add") {
+    if (modalMode === "add") {
+      // ── Optimistic create ──────────────────────────────────
+      const tempId = `temp-${Date.now()}`;
+      const optimisticRow = enrichProduct({
+        ...payload,
+        id: tempId,
+        images: [],
+        primary_image: null,
+      });
+
+      const prevRows = products;
+      const prevTotal = total;
+
+      setProducts((prev) => [optimisticRow, ...prev]);
+      setTotal((t) => t + 1);
+      setModalOpen(false);
+      setForm(emptyForm());
+      clearImages();
+      showToast("success", "Product added", `${payload.name} is now in inventory.`);
+      setSaving(false);
+
+      try {
         let created: any;
         try {
           const { data } = await api.post("/inventories", payload);
@@ -952,52 +1520,115 @@ function Inventory() {
           }
         }
 
-        const productId = created.id ?? created.data?.id;
+        const body = created?.data ?? created;
+        const productId = body?.id ?? created?.id;
         if (!productId) throw new Error("Product created but no ID returned");
 
-        if (imageFiles.length > 0) {
+        // Upload images after we have a real id
+        if (pendingImages.length > 0) {
+          const formData = new FormData();
+          formData.append("product_id", String(productId));
+          pendingImages.forEach((file) => formData.append("images[]", file));
+          formData.append("is_primary", "1");
           try {
-            await uploadImages(productId);
+            await api.post("/product-images", formData, {
+              headers: { "Content-Type": "multipart/form-data" },
+            });
           } catch (imgErr) {
-            try {
-              await api.delete(`/inventories/${productId}`);
-            } catch {
-              /* ignore rollback failure */
-            }
-            const reason = imgErr instanceof Error ? imgErr.message : "Failed to upload image";
-            throw new Error(`Product was not saved because the image upload failed: ${reason}`);
+            // Product exists without images — keep row, warn user
+            console.error("[Inventory] image upload after create failed:", imgErr);
+            showToast(
+              "error",
+              "Images not uploaded",
+              "Product was saved but image upload failed. You can add images via Edit."
+            );
           }
         }
 
-        showToast("success", "Product added", `${payload.name} is now in inventory.`);
-      } else if (modalMode === "edit" && editingId) {
-        try {
-          await api.put(`/inventories/${editingId}`, payload);
-        } catch (err: any) {
-          const body = err.response?.data;
-          if (body?.errors) {
-            throw new Error(Object.values(body.errors).flat().join(" ") || body.message);
-          }
-          throw new Error(body?.message || err.message || "Update failed");
-        }
-
-        if (imageFiles.length > 0) {
-          await uploadImages(editingId);
-        }
-
-        showToast("success", "Product updated", `${payload.name} has been saved.`);
+        // Replace temp row with server data
+        const realRow = enrichProduct({ ...payload, ...body, id: String(productId) });
+        setProducts((prev) => prev.map((p) => (p.id === tempId ? realRow : p)));
+        bustListCaches();
+        refreshStatsBg();
+      } catch (err: any) {
+        // Rollback optimistic create
+        setProducts(prevRows);
+        setTotal(prevTotal);
+        console.error("[Inventory] create failed:", err);
+        const body = err?.response?.data;
+        const msg =
+          (body?.errors && Object.values(body.errors).flat().join(" ")) ||
+          body?.message ||
+          (err instanceof Error ? err.message : null) ||
+          "Failed to save product";
+        showToast("error", "Create failed", msg);
       }
+      return;
+    }
 
+    if (modalMode === "edit" && editingId) {
+      // ── Optimistic edit ────────────────────────────────────
+      const prevSnapshot = products.find((p) => p.id === editingId);
+      const optimistic = enrichProduct({
+        ...(prevSnapshot || {}),
+        ...payload,
+        id: editingId,
+      });
+
+      setProducts((prev) => prev.map((p) => (p.id === editingId ? optimistic : p)));
       setModalOpen(false);
       setForm(emptyForm());
       clearImages();
-      setPage(1);
-      await fetchInventory();
-    } catch (err) {
-      console.error("[Inventory] save failed:", err);
-      setFormError(err instanceof Error ? err.message : "Failed to save product");
-    } finally {
+      showToast("success", "Product updated", `${payload.name} has been saved.`);
       setSaving(false);
+
+      try {
+        const { data } = await api.put(`/inventories/${editingId}`, payload);
+        const body = data?.data ?? data;
+
+        if (pendingImages.length > 0) {
+          const formData = new FormData();
+          formData.append("product_id", editingId);
+          pendingImages.forEach((file) => formData.append("images[]", file));
+          formData.append("is_primary", existingImages.length === 0 ? "1" : "0");
+          try {
+            await api.post("/product-images", formData, {
+              headers: { "Content-Type": "multipart/form-data" },
+            });
+          } catch (imgErr) {
+            console.error("[Inventory] image upload after update failed:", imgErr);
+            showToast(
+              "error",
+              "Images not uploaded",
+              "Product was saved but image upload failed."
+            );
+          }
+        }
+
+        // Merge authoritative server body
+        if (body && body.id) {
+          setProducts((prev) =>
+            prev.map((p) =>
+              p.id === editingId ? enrichProduct({ ...optimistic, ...body }) : p
+            )
+          );
+        }
+        bustListCaches();
+        refreshStatsBg();
+      } catch (err: any) {
+        // Rollback optimistic edit
+        if (prevSnapshot) {
+          setProducts((prev) => prev.map((p) => (p.id === editingId ? prevSnapshot : p)));
+        }
+        console.error("[Inventory] update failed:", err);
+        const body = err?.response?.data;
+        const msg =
+          (body?.errors && Object.values(body.errors).flat().join(" ")) ||
+          body?.message ||
+          (err instanceof Error ? err.message : null) ||
+          "Failed to update product";
+        showToast("error", "Update failed", msg);
+      }
     }
   };
 
@@ -1007,13 +1638,23 @@ function Inventory() {
       return;
     }
     if (!confirmDelete) return;
+    const doomed = confirmDelete;
     setDeleting(true);
+
+    const prevRows = products;
+    const prevTotal = total;
+    setProducts((prev) => prev.filter((p) => p.id !== doomed.id));
+    setTotal((t) => Math.max(0, t - 1));
+    setConfirmDelete(null);
+    showToast("success", "Product deleted", `${doomed.name} was removed.`);
+
     try {
-      await api.delete(`/inventories/${confirmDelete.id}`);
-      showToast("success", "Product deleted", `${confirmDelete.name} was removed.`);
-      setConfirmDelete(null);
-      await fetchInventory();
+      await api.delete(`/inventories/${doomed.id}`);
+      bustListCaches();
+      refreshStatsBg();
     } catch (err: any) {
+      setProducts(prevRows);
+      setTotal(prevTotal);
       console.error("[Inventory] delete failed:", err);
       const body = err.response?.data;
       showToast(
@@ -1517,22 +2158,59 @@ function Inventory() {
               <div className="form-field full" style={{ marginBottom: 16 }}>
                 <label>Product Images</label>
                 <div className="upload-zone">
-                  {imagePreviews.length > 0 && (
+                  {(existingImages.length > 0 || imagePreviews.length > 0) && (
                     <div className="preview-row">
+                      {existingImages.map((img) => {
+                        const url = normalizeImageUrl(img.image_url);
+                        return (
+                          <div key={img.id} className="preview-item">
+                            {url ? (
+                              <img src={url} alt={img.file_name || "product"} />
+                            ) : (
+                              <div className="skel" style={{ width: "100%", height: "100%" }} />
+                            )}
+                            <button
+                              type="button"
+                              className="rm"
+                              title="Delete image"
+                              disabled={deletingImageId === img.id || saving}
+                              onClick={() => removeExistingImage(img)}
+                            >
+                              {deletingImageId === img.id ? "…" : "×"}
+                            </button>
+                            {img.is_primary ? (
+                              <span className="primary-tag">Primary</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="primary-tag"
+                                style={{ cursor: "pointer", border: "none" }}
+                                title="Set as primary"
+                                disabled={saving}
+                                onClick={() => setImageAsPrimary(img)}
+                              >
+                                Set primary
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
                       {imagePreviews.map((url, idx) => (
-                        <div key={idx} className="preview-item">
-                          <img src={url} alt={`preview-${idx}`} />
-                          <button type="button" className="rm" onClick={() => removeImage(idx)}>
+                        <div key={`new-${idx}`} className="preview-item">
+                          <img src={url} alt={`new-${idx}`} />
+                          <button type="button" className="rm" onClick={() => removeImage(idx)} disabled={saving}>
                             ×
                           </button>
-                          {idx === 0 && <span className="primary-tag">Primary</span>}
+                          {existingImages.length === 0 && idx === 0 && (
+                            <span className="primary-tag">Primary</span>
+                          )}
                         </div>
                       ))}
                     </div>
                   )}
                   <label className="upload-btn">
                     <IconUpload />
-                    {imageFiles.length ? "Add more images" : "Upload images"}
+                    {existingImages.length || imageFiles.length ? "Add more images" : "Upload images"}
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -1540,9 +2218,10 @@ function Inventory() {
                       multiple
                       onChange={handleImageSelect}
                       style={{ display: "none" }}
+                      disabled={saving}
                     />
                   </label>
-                  <div className="upload-hint">JPEG, PNG, GIF, WebP · max 5MB each</div>
+                  <div className="upload-hint">JPEG, PNG, GIF, WebP · max 5MB each · click × to delete · Set primary on existing images</div>
                 </div>
               </div>
 
