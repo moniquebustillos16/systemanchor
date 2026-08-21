@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import "../css/System.css";
+
+/* ------------------------------------------------------------------ */
+/* Icons (static – never re-create)                                   */
+/* ------------------------------------------------------------------ */
 
 const svg = {
   viewBox: "0 0 24 24",
@@ -94,24 +98,9 @@ const IconGrid = () => (
   </svg>
 );
 
-type RolePreset = {
-  name: string;
-  description: string;
-  scope: "system" | "warehouse" | "readonly";
-};
-
-const ROLE_PRESETS: RolePreset[] = [
-  { name: "Admin", description: "Full system-wide access to all warehouses and modules.", scope: "system" },
-  { name: "Warehouse Manager", description: "Full access to assigned warehouse(s). Cannot manage users or system settings.", scope: "warehouse" },
-  { name: "Shift Supervisor", description: "Floor operations with read access to orders and reports.", scope: "warehouse" },
-  { name: "Warehouse Operator", description: "Day-to-day floor work: movements, receiving, shipping.", scope: "warehouse" },
-  { name: "Receiving Clerk", description: "Inbound receiving, verification, and put-away.", scope: "warehouse" },
-  { name: "Picker / Packer", description: "Pick, pack, label, and prepare outbound shipments.", scope: "warehouse" },
-  { name: "Sales Coordinator", description: "Sales orders, customers, shipping, and returns.", scope: "warehouse" },
-  { name: "Inventory Controller", description: "Stock levels, locations, counts, and adjustments.", scope: "warehouse" },
-  { name: "Quality Inspector", description: "Inspections, quarantine, and quality releases.", scope: "warehouse" },
-  { name: "Viewer", description: "Read-only access to dashboards and reports.", scope: "readonly" },
-];
+/* ------------------------------------------------------------------ */
+/* Types & constants                                                  */
+/* ------------------------------------------------------------------ */
 
 const CRUD_ACTIONS = ["view", "create", "update", "delete"] as const;
 type CrudAction = (typeof CRUD_ACTIONS)[number];
@@ -122,6 +111,9 @@ type Role = {
   description: string | null;
   created_at?: string;
   status?: "active" | "inactive";
+  /** Populated when backend is called with with_counts=1 */
+  permission_count?: number;
+  user_count?: number;
 };
 
 type Permission = {
@@ -158,23 +150,134 @@ type PermGroup = {
   key: string;
   label: string;
   description: string;
+  section: string;
+  sectionOrder: number;
+  moduleOrder: number;
   actions: Partial<Record<CrudAction, Permission>>;
   extras: Permission[];
 };
+
+/** Canonical nav sections & modules — matches sidebar order */
+const MODULE_CATALOG: {
+  section: string;
+  sectionOrder: number;
+  modules: { key: string; label: string; aliases: string[]; description: string }[];
+}[] = [
+  {
+    section: "MAIN",
+    sectionOrder: 0,
+    modules: [
+      { key: "dashboard", label: "Dashboard", aliases: ["dashboard", "home", "overview"], description: "Main dashboard and overview widgets" },
+      { key: "inventory", label: "Inventory", aliases: ["inventory", "stock", "items", "products", "skus"], description: "Stock levels, items, and product catalog" },
+      { key: "stock_movements", label: "Stock Movements", aliases: ["stock_movements", "stock_movement", "movements", "transfers", "adjustments"], description: "Transfers, adjustments, and stock history" },
+    ],
+  },
+  {
+    section: "ORDERS",
+    sectionOrder: 1,
+    modules: [
+      { key: "purchase_orders", label: "Purchase Orders", aliases: ["purchase_orders", "purchase_order", "po", "purchases"], description: "Inbound purchase orders and suppliers buys" },
+      { key: "sales_orders", label: "Sales Orders", aliases: ["sales_orders", "sales_order", "so", "orders", "sales"], description: "Customer sales orders and fulfillment" },
+      { key: "receiving", label: "Receiving", aliases: ["receiving", "receipts", "inbound"], description: "Inbound receiving and put-away" },
+      { key: "shipping", label: "Shipping", aliases: ["shipping", "shipments", "outbound", "dispatch"], description: "Outbound shipping and carrier handoff" },
+      { key: "returns", label: "Returns", aliases: ["returns", "rma", "return"], description: "Customer and supplier returns" },
+    ],
+  },
+  {
+    section: "WAREHOUSE",
+    sectionOrder: 2,
+    modules: [
+      { key: "locations", label: "Locations", aliases: ["locations", "location", "bins", "zones"], description: "Bins, zones, and warehouse locations" },
+      { key: "capacity", label: "Capacity", aliases: ["capacity", "space", "utilization"], description: "Space utilization and capacity planning" },
+      { key: "cycle_count", label: "Cycle Count", aliases: ["cycle_count", "cycle_counts", "counts", "stocktake", "physical_count"], description: "Cycle counts and stocktakes" },
+    ],
+  },
+  {
+    section: "PARTNERS",
+    sectionOrder: 3,
+    modules: [
+      { key: "suppliers", label: "Suppliers", aliases: ["suppliers", "supplier", "vendors", "vendor"], description: "Supplier master data" },
+      { key: "customers", label: "Customers", aliases: ["customers", "customer", "clients"], description: "Customer master data" },
+    ],
+  },
+  {
+    section: "INSIGHTS",
+    sectionOrder: 4,
+    modules: [
+      { key: "reports", label: "Reports", aliases: ["reports", "report"], description: "Operational and financial reports" },
+      { key: "analytics", label: "Analytics", aliases: ["analytics", "insights", "metrics"], description: "Analytics and performance insights" },
+    ],
+  },
+  {
+    section: "SYSTEM",
+    sectionOrder: 5,
+    modules: [
+      { key: "users", label: "Users", aliases: ["users", "user", "accounts"], description: "User accounts and access assignment" },
+      { key: "roles", label: "Roles", aliases: ["roles", "role", "permissions", "permission", "access"], description: "Roles and permission management" },
+      { key: "settings", label: "Settings", aliases: ["settings", "setting", "config", "configuration", "system"], description: "System configuration and preferences" },
+    ],
+  },
+];
+
+const MODULE_LOOKUP: Map<string, { section: string; sectionOrder: number; moduleOrder: number; label: string; description: string; key: string }> = (() => {
+  const map = new Map<string, { section: string; sectionOrder: number; moduleOrder: number; label: string; description: string; key: string }>();
+  for (const sec of MODULE_CATALOG) {
+    sec.modules.forEach((m, idx) => {
+      const meta = {
+        section: sec.section,
+        sectionOrder: sec.sectionOrder,
+        moduleOrder: idx,
+        label: m.label,
+        description: m.description,
+        key: m.key,
+      };
+      map.set(m.key, meta);
+      for (const a of m.aliases) map.set(a, meta);
+    });
+  }
+  return map;
+})();
+
+function resolveModule(groupRaw: string): {
+  section: string;
+  sectionOrder: number;
+  moduleOrder: number;
+  label: string;
+  description: string;
+  key: string;
+} {
+  const norm = groupRaw.toLowerCase().replace(/\s+/g, "_").replace(/[.-]+/g, "_");
+  const direct = MODULE_LOOKUP.get(norm);
+  if (direct) return direct;
+
+  // Fuzzy: match if any alias is contained in the group or vice versa
+  for (const [alias, meta] of MODULE_LOOKUP) {
+    if (norm.includes(alias) || alias.includes(norm)) return meta;
+  }
+
+  const label = groupRaw
+    .replace(/[._-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+  return {
+    section: "OTHER",
+    sectionOrder: 99,
+    moduleOrder: 999,
+    label: label || "Other",
+    description: `${label || "Other"} module`,
+    key: norm || "other",
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Pure helpers (stable, no React)                                    */
+/* ------------------------------------------------------------------ */
 
 function roleInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-function titleCase(s: string): string {
-  return s
-    .replace(/[._-]+/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .trim();
 }
 
 function normalizeAction(raw: string): CrudAction | null {
@@ -203,36 +306,78 @@ function parsePermName(name: string): { group: string; action: string; crud: Cru
   return { group: group || parts[0], action: actionRaw.toLowerCase(), crud };
 }
 
-function getPreset(name: string): RolePreset | null {
+/** Lightweight scope hint from role name (no preset list). */
+function scopeFromName(name: string): "system" | "warehouse" | "readonly" | "custom" {
   const key = name.trim().toLowerCase();
-  return (
-    ROLE_PRESETS.find((p) => p.name.toLowerCase() === key) ||
-    ROLE_PRESETS.find((p) => key.includes(p.name.toLowerCase())) ||
-    null
-  );
+  if (key === "admin" || key.includes("admin") || key.includes("system")) return "system";
+  if (key === "viewer" || key.includes("viewer") || key.includes("read only") || key.includes("readonly")) return "readonly";
+  if (
+    key.includes("warehouse") ||
+    key.includes("operator") ||
+    key.includes("picker") ||
+    key.includes("packer") ||
+    key.includes("receiving") ||
+    key.includes("supervisor") ||
+    key.includes("inventory") ||
+    key.includes("sales")
+  )
+    return "warehouse";
+  return "custom";
 }
 
-function scopeLabel(scope: RolePreset["scope"] | undefined): string {
+/** True when the selected role is Admin — SYSTEM section is locked & always on. */
+function isAdminRole(name: string | null | undefined): boolean {
+  if (!name) return false;
+  const key = name.trim().toLowerCase();
+  return key === "admin" || key === "administrator" || key === "system admin" || key === "system administrator";
+}
+
+function scopeLabel(scope: "system" | "warehouse" | "readonly" | "custom" | undefined): string {
   if (scope === "system") return "SYSTEM";
   if (scope === "readonly") return "READ ONLY";
   if (scope === "warehouse") return "WAREHOUSE";
   return "CUSTOM";
 }
 
+/** All permission IDs that belong to the SYSTEM section (Users, Roles, Settings). */
+function systemPermissionIds(groups: PermGroup[]): string[] {
+  const ids: string[] = [];
+  for (const g of groups) {
+    if (g.section !== "SYSTEM") continue;
+    for (const a of CRUD_ACTIONS) {
+      const p = g.actions[a];
+      if (p?.id) ids.push(p.id);
+    }
+    for (const p of g.extras) {
+      if (p?.id) ids.push(p.id);
+    }
+  }
+  return ids;
+}
+
 function buildGroups(perms: Permission[]): PermGroup[] {
   const map = new Map<string, PermGroup>();
+
+  // Only groups that exist in the API catalog — never invent modules
+  // (e.g. there is no quality.* permission in the DB).
   for (const p of perms) {
     const { group, crud } = parsePermName(p.name);
-    const key = group.toLowerCase().replace(/\s+/g, "_");
+    const meta = resolveModule(group);
+    const key = meta.key;
+
     if (!map.has(key)) {
       map.set(key, {
         key,
-        label: titleCase(group),
-        description: p.description || `${titleCase(group)} module`,
+        label: meta.label,
+        description: meta.description,
+        section: meta.section,
+        sectionOrder: meta.sectionOrder,
+        moduleOrder: meta.moduleOrder,
         actions: {},
         extras: [],
       });
     }
+
     const g = map.get(key)!;
     if (crud) {
       if (!g.actions[crud]) g.actions[crud] = p;
@@ -240,11 +385,16 @@ function buildGroups(perms: Permission[]): PermGroup[] {
     } else {
       g.extras.push(p);
     }
-    if (p.description && g.description === `${titleCase(group)} module`) {
+    if (p.description && (g.description === meta.description || g.description.endsWith(" module"))) {
       g.description = p.description;
     }
   }
-  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.sectionOrder !== b.sectionOrder) return a.sectionOrder - b.sectionOrder;
+    if (a.moduleOrder !== b.moduleOrder) return a.moduleOrder - b.moduleOrder;
+    return a.label.localeCompare(b.label);
+  });
 }
 
 function warehousesFromUsers(users: RoleUser[], allWarehouses: Warehouse[]): Warehouse[] {
@@ -270,16 +420,235 @@ function warehousesFromUsers(users: RoleUser[], allWarehouses: Warehouse[]): War
   return Array.from(seen.values());
 }
 
+/**
+ * Normalize API list payloads from any of:
+ *   T[] | { data: T[] } | { data: { data: T[] } } | { success, data: T[] }
+ * Also accepts a full Axios response ({ data: body }).
+ */
+function extractList<T>(json: any): T[] {
+  if (!json) return [];
+  // Full Axios response accidentally passed through
+  if (json.data !== undefined && json.status !== undefined && json.headers !== undefined) {
+    return extractList<T>(json.data);
+  }
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.data)) return json.data;
+  if (Array.isArray(json.data?.data)) return json.data.data;
+  if (Array.isArray(json.roles)) return json.roles;
+  if (Array.isArray(json.permissions)) return json.permissions;
+  // Laravel paginator shape
+  if (Array.isArray(json.data?.data)) return json.data.data;
+  return [];
+}
+
+/* ------------------------------------------------------------------ */
+/* Module-level cache + in-flight map (survives Strict Mode remounts) */
+/* ------------------------------------------------------------------ */
+
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes – role/perm catalogs change rarely
+
+type CacheEntry<T> = { data: T; at: number };
+
+const rolesCache: { entry: CacheEntry<Role[]> | null; inflight: Promise<Role[]> | null } = {
+  entry: null,
+  inflight: null,
+};
+const permissionsCache: { entry: CacheEntry<Permission[]> | null; inflight: Promise<Permission[]> | null } = {
+  entry: null,
+  inflight: null,
+};
+const warehousesCache: { entry: CacheEntry<Warehouse[]> | null; inflight: Promise<Warehouse[]> | null } = {
+  entry: null,
+  inflight: null,
+};
+const rolePermsCache = new Map<string, CacheEntry<Set<string>>>();
+const rolePermsInflight = new Map<string, Promise<Set<string>>>();
+const roleUsersCache = new Map<string, CacheEntry<RoleUser[]>>();
+const roleUsersInflight = new Map<string, Promise<RoleUser[]>>();
+const ROLE_USERS_TTL_MS = 60_000; // 1 min – users change more often than catalogs
+
+/** Prevents Strict Mode / remount from firing duplicate bootstrap network calls */
+let catalogBootstrapStarted = false;
+
+/** Remember which permissions-sync endpoint works so later saves hit only one URL.
+ *  Prefer POST /sync first — Laravel custom actions are almost always POST, and the
+ *  previous PUT-first probe caused a fast 405 then an 8s successful POST.
+ *  Persist the winner in sessionStorage so a full page reload does not re-probe. */
+type SyncRoute = { method: "put" | "post"; path: "sync" | "plain" };
+
+const SYNC_ROUTE_STORAGE_KEY = "rac.knownSyncRoute";
+
+function loadKnownSyncRoute(): SyncRoute | null {
+  try {
+    const raw = sessionStorage.getItem(SYNC_ROUTE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SyncRoute;
+    // Only accept POST — a stored PUT caused: fast 405 (~0.2ms) then slow POST (~7–10s).
+    if (parsed.method === "post" && (parsed.path === "sync" || parsed.path === "plain")) {
+      return parsed;
+    }
+    // Drop stale PUT (or anything else) from older builds
+    sessionStorage.removeItem(SYNC_ROUTE_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function persistKnownSyncRoute(route: SyncRoute | null) {
+  try {
+    // Never persist PUT — this API's sync route is POST-only
+    if (route && route.method === "post") {
+      sessionStorage.setItem(SYNC_ROUTE_STORAGE_KEY, JSON.stringify(route));
+    } else {
+      sessionStorage.removeItem(SYNC_ROUTE_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Your API uses POST /roles/{id}/permissions/sync (PUT returns 405 in ~0ms then POST takes ~7–10s). */
+const DEFAULT_SYNC_ROUTE: SyncRoute = { method: "post", path: "sync" };
+let knownSyncRoute: SyncRoute = loadKnownSyncRoute() ?? DEFAULT_SYNC_ROUTE;
+
+function syncUrl(roleId: string, path: "sync" | "plain"): string {
+  return path === "sync" ? `/roles/${roleId}/permissions/sync` : `/roles/${roleId}/permissions`;
+}
+
+/** Soft timeout — backend sync can be slow; UI stays optimistic so the page does not freeze. */
+const SAVE_TIMEOUT_MS = 30_000;
+
+/**
+ * After role-permission sync: drop any client-side permission snapshots and tell
+ * Sidebar (and other listeners) to re-fetch /me so the nav matches the new grants.
+ */
+function notifyPermissionsChanged() {
+  // Only permission snapshots — do NOT wipe auth tokens / user session objects
+  const keys = ["permissions", "user_permissions", "auth_permissions"];
+  for (const key of keys) {
+    try {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
+    } catch {
+      /* ignore */
+    }
+  }
+  // Shared /me cache used by Sidebar + Inventory
+  try {
+    const g = globalThis as unknown as {
+      __saMeCache?: { entry: unknown; inflight: unknown };
+    };
+    if (g.__saMeCache) {
+      g.__saMeCache.entry = null;
+      g.__saMeCache.inflight = null;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.dispatchEvent(new Event("sa-permissions-refresh"));
+  } catch {
+    /* ignore */
+  }
+}
+
+function isFresh<T>(entry: CacheEntry<T> | null): entry is CacheEntry<T> {
+  return !!entry && Date.now() - entry.at < CACHE_TTL_MS;
+}
+
+/** Clean user-facing error; empty string = cancelled / ignore */
+function getErrorMessage(err: unknown, fallback = "Something went wrong"): string {
+  if (!err) return fallback;
+  const e = err as any;
+  if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError") {
+    return "";
+  }
+  const msg =
+    e?.response?.data?.message ||
+    (e?.response?.data?.errors &&
+      Object.values(e.response.data.errors).flat().filter(Boolean).join(" ")) ||
+    e?.message;
+  return typeof msg === "string" && msg.trim() ? msg.trim() : fallback;
+}
+
+/** Hydrate counts + selection from a roles list without blocking paint */
+function countsFromRoles(list: Role[]) {
+  const nextPerm: Record<string, number> = {};
+  const nextUser: Record<string, number> = {};
+  for (const r of list) {
+    if (typeof r.permission_count === "number") nextPerm[r.id] = r.permission_count;
+    if (typeof r.user_count === "number") nextUser[r.id] = r.user_count;
+  }
+  return { nextPerm, nextUser };
+}
+
+/* ------------------------------------------------------------------ */
+/* Memoized role card (avoids re-work on every parent render)         */
+/* ------------------------------------------------------------------ */
+
+type RoleCardProps = {
+  role: Role;
+  active: boolean;
+  permCount?: number;
+  userCount?: number;
+  onSelect: (id: string) => void;
+};
+
+const RoleCard = React.memo(function RoleCard({ role, active, permCount, userCount, onSelect }: RoleCardProps) {
+  const scope = scopeFromName(role.name);
+  return (
+    <button
+      type="button"
+      className={`rac-role-card ${active ? "active" : ""}`}
+      onClick={() => onSelect(role.id)}
+    >
+      <div className="rac-role-icon">{roleInitials(role.name)}</div>
+      <div className="rac-role-body">
+        <div className="rac-role-title">
+          <span className="fw-600">{role.name}</span>
+          <span className={`role-scope-badge scope-${scope}`}>
+            {scopeLabel(scope)}
+          </span>
+        </div>
+        <div className="rac-role-meta">
+          <span>
+            <IconLock /> {permCount !== undefined ? permCount : "—"} permissions
+          </span>
+          <span>
+            <IconUsers /> {userCount !== undefined ? userCount : "—"} users
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+});
+
+/* ------------------------------------------------------------------ */
+/* Component                                                          */
+/* ------------------------------------------------------------------ */
+
 function Roles() {
-  const [roles, setRoles] = useState<Role[]>([]);
-  const [permissions, setPermissions] = useState<Permission[]>([]);
-  const [allWarehouses, setAllWarehouses] = useState<Warehouse[]>([]);
+  /* ---- core data – seed from module cache for instant first paint ---- */
+  const [roles, setRoles] = useState<Role[]>(() =>
+    rolesCache.entry ? rolesCache.entry.data : []
+  );
+  const [permissions, setPermissions] = useState<Permission[]>(() =>
+    permissionsCache.entry ? permissionsCache.entry.data : []
+  );
+  const [allWarehouses, setAllWarehouses] = useState<Warehouse[]>(() =>
+    warehousesCache.entry ? warehousesCache.entry.data : []
+  );
   const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
+  // Only show spinner when we have zero cached roles
+  const [loading, setLoading] = useState(() => !rolesCache.entry);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /* ---- selection & permissions ---- */
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    rolesCache.entry?.data?.[0]?.id ?? null
+  );
   const [assigned, setAssigned] = useState<Set<string>>(new Set());
   const [assignedOrig, setAssignedOrig] = useState<Set<string>>(new Set());
   const [permLoading, setPermLoading] = useState(false);
@@ -287,150 +656,614 @@ function Roles() {
   const [permFilter, setPermFilter] = useState("");
   const [groupFilter, setGroupFilter] = useState("all");
   const [detailTab, setDetailTab] = useState<DetailTab>("permissions");
+
+  /* ---- users / warehouses (lazy) ---- */
   const [roleUsers, setRoleUsers] = useState<RoleUser[]>([]);
   const [roleWarehouses, setRoleWarehouses] = useState<Warehouse[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
-  const [permCounts, setPermCounts] = useState<Record<string, number>>({});
-  const [userCounts, setUserCounts] = useState<Record<string, number>>({});
+  const [usersLoadedFor, setUsersLoadedFor] = useState<string | null>(null);
+  const [permCounts, setPermCounts] = useState<Record<string, number>>(() => {
+    if (!rolesCache.entry) return {};
+    return countsFromRoles(rolesCache.entry.data).nextPerm;
+  });
+  const [userCounts, setUserCounts] = useState<Record<string, number>>(() => {
+    if (!rolesCache.entry) return {};
+    return countsFromRoles(rolesCache.entry.data).nextUser;
+  });
 
+  /* ---- modal ---- */
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Role | null>(null);
   const [form, setForm] = useState({ name: "", description: "" });
   const [saving, setSaving] = useState(false);
 
-  const showToast = (type: string, title: string, msg: string) => {
+  /* ---- abort / once-load refs ---- */
+  const permAbort = useRef<AbortController | null>(null);
+  const usersAbort = useRef<AbortController | null>(null);
+  const saveAbort = useRef<AbortController | null>(null);
+  const roleSaveAbort = useRef<AbortController | null>(null);
+  /** Sync lock — setState(permSaving) is async; without this, double-click aborts the 1st POST (~0.1ms) and starts a 2nd. */
+  const saveLockRef = useRef(false);
+  const lastPermRoleId = useRef<string | null>(null);
+  const autoRetryRef = useRef(0);
+  const mountedRef = useRef(true);
+  /** Role IDs that should get SYSTEM permissions pre-checked (new roles). */
+  const seedSystemDefaultsRef = useRef<Set<string>>(new Set());
+
+  const showToast = useCallback((type: string, title: string, msg: string) => {
     setToast({ type, title, msg });
     setTimeout(() => setToast(null), 3000);
-  };
+  }, []);
 
-  const fetchRoles = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams({ per_page: "200", sort: "name", dir: "asc" });
-      if (search.trim()) params.set("search", search.trim());
+  /* ================================================================ */
+  /* Data fetching                                                    */
+  /* ================================================================ */
 
-      const { data: json } = await api.get(`/roles?${params}`);
-      const list: Role[] = Array.isArray(json) ? json : json.data ?? [];
-      setRoles(list);
+  /** Stable – cache + inflight. Never abort shared in-flight (Strict Mode safe). */
+  const fetchRoles = useCallback(async (q = "", force = false) => {
+    const searchKey = q.trim();
 
-      setSelectedId((prev) => {
-        if (prev && list.some((r) => r.id === prev)) return prev;
-        return list[0]?.id ?? null;
-      });
-    } catch (e: any) {
-      setError(e.response?.data?.message || e.message || "Failed to load roles");
-      setRoles([]);
-    } finally {
+    const hydrateFromCache = (cached: Role[]) => {
+      setRoles(cached);
       setLoading(false);
-    }
-  }, [search]);
+      const { nextPerm, nextUser } = countsFromRoles(cached);
+      if (Object.keys(nextPerm).length) setPermCounts((prev) => ({ ...prev, ...nextPerm }));
+      if (Object.keys(nextUser).length) setUserCounts((prev) => ({ ...prev, ...nextUser }));
+      // Only change selection when current id is missing — avoids re-triggering perm loads
+      setSelectedId((prev) => {
+        if (prev && cached.some((r) => r.id === prev)) return prev;
+        if (!prev && cached[0]?.id) return cached[0].id;
+        if (prev && !cached.some((r) => r.id === prev)) return cached[0]?.id ?? null;
+        return prev;
+      });
+    };
 
-  const fetchPermissions = useCallback(async () => {
-    try {
-      const { data: json } = await api.get("/permissions?per_page=500");
-      const payload = json.success !== undefined ? json.data : json.data ?? json;
-      const list: Permission[] = Array.isArray(payload) ? payload : payload?.data ?? [];
-      setPermissions(list);
-    } catch {
-      /* empty until seeded */
+    // Fresh non-empty cache → instant, no network
+    if (!force && !searchKey && isFresh(rolesCache.entry) && rolesCache.entry!.data.length > 0) {
+      hydrateFromCache(rolesCache.entry!.data);
+      return;
     }
-  }, []);
 
-  const fetchWarehouses = useCallback(async () => {
-    try {
-      const { data: json } = await api.get("/warehouses");
-      setAllWarehouses(Array.isArray(json) ? json : json.data ?? []);
-    } catch {
-      /* optional */
+    // Stale or empty → paint what we have, revalidate below
+    if (!force && !searchKey && rolesCache.entry && rolesCache.entry.data.length > 0) {
+      hydrateFromCache(rolesCache.entry.data);
+    } else if (!rolesCache.entry || rolesCache.entry.data.length === 0) {
+      setLoading(true);
     }
-  }, []);
+    setError(null);
 
-  const loadRolePermissions = useCallback(async (roleId: string) => {
-    setPermLoading(true);
-    try {
-      let ids = new Set<string>();
+    // Always join an in-flight catalog request (even on force) to avoid parallel duplicates
+    if (!searchKey && rolesCache.inflight) {
       try {
-        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-        const perms: Permission[] = json.data?.permissions ?? json.permissions ?? json.data ?? [];
-        if (Array.isArray(perms)) {
-          ids = new Set(perms.map((p) => p.id).filter(Boolean));
-        }
+        const list = await rolesCache.inflight;
+        if (mountedRef.current) hydrateFromCache(list);
       } catch {
-        try {
-          const { data: j2 } = await api.get(`/role-permissions?role_id=${roleId}&per_page=500`);
-          const records = j2.data?.data ?? j2.data ?? [];
-          ids = new Set(
-            records
-              .map((r: any) => r.permission_id || r.permission?.id)
-              .filter(Boolean)
-          );
-        } catch {
-          /* ignore */
+        /* owner handles */
+      }
+      return;
+    }
+
+    const params = new URLSearchParams({
+      per_page: "200",
+      sort: "name",
+      dir: "asc",
+      paginate: "false",
+    });
+    if (searchKey) params.set("search", searchKey);
+
+    const request = api.get(`/roles?${params}`).then((res: any) => {
+      // Support both raw Axios response and interceptors that unwrap `.data`
+      const body = res && typeof res === "object" && "data" in res && res.status !== undefined
+        ? res.data
+        : res?.data !== undefined && !Array.isArray(res)
+          ? res.data
+          : res;
+      return extractList<Role>(body);
+    });
+
+    // Register in-flight BEFORE await so concurrent callers join this promise
+    if (!searchKey) rolesCache.inflight = request;
+
+    try {
+      const list = await request;
+      if (!searchKey) {
+        // Never lock in an empty list as "fresh" — likely a parse/auth glitch
+        if (list.length > 0 || !rolesCache.entry) {
+          rolesCache.entry = { data: list, at: Date.now() };
         }
       }
-      setAssigned(ids);
-      setAssignedOrig(new Set(ids));
-      setPermCounts((prev) => ({ ...prev, [roleId]: ids.size }));
-    } catch {
-      setAssigned(new Set());
-      setAssignedOrig(new Set());
+      if (mountedRef.current) {
+        hydrateFromCache(list);
+        autoRetryRef.current = 0;
+      }
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e);
+      if (!msg || !mountedRef.current) return;
+
+      // Soft retry when we have nothing to show
+      if (autoRetryRef.current < 2 && !(rolesCache.entry?.data?.length)) {
+        autoRetryRef.current += 1;
+        const delay = 400 * Math.pow(2, autoRetryRef.current - 1);
+        setTimeout(() => {
+          if (mountedRef.current) fetchRoles(q, false);
+        }, delay);
+        return;
+      }
+
+      if (!(rolesCache.entry?.data?.length)) {
+        setError(msg || "Failed to load roles");
+      }
+      setLoading(false);
     } finally {
-      setPermLoading(false);
+      if (!searchKey && rolesCache.inflight === request) {
+        rolesCache.inflight = null;
+      }
     }
   }, []);
 
-  const loadRoleUsersAndWarehouses = useCallback(
-    async (roleId: string) => {
-      setUsersLoading(true);
+  const fetchPermissions = useCallback(async (force = false) => {
+    // Fresh → done
+    if (!force && isFresh(permissionsCache.entry)) {
+      setPermissions(permissionsCache.entry!.data);
+      return;
+    }
+    // Stale → paint now, refresh in background
+    if (!force && permissionsCache.entry) {
+      setPermissions(permissionsCache.entry.data);
+    }
+    // Join in-flight regardless of force — never double-hit the catalog
+    if (permissionsCache.inflight) {
       try {
+        const list = await permissionsCache.inflight;
+        if (mountedRef.current) setPermissions(list);
+      } catch {
+        /* owner handles */
+      }
+      return;
+    }
+
+    // paginate=false → plain array, no withCount('roles') subquery per row
+    const request = api.get("/permissions?per_page=500&paginate=false").then((res: any) => {
+      const body =
+        res && typeof res === "object" && "data" in res && res.status !== undefined
+          ? res.data
+          : res?.data !== undefined && !Array.isArray(res)
+            ? res.data
+            : res;
+      return extractList<Permission>(body);
+    });
+    permissionsCache.inflight = request;
+
+    try {
+      const list = await request;
+      permissionsCache.entry = { data: list, at: Date.now() };
+      if (mountedRef.current) setPermissions(list);
+    } catch (err) {
+      // Soft fail – keep any stale catalog data
+      getErrorMessage(err);
+    } finally {
+      if (permissionsCache.inflight === request) {
+        permissionsCache.inflight = null;
+      }
+    }
+  }, []);
+
+  const fetchWarehouses = useCallback(async (force = false) => {
+    // WarehouseController@index returns Warehouse::all() as a plain JSON array
+    if (!force && isFresh(warehousesCache.entry)) {
+      setAllWarehouses(warehousesCache.entry.data);
+      return;
+    }
+    if (!force && warehousesCache.entry) {
+      setAllWarehouses(warehousesCache.entry.data);
+    }
+    try {
+      let list: Warehouse[];
+      if (warehousesCache.inflight && !force) {
+        list = await warehousesCache.inflight;
+      } else {
+        const request = api.get("/warehouses").then(({ data: json }) => {
+          // Plain array from Warehouse::all(), or { data: [...] } wrappers
+          const raw = Array.isArray(json)
+            ? json
+            : Array.isArray(json?.data)
+              ? json.data
+              : Array.isArray(json?.data?.data)
+                ? json.data.data
+                : [];
+          return raw.map((w: any) => ({
+            id: String(w.id),
+            name: String(w.name ?? ""),
+            code: w.code != null ? String(w.code) : undefined,
+            location: w.location ?? w.address ?? null,
+            address: w.address ?? w.location ?? null,
+          })) as Warehouse[];
+        });
+        warehousesCache.inflight = request;
+        try {
+          list = await request;
+        } finally {
+          warehousesCache.inflight = null;
+        }
+        warehousesCache.entry = { data: list, at: Date.now() };
+      }
+      setAllWarehouses(list);
+    } catch {
+      /* optional – warehouse catalog may be empty */
+    }
+  }, []);
+
+  /** Load permissions for a role – cache + inflight dedupe + stale-while-revalidate */
+  const loadRolePermissions = useCallback(async (roleId: string, force = false) => {
+    const cached = rolePermsCache.get(roleId) ?? null;
+
+    // Fresh cache → instant, no network
+    if (!force && isFresh(cached)) {
+      lastPermRoleId.current = roleId;
+      if (cached!.data.size === 0 && seedSystemDefaultsRef.current.has(roleId)) {
+        const catalog = permissionsCache.entry?.data ?? [];
+        const sysIds = systemPermissionIds(buildGroups(catalog));
+        if (sysIds.length > 0) {
+          setAssigned(new Set(sysIds));
+          setAssignedOrig(new Set()); // dirty until save
+          setPermCounts((prev) => ({ ...prev, [roleId]: sysIds.length }));
+          seedSystemDefaultsRef.current.delete(roleId);
+          setPermLoading(false);
+          return;
+        }
+        seedSystemDefaultsRef.current.delete(roleId);
+      }
+      setAssigned(new Set(cached!.data));
+      setAssignedOrig(new Set(cached!.data));
+      setPermCounts((prev) => ({ ...prev, [roleId]: cached!.data.size }));
+      setPermLoading(false);
+      return;
+    }
+
+    // Stale cache → paint immediately, then revalidate in background
+    if (!force && cached) {
+      lastPermRoleId.current = roleId;
+      setAssigned(new Set(cached.data));
+      setAssignedOrig(new Set(cached.data));
+      setPermCounts((prev) => ({ ...prev, [roleId]: cached.data.size }));
+      setPermLoading(false); // UI is usable; quiet refresh below
+    }
+
+    // Already in-flight for this role → await the same promise (never abort+restart)
+    if (rolePermsInflight.has(roleId)) {
+      lastPermRoleId.current = roleId;
+      if (!cached) setPermLoading(true);
+      try {
+        const ids = await rolePermsInflight.get(roleId)!;
+        if (lastPermRoleId.current !== roleId) return;
+        setAssigned(new Set(ids));
+        setAssignedOrig(new Set(ids));
+        setPermCounts((prev) => ({ ...prev, [roleId]: ids.size }));
+      } catch {
+        /* network / abort handled by the owner of the promise */
+      } finally {
+        if (lastPermRoleId.current === roleId) setPermLoading(false);
+      }
+      return;
+    }
+
+    // Switching roles: abort only the *previous role's* request
+    if (lastPermRoleId.current && lastPermRoleId.current !== roleId) {
+      permAbort.current?.abort();
+    }
+    lastPermRoleId.current = roleId;
+    const ac = new AbortController();
+    permAbort.current = ac;
+    // Hard cap — backend has been seen at 30s+; don't leave the matrix locked forever
+    const timeoutId = setTimeout(() => ac.abort(), SAVE_TIMEOUT_MS);
+
+    // Only blank the matrix when we have zero data for this role
+    if (!cached) {
+      setAssigned(new Set());
+      setAssignedOrig(new Set());
+      setPermLoading(true);
+    }
+
+    const parseIds = (json: any): Set<string> => {
+      const raw =
+        json?.data?.permission_ids ??
+        json?.permission_ids ??
+        json?.data?.permissions ??
+        json?.permissions ??
+        extractList(json);
+
+      if (!Array.isArray(raw)) return new Set();
+      return new Set(
+        raw
+          .map((p: any) => (typeof p === "string" ? p : p?.id || p?.permission_id))
+          .filter(Boolean)
+      );
+    };
+
+    const fetchIds = async (): Promise<Set<string>> => {
+      // ids_only=1 → tiny payload (just UUIDs). Catalog already has names.
+      // If this takes 30s, the backend is loading full models / running N+1 — fix the API.
+      try {
+        const { data: json } = await api.get(`/roles/${roleId}/permissions`, {
+          params: { ids_only: 1 },
+          signal: ac.signal,
+          timeout: SAVE_TIMEOUT_MS,
+        });
+        return parseIds(json);
+      } catch (err: any) {
+        // Fallback without query param in case the server only matches the plain path
+        if (err?.response?.status === 404 || err?.response?.status === 405) {
+          const { data: json } = await api.get(`/roles/${roleId}/permissions`, {
+            signal: ac.signal,
+            timeout: SAVE_TIMEOUT_MS,
+          });
+          return parseIds(json);
+        }
+        throw err;
+      }
+    };
+
+    const promise = fetchIds();
+    rolePermsInflight.set(roleId, promise);
+
+    try {
+      const ids = await promise;
+      if (ac.signal.aborted || lastPermRoleId.current !== roleId) return;
+
+      // New role: pre-check SYSTEM (Users, Roles, Settings) so the admin can uncheck, then Save
+      let finalIds = ids;
+      if (ids.size === 0 && seedSystemDefaultsRef.current.has(roleId)) {
+        const catalog = permissionsCache.entry?.data ?? [];
+        const sysIds = systemPermissionIds(buildGroups(catalog));
+        if (sysIds.length > 0) {
+          finalIds = new Set(sysIds);
+          // Orig empty → shows "Unsaved changes" until Save
+          rolePermsCache.set(roleId, { data: new Set(), at: Date.now() });
+          setAssigned(finalIds);
+          setAssignedOrig(new Set());
+          setPermCounts((prev) => ({ ...prev, [roleId]: finalIds.size }));
+          seedSystemDefaultsRef.current.delete(roleId);
+          return;
+        }
+        seedSystemDefaultsRef.current.delete(roleId);
+      }
+
+      rolePermsCache.set(roleId, { data: finalIds, at: Date.now() });
+      setAssigned(finalIds);
+      setAssignedOrig(new Set(finalIds));
+      setPermCounts((prev) => ({ ...prev, [roleId]: finalIds.size }));
+    } catch (e: any) {
+      if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError") {
+        // Timed out or superseded — unlock UI; user can retry by re-selecting the role
+        if (lastPermRoleId.current === roleId && !cached && mountedRef.current) {
+          showToast(
+            "error",
+            "Slow server",
+            "Loading assigned permissions timed out. Re-select the role to retry."
+          );
+        }
+        return;
+      }
+      // Keep stale data on error – only clear when we never had any
+      if (lastPermRoleId.current === roleId && !cached) {
+        setAssigned(new Set());
+        setAssignedOrig(new Set());
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      rolePermsInflight.delete(roleId);
+      if (!ac.signal.aborted && lastPermRoleId.current === roleId) setPermLoading(false);
+      else if (ac.signal.aborted && lastPermRoleId.current === roleId) setPermLoading(false);
+    }
+  }, [showToast]);
+
+  /** Users + derived warehouses – only when Users/Warehouses tab is opened */
+  const loadRoleUsersAndWarehouses = useCallback(
+    async (roleId: string, force = false) => {
+      // Session-level "already shown for this role" short-circuit
+      if (!force && usersLoadedFor === roleId) return;
+
+      const cached = roleUsersCache.get(roleId) ?? null;
+      const cacheFresh = cached && Date.now() - cached.at < ROLE_USERS_TTL_MS;
+
+      // Instant paint from cache
+      if (!force && cacheFresh) {
+        setRoleUsers(cached!.data);
+        setUserCounts((prev) => ({ ...prev, [roleId]: cached!.data.length }));
+        setRoleWarehouses(warehousesFromUsers(cached!.data, allWarehouses));
+        setUsersLoadedFor(roleId);
+        setUsersLoading(false);
+        return;
+      }
+
+      // Stale cache → paint then quiet revalidate
+      if (!force && cached) {
+        setRoleUsers(cached.data);
+        setUserCounts((prev) => ({ ...prev, [roleId]: cached.data.length }));
+        setRoleWarehouses(warehousesFromUsers(cached.data, allWarehouses));
+        setUsersLoadedFor(roleId);
+        setUsersLoading(false);
+      }
+
+      // Join in-flight request for this role
+      if (roleUsersInflight.has(roleId)) {
+        if (!cached) setUsersLoading(true);
+        try {
+          const users = await roleUsersInflight.get(roleId)!;
+          if (!mountedRef.current) return;
+          setRoleUsers(users);
+          setUserCounts((prev) => ({ ...prev, [roleId]: users.length }));
+          setRoleWarehouses(warehousesFromUsers(users, allWarehouses));
+          setUsersLoadedFor(roleId);
+        } catch {
+          /* owner handles */
+        } finally {
+          if (mountedRef.current) setUsersLoading(false);
+        }
+        return;
+      }
+
+      usersAbort.current?.abort();
+      const ac = new AbortController();
+      usersAbort.current = ac;
+
+      if (!cached) setUsersLoading(true);
+
+      const fetchUsers = async (): Promise<RoleUser[]> => {
+        // role_id filter is applied server-side; keep a light client filter as safety net
         const params = new URLSearchParams({
           role_id: roleId,
           per_page: "200",
-          all: "1",
           paginate: "false",
         });
-        const { data: json } = await api.get(`/users?${params}`);
-        let users: RoleUser[] = Array.isArray(json) ? json : json.data ?? [];
+        const { data: json } = await api.get(`/users?${params}`, { signal: ac.signal });
+        let users: RoleUser[] = extractList(json);
         users = users.filter((u) => u.role?.id === roleId || u.role_id === roleId);
+        return users;
+      };
+
+      const promise = fetchUsers();
+      roleUsersInflight.set(roleId, promise);
+
+      try {
+        const users = await promise;
+        if (ac.signal.aborted) return;
+        roleUsersCache.set(roleId, { data: users, at: Date.now() });
         setRoleUsers(users);
         setUserCounts((prev) => ({ ...prev, [roleId]: users.length }));
         setRoleWarehouses(warehousesFromUsers(users, allWarehouses));
-      } catch {
-        setRoleUsers([]);
-        setRoleWarehouses([]);
+        setUsersLoadedFor(roleId);
+      } catch (e: any) {
+        if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED") return;
+        if (!cached) {
+          setRoleUsers([]);
+          setRoleWarehouses([]);
+        }
       } finally {
-        setUsersLoading(false);
+        roleUsersInflight.delete(roleId);
+        if (!ac.signal.aborted && mountedRef.current) setUsersLoading(false);
       }
     },
-    [allWarehouses]
+    [allWarehouses, usersLoadedFor]
   );
 
-  useEffect(() => {
-    const t = setTimeout(() => fetchRoles(), 250);
-    return () => clearTimeout(t);
-  }, [fetchRoles]);
+  /* ================================================================ */
+  /* Effects                                                          */
+  /* ================================================================ */
 
+  // Bootstrap once per session — module flag survives Strict Mode remounts.
+  // Remounts ONLY hydrate from cache / join in-flight — never start a second network call.
   useEffect(() => {
-    fetchPermissions();
-    fetchWarehouses();
-  }, [fetchPermissions, fetchWarehouses]);
+    mountedRef.current = true;
 
+    const hydrateRoles = (list: Role[]) => {
+      setRoles(list);
+      setLoading(false);
+      const { nextPerm, nextUser } = countsFromRoles(list);
+      if (Object.keys(nextPerm).length) setPermCounts((prev) => ({ ...prev, ...nextPerm }));
+      if (Object.keys(nextUser).length) setUserCounts((prev) => ({ ...prev, ...nextUser }));
+      setSelectedId((prev) => {
+        if (prev && list.some((r) => r.id === prev)) return prev;
+        if (!prev && list[0]?.id) return list[0].id;
+        if (prev && !list.some((r) => r.id === prev)) return list[0]?.id ?? null;
+        return prev;
+      });
+    };
+
+    if (!catalogBootstrapStarted) {
+      catalogBootstrapStarted = true;
+      void fetchRoles("");
+      void fetchPermissions();
+    } else {
+      // Strict Mode remount / revisit: paint cache, or join in-flight — no new requests
+      if (rolesCache.entry) {
+        hydrateRoles(rolesCache.entry.data);
+      } else if (rolesCache.inflight) {
+        rolesCache.inflight.then((list) => {
+          if (mountedRef.current) hydrateRoles(list);
+        }).catch(() => {});
+      }
+      if (permissionsCache.entry) {
+        setPermissions(permissionsCache.entry.data);
+      } else if (permissionsCache.inflight) {
+        permissionsCache.inflight.then((list) => {
+          if (mountedRef.current) setPermissions(list);
+        }).catch(() => {});
+      }
+    }
+    return () => {
+      mountedRef.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Quiet revalidate when tab becomes visible and cache is stale
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!isFresh(rolesCache.entry)) fetchRoles("", false);
+      if (!isFresh(permissionsCache.entry)) fetchPermissions(false);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [fetchRoles, fetchPermissions]);
+
+  // When selected role changes → load assigned permission IDs only (skip if already loaded)
   useEffect(() => {
     if (!selectedId) {
       setAssigned(new Set());
       setAssignedOrig(new Set());
       setRoleUsers([]);
       setRoleWarehouses([]);
+      setUsersLoadedFor(null);
+      lastPermRoleId.current = null;
+      setPermLoading(false);
       return;
     }
+
+    // Same role already handled this session — paint cache / join in-flight, never double-fetch
+    if (lastPermRoleId.current === selectedId) {
+      const cached = rolePermsCache.get(selectedId);
+      if (cached) {
+        setAssigned(new Set(cached.data));
+        setAssignedOrig(new Set(cached.data));
+        setPermCounts((prev) => ({ ...prev, [selectedId]: cached.data.size }));
+        setPermLoading(false);
+        return;
+      }
+      if (rolePermsInflight.has(selectedId)) {
+        void loadRolePermissions(selectedId, false);
+      }
+      return;
+    }
+
     setDetailTab("permissions");
     setPermFilter("");
     setGroupFilter("all");
-    loadRolePermissions(selectedId);
-    loadRoleUsersAndWarehouses(selectedId);
-  }, [selectedId, loadRolePermissions, loadRoleUsersAndWarehouses]);
+    setRoleUsers([]);
+    setRoleWarehouses([]);
+    setUsersLoadedFor(null);
+    void loadRolePermissions(selectedId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
+  // Lazy-load users + warehouses ONLY when those tabs open
+  useEffect(() => {
+    if (!selectedId) return;
+    if (detailTab === "users" || detailTab === "warehouses") {
+      // Ensure warehouse catalog exists before deriving scope
+      fetchWarehouses().then(() => loadRoleUsersAndWarehouses(selectedId));
+    }
+  }, [detailTab, selectedId, loadRoleUsersAndWarehouses, fetchWarehouses]);
+
+  // Re-derive warehouses if the warehouse catalog arrives after users were already loaded
+  useEffect(() => {
+    if (usersLoadedFor && roleUsers.length > 0 && allWarehouses.length > 0) {
+      setRoleWarehouses(warehousesFromUsers(roleUsers, allWarehouses));
+    }
+  }, [allWarehouses, usersLoadedFor, roleUsers]);
+
+  // Escape closes modal
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !saving && !permSaving) setModalOpen(false);
@@ -439,8 +1272,13 @@ function Roles() {
     return () => window.removeEventListener("keydown", onKey);
   }, [saving, permSaving]);
 
+  /* ================================================================ */
+  /* Derived values (memoized)                                        */
+  /* ================================================================ */
+
   const selected = useMemo(() => roles.find((r) => r.id === selectedId) || null, [roles, selectedId]);
-  const selectedPreset = useMemo(() => (selected ? getPreset(selected.name) : null), [selected]);
+  const selectedScope = useMemo(() => (selected ? scopeFromName(selected.name) : "custom"), [selected]);
+  const selectedIsAdmin = useMemo(() => isAdminRole(selected?.name), [selected]);
 
   const filteredRoles = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -456,16 +1294,82 @@ function Roles() {
     return false;
   }, [assigned, assignedOrig]);
 
+  // Groups are expensive – compute once when permissions change
   const allGroups = useMemo(() => buildGroups(permissions), [permissions]);
+  const systemIds = useMemo(() => systemPermissionIds(allGroups), [allGroups]);
+  const systemIdSet = useMemo(() => new Set(systemIds), [systemIds]);
+
+  // Admin role: SYSTEM perms always checked & locked (cannot uncheck)
+  useEffect(() => {
+    if (!selectedId || !selectedIsAdmin) return;
+    if (systemIds.length === 0) return;
+    setAssigned((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of systemIds) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setAssignedOrig((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of systemIds) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [selectedId, selectedIsAdmin, systemIds]);
+
+  // Drop SYSTEM filter when switching to a non-admin role
+  useEffect(() => {
+    if (!selectedIsAdmin && groupFilter === "section:SYSTEM") {
+      setGroupFilter("all");
+    }
+  }, [selectedIsAdmin, groupFilter]);
+
+  // Non-admin new role: do not seed SYSTEM (section is hidden for non-admin)
+  // Admin new role is handled by the lock effect above.
+
+  const sectionOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const opts: { value: string; label: string }[] = [];
+    for (const g of allGroups) {
+      // SYSTEM only visible for Admin role
+      if (g.section === "SYSTEM" && !selectedIsAdmin) continue;
+      if (seen.has(g.section)) continue;
+      seen.add(g.section);
+      opts.push({ value: `section:${g.section}`, label: g.section });
+    }
+    return opts;
+  }, [allGroups, selectedIsAdmin]);
 
   const visibleGroups = useMemo(() => {
     let list = allGroups;
-    if (groupFilter !== "all") list = list.filter((g) => g.key === groupFilter);
+    // Hide SYSTEM section entirely unless the selected role is Admin
+    if (!selectedIsAdmin) {
+      list = list.filter((g) => g.section !== "SYSTEM");
+    }
+    if (groupFilter !== "all") {
+      if (groupFilter.startsWith("section:")) {
+        const sec = groupFilter.slice("section:".length);
+        list = list.filter((g) => g.section === sec);
+      } else {
+        list = list.filter((g) => g.key === groupFilter);
+      }
+    }
     const q = permFilter.trim().toLowerCase();
     if (q) {
       list = list.filter(
         (g) =>
           g.label.toLowerCase().includes(q) ||
+          g.section.toLowerCase().includes(q) ||
           g.description.toLowerCase().includes(q) ||
           Object.values(g.actions).some(
             (p) => p && (p.name.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q))
@@ -476,79 +1380,169 @@ function Roles() {
       );
     }
     return list;
-  }, [allGroups, groupFilter, permFilter]);
+  }, [allGroups, groupFilter, permFilter, selectedIsAdmin]);
+
+  /** Groups with section header markers for matrix rendering */
+  const matrixRows = useMemo(() => {
+    const rows: ({ type: "section"; section: string } | { type: "group"; group: PermGroup })[] = [];
+    let lastSection = "";
+    for (const g of visibleGroups) {
+      if (g.section !== lastSection) {
+        rows.push({ type: "section", section: g.section });
+        lastSection = g.section;
+      }
+      rows.push({ type: "group", group: g });
+    }
+    return rows;
+  }, [visibleGroups]);
 
   const enabledCount = assigned.size;
   const groupCount = allGroups.length;
   const hasAllWarehouses = roleUsers.some((u) => u.access_all_warehouses);
 
-  const togglePerm = (id: string | undefined) => {
-    if (!id) return;
-    setAssigned((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  /* ================================================================ */
+  /* Actions                                                          */
+  /* ================================================================ */
 
-  const rowStats = (g: PermGroup) => {
-    const ids = [
-      ...CRUD_ACTIONS.map((a) => g.actions[a]?.id).filter(Boolean),
-      ...g.extras.map((p) => p.id),
-    ] as string[];
-    const on = ids.filter((id) => assigned.has(id)).length;
-    return { on, total: ids.length };
-  };
+  const togglePerm = useCallback(
+    (id: string | undefined) => {
+      if (!id) return;
+      // Admin SYSTEM permissions are locked — cannot uncheck
+      if (selectedIsAdmin && systemIdSet.has(id)) return;
+      setAssigned((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    },
+    [selectedIsAdmin, systemIdSet]
+  );
+
+  const rowStats = useCallback(
+    (g: PermGroup) => {
+      const ids = [
+        ...CRUD_ACTIONS.map((a) => g.actions[a]?.id).filter(Boolean),
+        ...g.extras.map((p) => p.id),
+      ] as string[];
+      const on = ids.filter((id) => assigned.has(id)).length;
+      return { on, total: ids.length };
+    },
+    [assigned]
+  );
 
   const savePermissions = async () => {
-    if (!selectedId) return;
+    // Synchronous lock — permSaving state updates too late to stop a double-click
+    if (!selectedId || permSaving || saveLockRef.current) return;
+    saveLockRef.current = true;
+
+    let permission_ids = Array.from(assigned);
+    if (selectedIsAdmin) {
+      const merged = new Set(permission_ids);
+      for (const id of systemIds) merged.add(id);
+      permission_ids = Array.from(merged);
+    } else {
+      permission_ids = permission_ids.filter((id) => !systemIdSet.has(id));
+    }
+
+    const savedSet = new Set(permission_ids);
+    const prevAssigned = new Set(assigned);
+    const prevOrig = new Set(assignedOrig);
+    const prevCount = permCounts[selectedId];
+    const roleId = selectedId;
+
+    // Do NOT abort a save already in flight — that produced the ~0.12ms cancelled + ~6s retry pair.
+    // Only create a controller for timeout / unmount cancellation.
+    const ac = new AbortController();
+    saveAbort.current = ac;
+    const timeoutId = setTimeout(() => ac.abort(), SAVE_TIMEOUT_MS);
+
+    // Optimistic UI — checkboxes + dirty flag update immediately; network runs in background
+    setAssigned(savedSet);
+    setAssignedOrig(new Set(savedSet));
+    setPermCounts((prev) => ({ ...prev, [roleId]: savedSet.size }));
+    rolePermsCache.set(roleId, { data: new Set(savedSet), at: Date.now() });
     setPermSaving(true);
+
+    // Always POST — this API rejects PUT with 405 (~0.2ms) then a second POST (~7–10s).
+    const route: SyncRoute =
+      knownSyncRoute.method === "post" ? knownSyncRoute : DEFAULT_SYNC_ROUTE;
+
     try {
-      const permission_ids = Array.from(assigned);
+      const url = syncUrl(roleId, route.path);
+      await api.post(
+        url,
+        { permission_ids },
+        { signal: ac.signal, timeout: SAVE_TIMEOUT_MS }
+      );
+      knownSyncRoute = route;
+      persistKnownSyncRoute(route);
 
-      const attempts = [
-        { method: "put" as const, url: `/roles/${selectedId}/permissions` },
-        { method: "post" as const, url: `/roles/${selectedId}/permissions` },
-        { method: "put" as const, url: `/roles/${selectedId}/permissions/sync` },
-        { method: "post" as const, url: `/roles/${selectedId}/permissions/sync` },
-      ];
+      if (ac.signal.aborted) {
+        if (mountedRef.current) {
+          showToast(
+            "error",
+            "Still saving…",
+            "Server is slow. Permissions may already be updated — refresh to confirm."
+          );
+        }
+        return;
+      }
 
-      let ok = false;
-      let lastMessage = "";
-
-      for (const attempt of attempts) {
+      if (mountedRef.current) {
+        showToast("success", "Saved", "Permissions updated.");
+        notifyPermissionsChanged();
+      }
+    } catch (e: any) {
+      if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError") {
+        if (mountedRef.current) {
+          showToast(
+            "error",
+            "Still saving…",
+            "Server is slow. Permissions may already be updated — refresh to confirm."
+          );
+        }
+        return;
+      }
+      // If /sync is missing, one fallback to POST /permissions (still POST-only)
+      const status = e?.response?.status;
+      if (status === 404 && route.path === "sync") {
         try {
-          if (attempt.method === "put") {
-            await api.put(attempt.url, { permission_ids });
-          } else {
-            await api.post(attempt.url, { permission_ids });
+          await api.post(
+            syncUrl(roleId, "plain"),
+            { permission_ids },
+            { signal: ac.signal, timeout: SAVE_TIMEOUT_MS }
+          );
+          knownSyncRoute = { method: "post", path: "plain" };
+          persistKnownSyncRoute(knownSyncRoute);
+          if (mountedRef.current) {
+            showToast("success", "Saved", "Permissions updated.");
+            notifyPermissionsChanged();
           }
-          ok = true;
-          break;
-        } catch (err: any) {
-          const status = err.response?.status;
-          if (status !== 404 && status !== 405) {
-            lastMessage =
-              err.response?.data?.message ||
-              (err.response?.data?.errors && Object.values(err.response.data.errors).flat().join(" ")) ||
-              `Save failed (${status})`;
-            break;
-          }
+          return;
+        } catch (e2: any) {
+          e = e2;
         }
       }
-
-      if (!ok) {
-        throw new Error(lastMessage || "Save failed. Register the permissions sync route.");
+      const msg = getErrorMessage(e, e?.message || "Could not save");
+      // Roll back optimistic state only on real failure (not timeout — handled above)
+      if (mountedRef.current) {
+        setAssigned(prevAssigned);
+        setAssignedOrig(prevOrig);
+        setPermCounts((prev) => {
+          const next = { ...prev };
+          if (prevCount === undefined) delete next[roleId];
+          else next[roleId] = prevCount;
+          return next;
+        });
+        rolePermsCache.set(roleId, { data: prevOrig, at: Date.now() });
+        if (msg) showToast("error", "Error", msg);
       }
-
-      setAssignedOrig(new Set(assigned));
-      setPermCounts((prev) => ({ ...prev, [selectedId]: assigned.size }));
-      showToast("success", "Saved", "Permissions updated.");
-    } catch (e: any) {
-      showToast("error", "Error", e.message || "Could not save");
     } finally {
-      setPermSaving(false);
+      clearTimeout(timeoutId);
+      if (saveAbort.current === ac) saveAbort.current = null;
+      saveLockRef.current = false;
+      if (mountedRef.current) setPermSaving(false);
     }
   };
 
@@ -567,55 +1561,138 @@ function Roles() {
 
   const handleRoleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name.trim()) return;
+    const name = form.name.trim();
+    if (!name) {
+      showToast("error", "Validation", "Role name is required.");
+      return;
+    }
+    if (name.length < 2) {
+      showToast("error", "Validation", "Role name must be at least 2 characters.");
+      return;
+    }
+    if (name.length > 100) {
+      showToast("error", "Validation", "Role name must be 100 characters or fewer.");
+      return;
+    }
+    // Client-side uniqueness check against already-loaded roles
+    const duplicate = roles.some(
+      (r) =>
+        r.name.toLowerCase() === name.toLowerCase() &&
+        (!editing || r.id !== editing.id)
+    );
+    if (duplicate) {
+      showToast("error", "Validation", `A role named "${name}" already exists.`);
+      return;
+    }
+
+    if (saving) return;
+
+    roleSaveAbort.current?.abort();
+    const ac = new AbortController();
+    roleSaveAbort.current = ac;
+    const timeoutId = setTimeout(() => ac.abort(), SAVE_TIMEOUT_MS);
+
     setSaving(true);
     try {
       const payload = {
-        name: form.name.trim(),
+        name,
         description: form.description.trim() || null,
       };
+      const config = { signal: ac.signal, timeout: SAVE_TIMEOUT_MS };
 
-      let created: Role | undefined;
+      let saved: Role;
       if (editing) {
-        const { data: json } = await api.put(`/roles/${editing.id}`, payload);
-        created = json.data ?? json;
+        const { data: json } = await api.put(`/roles/${editing.id}`, payload, config);
+        saved = (json?.data ?? json) as Role;
+        // Optimistic local update — no full list refetch
+        const next = roles.map((r) =>
+          r.id === editing.id
+            ? { ...r, name: saved.name ?? name, description: saved.description ?? payload.description }
+            : r
+        );
+        setRoles(next);
+        rolesCache.entry = { data: next, at: Date.now() };
+        setSelectedId(editing.id);
       } else {
-        const { data: json } = await api.post("/roles", payload);
-        created = json.data ?? json;
+        const { data: json } = await api.post("/roles", payload, config);
+        saved = (json?.data ?? json) as Role;
+        const newRole: Role = {
+          id: String(saved.id),
+          name: saved.name ?? name,
+          description: saved.description ?? payload.description,
+          permission_count: 0,
+          user_count: 0,
+        };
+        // Insert sorted by name for instant UI
+        const next = [...roles, newRole].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+        );
+        setRoles(next);
+        rolesCache.entry = { data: next, at: Date.now() };
+        setPermCounts((prev) => ({ ...prev, [newRole.id]: 0 }));
+        setUserCounts((prev) => ({ ...prev, [newRole.id]: 0 }));
+        // Seed empty perm cache so selecting the new role does not flash a network spinner
+        // when the role truly has zero permissions (non-admin). Admin still seeds SYSTEM.
+        if (isAdminRole(newRole.name)) {
+          seedSystemDefaultsRef.current.add(newRole.id);
+        } else {
+          rolePermsCache.set(newRole.id, { data: new Set(), at: Date.now() });
+        }
+        setSelectedId(newRole.id);
       }
 
-      showToast("success", editing ? "Updated" : "Created", editing ? "Role updated." : "Role created.");
-      setModalOpen(false);
-      await fetchRoles();
-      if (created?.id) setSelectedId(created.id);
+      if (mountedRef.current) {
+        showToast("success", editing ? "Updated" : "Created", editing ? "Role updated." : "Role created.");
+        setModalOpen(false);
+      }
     } catch (err: any) {
-      showToast(
-        "error",
-        "Error",
-        err.response?.data?.message ||
-          (err.response?.data?.errors && Object.values(err.response.data.errors).flat().join(" ")) ||
-          err.message ||
-          "Save failed"
-      );
+      const msg = getErrorMessage(err, "Save failed");
+      if (mountedRef.current && msg) {
+        showToast("error", "Error", msg);
+      }
     } finally {
-      setSaving(false);
+      clearTimeout(timeoutId);
+      if (roleSaveAbort.current === ac) roleSaveAbort.current = null;
+      if (mountedRef.current) setSaving(false);
     }
   };
 
   const handleDelete = async (role: Role) => {
     if (!window.confirm(`Delete role "${role.name}"? Assigned permissions will be detached.`)) return;
     try {
-      await api.delete(`/roles/${role.id}`);
+      await api.delete(`/roles/${role.id}`, { timeout: SAVE_TIMEOUT_MS });
       showToast("success", "Deleted", "Role removed.");
-      if (selectedId === role.id) setSelectedId(null);
+      const next = roles.filter((r) => r.id !== role.id);
+      setRoles(next);
+      rolesCache.entry = { data: next, at: Date.now() };
+      rolePermsCache.delete(role.id);
+      roleUsersCache.delete(role.id);
+      roleUsersInflight.delete(role.id);
+      setPermCounts((prev) => {
+        const n = { ...prev };
+        delete n[role.id];
+        return n;
+      });
+      setUserCounts((prev) => {
+        const n = { ...prev };
+        delete n[role.id];
+        return n;
+      });
+      if (selectedId === role.id) {
+        setSelectedId(next[0]?.id ?? null);
+      }
       setModalOpen(false);
-      await fetchRoles();
-    } catch {
-      showToast("error", "Error", "Could not delete role");
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err, "Could not delete role");
+      if (msg) showToast("error", "Error", msg);
     }
   };
 
   const actionClass = (action: CrudAction) => `rac-action rac-action-${action}`;
+
+  /* ================================================================ */
+  /* Render                                                           */
+  /* ================================================================ */
 
   return (
     <div className="system-page">
@@ -638,13 +1715,14 @@ function Roles() {
           {error && (
             <div className="roles-empty" style={{ marginBottom: 16 }}>
               <p>{error}</p>
-              <button type="button" className="btn btn-sm btn-secondary" onClick={fetchRoles}>
+              <button type="button" className="btn btn-sm btn-secondary" onClick={() => { rolesCache.entry = null; fetchRoles("", true); }}>
                 Retry
               </button>
             </div>
           )}
 
           <div className="rac-layout">
+            {/* ---------- Roles list ---------- */}
             <aside className="rac-roles card">
               <div className="rac-roles-head">
                 <span className="rac-section-label">Roles</span>
@@ -660,56 +1738,36 @@ function Roles() {
               </div>
 
               <div className="rac-roles-list">
-                {loading ? (
+                {loading && roles.length === 0 ? (
                   <div className="roles-empty">
                     <span className="roles-spinner" />
                     Loading…
                   </div>
                 ) : filteredRoles.length === 0 ? (
                   <div className="roles-empty">
-                    <p>No roles yet.</p>
-                    <button type="button" className="btn btn-sm btn-primary" onClick={openCreate}>
-                      <IconPlus /> Create Role
-                    </button>
+                    <p>{loading ? "Loading…" : "No roles yet."}</p>
+                    {!loading && (
+                      <button type="button" className="btn btn-sm btn-primary" onClick={openCreate}>
+                        <IconPlus /> Create Role
+                      </button>
+                    )}
                   </div>
                 ) : (
-                  filteredRoles.map((r) => {
-                    const active = r.id === selectedId;
-                    const preset = getPreset(r.name);
-                    const scope = preset?.scope;
-                    const pc = permCounts[r.id];
-                    const uc = userCounts[r.id];
-                    return (
-                      <button
-                        key={r.id}
-                        type="button"
-                        className={`rac-role-card ${active ? "active" : ""}`}
-                        onClick={() => setSelectedId(r.id)}
-                      >
-                        <div className="rac-role-icon">{roleInitials(r.name)}</div>
-                        <div className="rac-role-body">
-                          <div className="rac-role-title">
-                            <span className="fw-600">{r.name}</span>
-                            <span className={`role-scope-badge scope-${scope || "custom"}`}>
-                              {scopeLabel(scope)}
-                            </span>
-                          </div>
-                          <div className="rac-role-meta">
-                            <span>
-                              <IconLock /> {pc !== undefined ? pc : "—"} permissions
-                            </span>
-                            <span>
-                              <IconUsers /> {uc !== undefined ? uc : "—"} users
-                            </span>
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })
+                  filteredRoles.map((r) => (
+                    <RoleCard
+                      key={r.id}
+                      role={r}
+                      active={r.id === selectedId}
+                      permCount={permCounts[r.id]}
+                      userCount={userCounts[r.id]}
+                      onSelect={setSelectedId}
+                    />
+                  ))
                 )}
               </div>
             </aside>
 
+            {/* ---------- Detail panel ---------- */}
             <section className="rac-detail card">
               {!selected ? (
                 <div className="roles-empty" style={{ padding: 48 }}>
@@ -725,12 +1783,12 @@ function Roles() {
                       <div>
                         <div className="rac-detail-name">
                           <h2>{selected.name}</h2>
-                          <span className={`role-scope-badge scope-${selectedPreset?.scope || "custom"}`}>
-                            {scopeLabel(selectedPreset?.scope)}
+                          <span className={`role-scope-badge scope-${selectedScope}`}>
+                            {scopeLabel(selectedScope)}
                           </span>
                         </div>
                         <p className="rac-detail-desc">
-                          {selected.description || selectedPreset?.description || "No description"}
+                          {selected.description || "No description"}
                         </p>
                       </div>
                     </div>
@@ -752,7 +1810,15 @@ function Roles() {
                       className={`rac-tab ${detailTab === "users" ? "active" : ""}`}
                       onClick={() => setDetailTab("users")}
                     >
-                      <IconUsers /> Users ({usersLoading ? "…" : roleUsers.length})
+                      <IconUsers /> Users (
+                      {usersLoadedFor === selectedId
+                        ? usersLoading
+                          ? "…"
+                          : roleUsers.length
+                        : selectedId
+                          ? userCounts[selectedId] ?? "—"
+                          : "—"}
+                      )
                     </button>
                     <button
                       type="button"
@@ -760,10 +1826,18 @@ function Roles() {
                       onClick={() => setDetailTab("warehouses")}
                     >
                       <IconWarehouse /> Warehouses (
-                      {usersLoading ? "…" : hasAllWarehouses ? "All" : roleWarehouses.length})
+                      {usersLoadedFor === selectedId
+                        ? usersLoading
+                          ? "…"
+                          : hasAllWarehouses
+                            ? "All"
+                            : roleWarehouses.length
+                        : "—"}
+                      )
                     </button>
                   </div>
 
+                  {/* ---- Permissions tab ---- */}
                   {detailTab === "permissions" ? (
                     <>
                       <div className="rac-stats">
@@ -787,7 +1861,15 @@ function Roles() {
                         <div className="rac-stat rac-stat-users">
                           <IconUsers />
                           <div>
-                            <strong>{usersLoading ? "…" : roleUsers.length}</strong>
+                            <strong>
+                              {usersLoadedFor === selectedId
+                                ? usersLoading
+                                  ? "…"
+                                  : roleUsers.length
+                                : selectedId
+                                  ? userCounts[selectedId] ?? "—"
+                                  : "—"}
+                            </strong>
                             <span>Users Assigned</span>
                           </div>
                         </div>
@@ -795,7 +1877,13 @@ function Roles() {
                           <IconWarehouse />
                           <div>
                             <strong>
-                              {usersLoading ? "…" : hasAllWarehouses ? "All" : roleWarehouses.length || "—"}
+                              {usersLoadedFor === selectedId
+                                ? usersLoading
+                                  ? "…"
+                                  : hasAllWarehouses
+                                    ? "All"
+                                    : roleWarehouses.length || "—"
+                                : "—"}
                             </strong>
                             <span>Access Scope</span>
                           </div>
@@ -812,11 +1900,15 @@ function Roles() {
                             onChange={(e) => setPermFilter(e.target.value)}
                           />
                         </div>
-                        <select className="rac-select" value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
-                          <option value="all">All Groups</option>
-                          {allGroups.map((g) => (
-                            <option key={g.key} value={g.key}>
-                              {g.label}
+                        <select
+                          className="rac-select"
+                          value={groupFilter}
+                          onChange={(e) => setGroupFilter(e.target.value)}
+                        >
+                          <option value="all">All Sections</option>
+                          {sectionOptions.map((s) => (
+                            <option key={s.value} value={s.value}>
+                              {s.label}
                             </option>
                           ))}
                         </select>
@@ -827,80 +1919,137 @@ function Roles() {
                           disabled={!dirty || permSaving || permLoading}
                           onClick={savePermissions}
                         >
-                          {permSaving ? "Saving…" : (<><IconCheck /> Save</>)}
+                          {permSaving ? "Saving…" : (
+                            <>
+                              <IconCheck /> Save
+                            </>
+                          )}
                         </button>
                       </div>
 
                       <div className="rac-table-wrap">
-                        {permLoading ? (
-                          <div className="roles-empty">
-                            <span className="roles-spinner" />
-                            Loading permissions…
-                          </div>
-                        ) : permissions.length === 0 ? (
-                          <div className="roles-empty">
-                            <p>No permissions in the catalog yet. Add them via the API, then assign access here.</p>
-                          </div>
-                        ) : visibleGroups.length === 0 ? (
+                        {visibleGroups.length === 0 && !permLoading ? (
                           <div className="roles-empty">
                             <p>No groups match your filters.</p>
                           </div>
+                        ) : allGroups.length === 0 && permLoading ? (
+                          <div className="roles-empty">
+                            <span className="roles-spinner" />
+                            Loading permission catalog…
+                          </div>
                         ) : (
-                          <table className="rac-matrix">
-                            <thead>
-                              <tr>
-                                <th>Permission Group</th>
-                                <th>Description</th>
-                                <th className="rac-col-action">View</th>
-                                <th className="rac-col-action">Create</th>
-                                <th className="rac-col-action">Update</th>
-                                <th className="rac-col-action">Delete</th>
-                                <th className="rac-col-total">Total</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {visibleGroups.map((g) => {
-                                const { on, total } = rowStats(g);
-                                return (
-                                  <tr key={g.key}>
-                                    <td>
-                                      <span className="rac-group-cell">
-                                        <span className="fw-600">{g.label}</span>
-                                      </span>
-                                    </td>
-                                    <td className="text-muted">{g.description}</td>
-                                    {CRUD_ACTIONS.map((action) => {
-                                      const p = g.actions[action];
-                                      if (!p) {
+                          <>
+                            {permLoading && (
+                              <div className="rac-perm-loading-bar" aria-live="polite">
+                                <span className="roles-spinner" /> Loading assigned permissions…
+                              </div>
+                            )}
+                            <table className={`rac-matrix ${permLoading ? "rac-matrix-loading" : ""}`}>
+                              <thead>
+                                <tr>
+                                  <th>Permission Group</th>
+                                  <th>Description</th>
+                                  <th className="rac-col-action">View</th>
+                                  <th className="rac-col-action">Create</th>
+                                  <th className="rac-col-action">Update</th>
+                                  <th className="rac-col-action">Delete</th>
+                                  <th className="rac-col-total">Total</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {matrixRows.map((row) => {
+                                  if (row.type === "section") {
+                                    return (
+                                      <tr key={`sec-${row.section}`} className="rac-section-row">
+                                        <td
+                                          colSpan={7}
+                                          style={{
+                                            padding: "10px 12px 6px",
+                                            borderBottom: "1px solid rgba(255,255,255,0.06)",
+                                            background: "transparent",
+                                          }}
+                                        >
+                                          <span
+                                            className="rac-section-label-row"
+                                            style={{
+                                              display: "inline-block",
+                                              fontSize: 11,
+                                              fontWeight: 600,
+                                              letterSpacing: "0.08em",
+                                              textTransform: "uppercase",
+                                              color: "rgba(255,255,255,0.45)",
+                                            }}
+                                          >
+                                            {row.section}
+                                          </span>
+                                        </td>
+                                      </tr>
+                                    );
+                                  }
+                                  const g = row.group;
+                                  const { on, total } = rowStats(g);
+                                  const hasAnyAction = CRUD_ACTIONS.some((a) => g.actions[a]);
+                                  const systemLocked = selectedIsAdmin && g.section === "SYSTEM";
+                                  return (
+                                    <tr
+                                      key={g.key}
+                                      className={!hasAnyAction ? "rac-group-empty" : undefined}
+                                      title={systemLocked ? "System access is required for Admin and cannot be changed" : undefined}
+                                    >
+                                      <td>
+                                        <span className="rac-group-cell">
+                                          <span className="fw-600">{g.label}</span>
+                                          {systemLocked && (
+                                            <span
+                                              style={{
+                                                marginLeft: 8,
+                                                fontSize: 10,
+                                                fontWeight: 600,
+                                                letterSpacing: "0.06em",
+                                                textTransform: "uppercase",
+                                                color: "rgba(255,255,255,0.4)",
+                                              }}
+                                            >
+                                              Locked
+                                            </span>
+                                          )}
+                                        </span>
+                                      </td>
+                                      <td className="text-muted">{g.description}</td>
+                                      {CRUD_ACTIONS.map((action) => {
+                                        const p = g.actions[action];
+                                        if (!p) {
+                                          return (
+                                            <td key={action} className="rac-col-action rac-na">
+                                              —
+                                            </td>
+                                          );
+                                        }
+                                        const checked = systemLocked ? true : assigned.has(p.id);
                                         return (
-                                          <td key={action} className="rac-col-action rac-na">
-                                            —
+                                          <td key={action} className="rac-col-action">
+                                            <input
+                                              type="checkbox"
+                                              className={actionClass(action)}
+                                              checked={checked}
+                                              disabled={permLoading || systemLocked}
+                                              onChange={() => togglePerm(p.id)}
+                                              title={systemLocked ? "Required for Admin — cannot be changed" : p.name}
+                                            />
                                           </td>
                                         );
-                                      }
-                                      const checked = assigned.has(p.id);
-                                      return (
-                                        <td key={action} className="rac-col-action">
-                                          <input
-                                            type="checkbox"
-                                            className={actionClass(action)}
-                                            checked={checked}
-                                            onChange={() => togglePerm(p.id)}
-                                            title={p.name}
-                                          />
-                                        </td>
-                                      );
-                                    })}
-                                    <td className="rac-col-total">
-                                      <span className="rac-total-pill">
-                                        {on}/{total}
-                                      </span>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
+                                      })}
+                                      <td className="rac-col-total">
+                                        <span className="rac-total-pill">
+                                          {permLoading ? "…" : `${on}/${total}`}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </>
                         )}
                       </div>
                       {visibleGroups.length > 0 && (
@@ -910,6 +2059,7 @@ function Roles() {
                       )}
                     </>
                   ) : detailTab === "users" ? (
+                    /* ---- Users tab ---- */
                     <div className="rac-list-body">
                       {usersLoading ? (
                         <div className="roles-empty">
@@ -930,7 +2080,9 @@ function Roles() {
                             </div>
                             <span
                               className={`status-badge ${
-                                (u.status || "active").toLowerCase() === "active" ? "status-active" : "status-cancelled"
+                                (u.status || "active").toLowerCase() === "active"
+                                  ? "status-active"
+                                  : "status-cancelled"
                               }`}
                             >
                               {u.status || "active"}
@@ -940,6 +2092,7 @@ function Roles() {
                       )}
                     </div>
                   ) : (
+                    /* ---- Warehouses tab ---- */
                     <div className="rac-list-body">
                       {usersLoading ? (
                         <div className="roles-empty">
@@ -957,7 +2110,9 @@ function Roles() {
                       ) : (
                         <>
                           {hasAllWarehouses && (
-                            <div className="roles-all-banner">One or more users have access to all warehouses.</div>
+                            <div className="roles-all-banner">
+                              One or more users have access to all warehouses.
+                            </div>
                           )}
                           {roleWarehouses.map((w) => (
                             <div key={w.id} className="rp-user-row">
@@ -969,7 +2124,9 @@ function Roles() {
                                 <span className="rp-role-sub">
                                   {w.code && <span className="track-code">{w.code}</span>}
                                   {(w.location || w.address) && (
-                                    <span style={{ marginLeft: w.code ? 8 : 0 }}>{w.location || w.address}</span>
+                                    <span style={{ marginLeft: w.code ? 8 : 0 }}>
+                                      {w.location || w.address}
+                                    </span>
                                   )}
                                 </span>
                               </div>
@@ -986,42 +2143,32 @@ function Roles() {
         </main>
       </div>
 
+      {/* ---------- Create / Edit modal ---------- */}
       {modalOpen && (
-        <div className="roles-modal-overlay" onClick={() => !saving && setModalOpen(false)} role="presentation">
-          <div className="card roles-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="roles-modal-overlay"
+          onClick={() => !saving && setModalOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="card roles-modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="roles-modal-header">
               <h2>{editing ? "Edit Role" : "Create Role"}</h2>
-              <button type="button" className="roles-modal-close" disabled={saving} onClick={() => setModalOpen(false)}>
+              <button
+                type="button"
+                className="roles-modal-close"
+                disabled={saving}
+                onClick={() => setModalOpen(false)}
+              >
                 <IconX />
               </button>
             </div>
 
             <form onSubmit={handleRoleSave}>
-              {!editing && (
-                <div className="rp-presets">
-                  <div className="rp-presets-label">
-                    <span>Quick start</span>
-                    <span className="rp-presets-hint">Optional — fills name &amp; description only</span>
-                  </div>
-                  <div className="rp-presets-scroll">
-                    {ROLE_PRESETS.map((p) => {
-                      const active = form.name === p.name;
-                      return (
-                        <button
-                          key={p.name}
-                          type="button"
-                          className={`rp-preset-chip ${active ? "active" : ""}`}
-                          onClick={() => setForm({ name: p.name, description: p.description })}
-                        >
-                          <span className="rp-preset-name">{p.name}</span>
-                          <span className={`role-scope-badge scope-${p.scope}`}>{scopeLabel(p.scope)}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
               <div className="roles-form-grid rp-form-pad">
                 <label className="form-field">
                   <span>Name *</span>
@@ -1048,12 +2195,22 @@ function Roles() {
 
               <div className="roles-modal-actions">
                 {editing && (
-                  <button type="button" className="btn btn-secondary roles-delete-btn" disabled={saving} onClick={() => handleDelete(editing)}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary roles-delete-btn"
+                    disabled={saving}
+                    onClick={() => handleDelete(editing)}
+                  >
                     <IconTrash /> Delete
                   </button>
                 )}
                 <div className="roles-modal-actions-right">
-                  <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => setModalOpen(false)}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={saving}
+                    onClick={() => setModalOpen(false)}
+                  >
                     Cancel
                   </button>
                   <button type="submit" className="btn btn-primary" disabled={saving}>

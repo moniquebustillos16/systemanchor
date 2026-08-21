@@ -35,15 +35,59 @@ function extractPermissions(json: unknown): string[] {
   return [];
 }
 
+function normPerm(s: string): string {
+  return String(s).trim().toLowerCase().replace(/_/g, ".");
+}
+
 function can(perms: string[], ...needed: string[]): boolean {
-  if (
-    perms.includes("*") ||
-    perms.includes("admin") ||
-    perms.includes("Admin")
-  ) {
-    return true;
+  if (!perms || perms.length === 0) return false;
+  const set = new Set(perms.map(normPerm));
+  if (set.has("*") || set.has("admin")) return true;
+  return needed.some((n) => set.has(normPerm(n)));
+}
+
+function extractArr<T>(json: unknown): T[] {
+  if (!json) return [];
+  if (Array.isArray(json)) return json as T[];
+  const j = json as { data?: T[] | { data?: T[] } };
+  if (Array.isArray(j.data)) return j.data;
+  if (j.data && typeof j.data === "object" && Array.isArray((j.data as { data?: T[] }).data)) {
+    return (j.data as { data: T[] }).data;
   }
-  return needed.some((n) => perms.includes(n));
+  return [];
+}
+
+/* ── Module cache (survives Strict Mode) ───────────────────── */
+const SM_TTL = 60_000;
+type CE<T> = { data: T; at: number };
+const productsCache: { entry: CE<any[]> | null; inflight: Promise<any[]> | null } = { entry: null, inflight: null };
+const warehousesCache: { entry: CE<any[]> | null; inflight: Promise<any[]> | null } = { entry: null, inflight: null };
+const historyCache = new Map<string, CE<any[]>>();
+const historyInflight = new Map<string, Promise<any[]>>();
+function isFresh<T>(e: CE<T> | null | undefined): e is CE<T> {
+  return !!e && Date.now() - e.at < SM_TTL;
+}
+let smMetaBootstrapped = false;
+
+const SS_HIST = "sm:lastHistory";
+const SS_PROD = "sm:lastProducts";
+const SS_WH = "sm:lastWarehouses";
+
+function readSS<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+function writeSS(key: string, value: unknown) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* quota */
+  }
 }
 
 /* ===================== ICONS ===================== */
@@ -247,10 +291,29 @@ function num(v: number | string | null | undefined): number {
 /* ===================== COMPONENT ===================== */
 
 function StockMovements() {
-  const [history, setHistory] = useState<ApiMovement[]>([]);
-  const [products, setProducts] = useState<ProductOpt[]>([]);
-  const [warehouses, setWarehouses] = useState<WarehouseOpt[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [history, setHistory] = useState<ApiMovement[]>(() => {
+    const first = historyCache.values().next().value;
+    if (first?.data?.length) return first.data as ApiMovement[];
+    const snap = readSS<{ rows: ApiMovement[]; at: number }>(SS_HIST);
+    if (snap?.rows?.length && Date.now() - (snap.at || 0) < 10 * 60_000) return snap.rows;
+    return [];
+  });
+  const [products, setProducts] = useState<ProductOpt[]>(() => {
+    if (productsCache.entry?.data?.length) return productsCache.entry.data as ProductOpt[];
+    const snap = readSS<{ rows: ProductOpt[]; at: number }>(SS_PROD);
+    if (snap?.rows?.length && Date.now() - (snap.at || 0) < 30 * 60_000) return snap.rows;
+    return [];
+  });
+  const [warehouses, setWarehouses] = useState<WarehouseOpt[]>(() => {
+    if (warehousesCache.entry?.data?.length) return warehousesCache.entry.data as WarehouseOpt[];
+    const snap = readSS<{ rows: WarehouseOpt[]; at: number }>(SS_WH);
+    if (snap?.rows?.length && Date.now() - (snap.at || 0) < 30 * 60_000) return snap.rows;
+    return [];
+  });
+  const [loading, setLoading] = useState(() => {
+    const snap = readSS<{ rows: ApiMovement[]; at: number }>(SS_HIST);
+    return !(snap?.rows?.length || historyCache.size);
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -429,32 +492,66 @@ function StockMovements() {
     "inventory.update"
   );
 
-  /** Warehouses from LocationController::warehouses() via shared axios api */
-  const loadWarehouses = useCallback(async (): Promise<WarehouseOpt[]> => {
-    for (const path of ["/warehouses", "/locations/warehouses"]) {
-      try {
-        const { data: json } = await api.get(path);
-        const rows = Array.isArray(json) ? json : json.data ?? [];
-        return rows
-          .map((w: WarehouseOpt) => ({
-            id: String(w.id),
-            code: w.code,
-            name: w.name,
-          }))
-          .sort((a: WarehouseOpt, b: WarehouseOpt) => a.code.localeCompare(b.code));
-      } catch {
-        /* try next path */
+  const loadWarehouses = useCallback(async (force = false): Promise<WarehouseOpt[]> => {
+    if (!force && isFresh(warehousesCache.entry)) return warehousesCache.entry.data as WarehouseOpt[];
+    if (!force && warehousesCache.inflight) return warehousesCache.inflight as Promise<WarehouseOpt[]>;
+
+    const work = (async () => {
+      // Only real endpoints — /locations/warehouses returns 404
+      const paths = [
+        "/warehouses?paginate=false&per_page=100",
+        "/warehouses?all=1&per_page=100",
+        "/warehouses",
+      ];
+      for (const p of paths) {
+        try {
+          const { data: json } = await api.get(p, { timeout: 12000 });
+          const rows = extractArr<WarehouseOpt>(json)
+            .map((w) => ({ id: String(w.id), code: w.code ?? "", name: w.name }))
+            .filter((w) => w.id)
+            .sort((a, b) => a.code.localeCompare(b.code));
+          if (rows.length > 0 || json != null) return rows;
+        } catch {
+          /* try next */
+        }
       }
+      return [] as WarehouseOpt[];
+    })();
+
+    warehousesCache.inflight = work;
+    try {
+      const rows = await work;
+      warehousesCache.entry = { data: rows, at: Date.now() };
+      writeSS(SS_WH, { rows, at: Date.now() });
+      return rows;
+    } finally {
+      warehousesCache.inflight = null;
     }
-    return [];
   }, []);
 
-  const loadProducts = useCallback(async (): Promise<ProductOpt[]> => {
-    const { data: json } = await api.get("/inventories", { params: { per_page: 200 } });
-    return Array.isArray(json) ? json : json.data ?? [];
+  const loadProducts = useCallback(async (force = false): Promise<ProductOpt[]> => {
+    if (!force && isFresh(productsCache.entry)) return productsCache.entry.data as ProductOpt[];
+    if (!force && productsCache.inflight) return productsCache.inflight as Promise<ProductOpt[]>;
+
+    const work = (async () => {
+      const { data: json } = await api.get("/inventories", {
+        params: { per_page: 100, paginate: true },
+      });
+      return extractArr<ProductOpt>(json).map((p) => ({ ...p, id: String(p.id) }));
+    })();
+
+    productsCache.inflight = work;
+    try {
+      const rows = await work;
+      productsCache.entry = { data: rows, at: Date.now() };
+      writeSS(SS_PROD, { rows, at: Date.now() });
+      return rows;
+    } finally {
+      productsCache.inflight = null;
+    }
   }, []);
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (force = false) => {
     const params: Record<string, string | number> = { per_page: 50 };
     if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
     if (filterType !== "all") {
@@ -467,25 +564,50 @@ function StockMovements() {
       params.type = map[filterType] ?? filterType;
     }
 
-    const { data: json } = await api.get("/stock-movements", { params });
-    const rows: ApiMovement[] = Array.isArray(json) ? json : json.data ?? [];
-    setHistory(rows);
+    const cacheKey = JSON.stringify(params);
+    const cached = historyCache.get(cacheKey);
+    if (!force && isFresh(cached)) {
+      setHistory(cached!.data as ApiMovement[]);
+      return cached!.data as ApiMovement[];
+    }
+    if (cached) setHistory(cached.data as ApiMovement[]);
+
+    if (!force && historyInflight.has(cacheKey)) {
+      try {
+        const rows = (await historyInflight.get(cacheKey)!) as ApiMovement[];
+        setHistory(rows);
+        return rows;
+      } catch {
+        return (cached?.data as ApiMovement[]) ?? [];
+      }
+    }
+
+    const work = (async () => {
+      const { data: json } = await api.get("/stock-movements", { params });
+      return extractArr<ApiMovement>(json);
+    })();
+
+    historyInflight.set(cacheKey, work);
+    try {
+      const rows = await work;
+      historyCache.set(cacheKey, { data: rows, at: Date.now() });
+      setHistory(rows);
+      writeSS(SS_HIST, { rows, at: Date.now() });
+      return rows;
+    } finally {
+      historyInflight.delete(cacheKey);
+    }
   }, [debouncedSearch, filterType]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const bootstrapMeta = useCallback(async (force = false) => {
     try {
       const [productRows, locationWarehouses] = await Promise.all([
-        loadProducts(),
-        loadWarehouses(),
-        loadHistory(),
-      ]).then(([p, w]) => [p, w] as [ProductOpt[], WarehouseOpt[]]);
-
+        loadProducts(force),
+        loadWarehouses(force),
+      ]);
       setProducts(productRows);
       setProductId((prev) => prev || productRows[0]?.id || "");
 
-      // Prefer LocationController warehouses; fall back to product-embedded WHs
       let whList = locationWarehouses;
       if (whList.length === 0) {
         const whMap = new Map<string, WarehouseOpt>();
@@ -499,22 +621,70 @@ function StockMovements() {
         });
         whList = Array.from(whMap.values());
       }
-
       setWarehouses(whList);
       setWarehouseId((prev) => prev || whList[0]?.id || "");
       setFromWh((prev) => prev || whList[0]?.id || "");
       setToWh((prev) => prev || whList[1]?.id || whList[0]?.id || "");
+    } catch (e) {
+      console.error("[StockMovements] meta failed:", e);
+    }
+  }, [loadProducts, loadWarehouses]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await Promise.all([bootstrapMeta(true), loadHistory(true)]);
     } catch (e) {
       console.error(e);
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
       setLoading(false);
     }
-  }, [loadProducts, loadWarehouses, loadHistory]);
+  }, [bootstrapMeta, loadHistory]);
 
+  // Defer products/warehouses so initial paint only waits on stock-movements.
+  // Load from cache immediately; network fetch after history or when modal opens.
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (productsCache.entry) setProducts(productsCache.entry.data as ProductOpt[]);
+    if (warehousesCache.entry) setWarehouses(warehousesCache.entry.data as WarehouseOpt[]);
+
+    // Background prefetch after a short idle so it doesn't compete with history
+    const t = window.setTimeout(() => {
+      if (!smMetaBootstrapped) {
+        smMetaBootstrapped = true;
+        void bootstrapMeta(false);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [bootstrapMeta]);
+
+  // History on filter/search change + initial (paint cache first)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // Only show skeleton if we have nothing to display
+      setHistory((prev) => {
+        if (prev.length === 0) setLoading(true);
+        else setLoading(false);
+        return prev;
+      });
+      setError(null);
+      try {
+        await loadHistory(false);
+      } catch (e) {
+        if (!cancelled) {
+          console.error(e);
+          setError(e instanceof Error ? e.message : "Failed to load movements");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadHistory]);
 
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === productId) ?? null,
@@ -551,6 +721,8 @@ function StockMovements() {
     resetForm();
     if (preset) setMoveType(preset);
     setModalOpen(true);
+    // Ensure products/warehouses ready for the form (uses cache if fresh)
+    void bootstrapMeta(false);
   };
 
   const closeModal = () => {

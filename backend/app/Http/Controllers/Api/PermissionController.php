@@ -12,21 +12,47 @@ use Illuminate\Validation\Rule;
 class PermissionController extends Controller
 {
     /**
+     * Columns needed by the Roles matrix – never SELECT *.
+     */
+    private const LIST_COLUMNS = ['id', 'name', 'description', 'created_at', 'updated_at'];
+
+    /**
      * List all permissions (with optional search & pagination).
+     *
+     * Fast path: ?paginate=false or ?all=1 returns a plain array (no withCount, no paginator).
+     * Roles.tsx uses this for the permission catalog matrix.
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Permission::query()->withCount('roles');
+        $query = Permission::query()->select(self::LIST_COLUMNS);
+
+        // withCount is expensive (subquery per row) – only when explicitly requested
+        if ($request->boolean('with_roles_count')) {
+            $query->withCount('roles');
+        }
 
         if ($search = $request->query('search')) {
-            $query->where(function ($q) use ($search) {
-                $q->where('name', 'ilike', "%{$search}%")
-                  ->orWhere('description', 'ilike', "%{$search}%");
+            $driver = $query->getConnection()->getDriverName();
+            $op = $driver === 'pgsql' ? 'ilike' : 'like';
+            $query->where(function ($q) use ($search, $op) {
+                $q->where('name', $op, "%{$search}%")
+                  ->orWhere('description', $op, "%{$search}%");
             });
         }
 
-        $perPage = (int) $request->query('per_page', 15);
-        $permissions = $query->orderBy('name')->paginate($perPage);
+        $query->orderBy('name');
+
+        $perPage = min(max((int) $request->query('per_page', 15), 1), 500);
+
+        // Fast path for catalog loads (Roles page, seed UIs)
+        if ($request->boolean('all') || $request->has('all') || !$request->boolean('paginate', true)) {
+            return response()->json([
+                'success' => true,
+                'data'    => $query->limit($perPage)->get(),
+            ]);
+        }
+
+        $permissions = $query->paginate($perPage);
 
         return response()->json([
             'success' => true,

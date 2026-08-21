@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
@@ -60,22 +60,109 @@ const EMPTY_FORM: SettingsForm = {
   auto_reorder: "disabled",
 };
 
-function Settings() {
-  const [form, setForm] = useState<SettingsForm>(EMPTY_FORM);
-  const [savedSnapshot, setSavedSnapshot] = useState<SettingsForm>(EMPTY_FORM);
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
-  const [dirty, setDirty] = useState(false);
+/* ------------------------------------------------------------------ */
+/* Module-level cache + inflight (survives Strict Mode remounts)      */
+/* ------------------------------------------------------------------ */
 
-  const showToast = (type: string, title: string, msg: string) => {
-    setToast({ type, title, msg });
-    setTimeout(() => setToast(null), 3000);
-  };
+const CACHE_TTL_MS = 5 * 60_000;
 
-  const mapApiToForm = (data: Record<string, unknown>): SettingsForm => ({
+type CacheEntry<T> = { data: T; at: number };
+
+const settingsCache: {
+  entry: CacheEntry<SettingsForm> | null;
+  inflight: Promise<SettingsForm> | null;
+} = { entry: null, inflight: null };
+
+const warehousesCache: {
+  entry: CacheEntry<Warehouse[]> | null;
+  inflight: Promise<Warehouse[]> | null;
+} = { entry: null, inflight: null };
+
+function isFresh<T>(entry: CacheEntry<T> | null): entry is CacheEntry<T> {
+  return !!entry && Date.now() - entry.at < CACHE_TTL_MS;
+}
+
+/** Clean user-facing error; empty string = cancelled / ignore */
+function getErrorMessage(err: unknown, fallback = "Something went wrong"): string {
+  if (!err) return fallback;
+  const e = err as any;
+  if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError") {
+    return "";
+  }
+  const msg =
+    e?.response?.data?.message ||
+    (e?.response?.data?.errors &&
+      Object.values(e.response.data.errors).flat().filter(Boolean).join(" ")) ||
+    e?.message;
+  return typeof msg === "string" && msg.trim() ? msg.trim() : fallback;
+}
+
+/* ------------------------------------------------------------------ */
+/* Validation helpers                                                 */
+/* ------------------------------------------------------------------ */
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PHONE_RE = /^[+]?[\d\s().-]{7,20}$/;
+const URL_RE = /^(https?:\/\/)?([\w-]+\.)+[\w-]{2,}(\/.*)?$/i;
+const TIN_RE = /^[\d-]{5,20}$/;
+
+type FieldErrors = Partial<Record<keyof SettingsForm, string>>;
+
+function validateSettings(form: SettingsForm): FieldErrors {
+  const errors: FieldErrors = {};
+
+  const name = form.company_name.trim();
+  if (!name) {
+    errors.company_name = "Company name is required.";
+  } else if (name.length < 2) {
+    errors.company_name = "Company name must be at least 2 characters.";
+  } else if (name.length > 150) {
+    errors.company_name = "Company name must be 150 characters or fewer.";
+  }
+
+  if (form.email.trim() && !EMAIL_RE.test(form.email.trim())) {
+    errors.email = "Enter a valid email address.";
+  }
+
+  if (form.phone.trim() && !PHONE_RE.test(form.phone.trim())) {
+    errors.phone = "Enter a valid phone number.";
+  }
+
+  if (form.website.trim()) {
+    const w = form.website.trim();
+    if (!URL_RE.test(w) && !w.includes(".")) {
+      errors.website = "Enter a valid website URL.";
+    }
+  }
+
+  if (form.tin.trim() && !TIN_RE.test(form.tin.trim())) {
+    errors.tin = "TIN should be 5–20 digits (hyphens allowed).";
+  }
+
+  const threshold = form.low_stock_threshold.trim();
+  if (threshold !== "") {
+    const n = Number(threshold);
+    if (!Number.isFinite(n) || n < 0) {
+      errors.low_stock_threshold = "Low stock threshold must be 0 or greater.";
+    } else if (n > 1_000_000) {
+      errors.low_stock_threshold = "Threshold is unrealistically high.";
+    }
+  }
+
+  if (form.zip_code.trim() && form.zip_code.trim().length > 12) {
+    errors.zip_code = "ZIP code is too long.";
+  }
+
+  return errors;
+}
+
+function firstError(errors: FieldErrors): string | null {
+  const keys = Object.keys(errors) as (keyof SettingsForm)[];
+  return keys.length ? errors[keys[0]]! : null;
+}
+
+function mapApiToForm(data: Record<string, unknown>): SettingsForm {
+  return {
     company_name: String(data.company_name ?? ""),
     trading_name: String(data.trading_name ?? ""),
     tin: String(data.tin ?? ""),
@@ -98,49 +185,194 @@ function Settings() {
     fiscal_year_start: String(data.fiscal_year_start ?? "January"),
     low_stock_threshold: String(data.low_stock_threshold ?? "15"),
     auto_reorder: String(data.auto_reorder ?? "disabled"),
-  });
+  };
+}
 
-  const fetchSettings = useCallback(async () => {
-    setLoading(true);
+function Settings() {
+  // Always start with cache or EMPTY_FORM — never block first paint
+  const [form, setForm] = useState<SettingsForm>(() =>
+    settingsCache.entry ? settingsCache.entry.data : EMPTY_FORM
+  );
+  const [savedSnapshot, setSavedSnapshot] = useState<SettingsForm>(() =>
+    settingsCache.entry ? settingsCache.entry.data : EMPTY_FORM
+  );
+  const [warehouses, setWarehouses] = useState<Warehouse[]>(() =>
+    warehousesCache.entry ? warehousesCache.entry.data : []
+  );
+  // Subtle in-page indicator only (never full-page block)
+  const [loading, setLoading] = useState(() => !isFresh(settingsCache.entry));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
+  const [dirty, setDirty] = useState(false);
+
+  const mountedRef = useRef(true);
+  const autoRetryRef = useRef(0);
+
+  const showToast = useCallback((type: string, title: string, msg: string) => {
+    setToast({ type, title, msg });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  /* ================================================================ */
+  /* Fetch – cache + inflight + stale-while-revalidate                */
+  /* Form always paints immediately; network never blocks the UI      */
+  /* ================================================================ */
+
+  const fetchSettings = useCallback(async (force = false) => {
+    // Fresh cache → instant, no network
+    if (!force && isFresh(settingsCache.entry)) {
+      setForm(settingsCache.entry.data);
+      setSavedSnapshot(settingsCache.entry.data);
+      setDirty(false);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    // Stale or missing → keep current form painted; refresh in background
+    if (!force && settingsCache.entry) {
+      setForm(settingsCache.entry.data);
+      setSavedSnapshot(settingsCache.entry.data);
+      setDirty(false);
+      setLoading(false); // already have something to show
+    } else {
+      // No cache yet — still show EMPTY_FORM UI; just mark loading for badge
+      setLoading(true);
+    }
     setError(null);
+
     try {
-      const { data: json } = await api.get("/settings");
-      const data = json.data ?? json;
-      const mapped = mapApiToForm(data);
+      let mapped: SettingsForm;
+
+      if (settingsCache.inflight && !force) {
+        mapped = await settingsCache.inflight;
+      } else {
+        const request = api.get("/settings").then(({ data: json }) => {
+          const data = json.data ?? json;
+          return mapApiToForm(data);
+        });
+        settingsCache.inflight = request;
+        try {
+          mapped = await request;
+          settingsCache.entry = { data: mapped, at: Date.now() };
+        } finally {
+          settingsCache.inflight = null;
+        }
+      }
+
+      if (!mountedRef.current) return;
       setForm(mapped);
       setSavedSnapshot(mapped);
       setDirty(false);
-    } catch (err: any) {
-      const msg = err.response?.data?.message || err.message || "Unable to load settings";
-      setError(msg);
+      setFieldErrors({});
+      setError(null);
+      autoRetryRef.current = 0;
+    } catch (err: unknown) {
+      if (!mountedRef.current) return;
+      const msg = getErrorMessage(err);
+      if (!msg) return;
+
+      if (autoRetryRef.current < 2 && !settingsCache.entry) {
+        autoRetryRef.current += 1;
+        const delay = 400 * Math.pow(2, autoRetryRef.current - 1);
+        setTimeout(() => {
+          if (mountedRef.current) fetchSettings(true);
+        }, delay);
+        return;
+      }
+
+      // Only surface error if we have nothing useful to show
+      if (!settingsCache.entry) {
+        setError(msg || "Unable to load settings");
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, []);
 
-  const fetchWarehouses = useCallback(async () => {
+  const fetchWarehouses = useCallback(async (force = false) => {
+    // Completely non-blocking — never affects form paint
+    if (!force && isFresh(warehousesCache.entry)) {
+      setWarehouses(warehousesCache.entry.data);
+      return;
+    }
+    if (!force && warehousesCache.entry) {
+      setWarehouses(warehousesCache.entry.data);
+    }
+
     try {
-      const { data: json } = await api.get("/warehouses?per_page=100");
-      const list: Warehouse[] = Array.isArray(json) ? json : json.data ?? [];
-      setWarehouses(list);
-    } catch {
-      // optional
+      let list: Warehouse[];
+      if (warehousesCache.inflight && !force) {
+        list = await warehousesCache.inflight;
+      } else {
+        const request = api.get("/warehouses?per_page=100").then(({ data: json }) => {
+          const raw = Array.isArray(json)
+            ? json
+            : Array.isArray(json?.data)
+              ? json.data
+              : Array.isArray(json?.data?.data)
+                ? json.data.data
+                : [];
+          return raw.map((w: any) => ({
+            id: String(w.id),
+            name: String(w.name ?? ""),
+            code: w.code != null ? String(w.code) : undefined,
+          })) as Warehouse[];
+        });
+        warehousesCache.inflight = request;
+        try {
+          list = await request;
+          warehousesCache.entry = { data: list, at: Date.now() };
+        } finally {
+          warehousesCache.inflight = null;
+        }
+      }
+      if (mountedRef.current) setWarehouses(list);
+    } catch (err) {
+      getErrorMessage(err); // soft fail
     }
   }, []);
 
   useEffect(() => {
-    fetchSettings();
-    fetchWarehouses();
+    mountedRef.current = true;
+    // Parallel, non-blocking
+    void fetchSettings();
+    void fetchWarehouses();
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [fetchSettings, fetchWarehouses]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        if (!isFresh(settingsCache.entry)) fetchSettings();
+        if (!isFresh(warehousesCache.entry)) fetchWarehouses();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [fetchSettings, fetchWarehouses]);
 
   const updateField = <K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
     setDirty(true);
+    setFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const handleSave = async () => {
-    if (!form.company_name.trim()) {
-      showToast("error", "Validation", "Company name is required.");
+    const errors = validateSettings(form);
+    setFieldErrors(errors);
+    const top = firstError(errors);
+    if (top) {
+      showToast("error", "Validation", top);
       return;
     }
 
@@ -176,18 +408,15 @@ function Settings() {
       const { data: json } = await api.put("/settings", payload);
       const data = json.data ?? json;
       const mapped = mapApiToForm(data);
+      settingsCache.entry = { data: mapped, at: Date.now() };
       setForm(mapped);
       setSavedSnapshot(mapped);
       setDirty(false);
+      setFieldErrors({});
       showToast("success", "Saved", "Company settings updated successfully.");
-    } catch (err: any) {
-      const msg =
-        err.response?.data?.message ||
-        (err.response?.data?.errors &&
-          Object.values(err.response.data.errors).flat().join(" ")) ||
-        err.message ||
-        "Save failed";
-      showToast("error", "Error", msg);
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err, "Save failed");
+      showToast("error", "Error", msg || "Save failed");
     } finally {
       setSaving(false);
     }
@@ -196,28 +425,14 @@ function Settings() {
   const handleReset = () => {
     setForm(savedSnapshot);
     setDirty(false);
+    setFieldErrors({});
     showToast("info", "Reset", "Form reset to last saved values.");
   };
 
-  if (loading) {
-    return (
-      <div className="system-page">
-        <Sidebar />
-        <div className="main-wrapper">
-          <Topbar />
-          <main className="content">
-            <div className="page-header">
-              <div>
-                <h1 className="page-title">Company Settings</h1>
-                <p className="page-subtitle">Loading…</p>
-              </div>
-            </div>
-          </main>
-        </div>
-      </div>
-    );
-  }
+  const fieldClass = (key: keyof SettingsForm) =>
+    fieldErrors[key] ? "form-field has-error" : "form-field";
 
+  // Always render the full form immediately — never block on network
   return (
     <div className="system-page">
       <Sidebar />
@@ -229,7 +444,7 @@ function Settings() {
               <h1 className="page-title">Company Settings</h1>
               <p className="page-subtitle">
                 Organization profile for System Anchor — Naga City, Camarines Sur
-                {dirty ? " · Unsaved changes" : ""}
+                {loading ? " · Loading…" : dirty ? " · Unsaved changes" : ""}
               </p>
             </div>
             <div className="page-actions">
@@ -237,7 +452,7 @@ function Settings() {
                 type="button"
                 className="btn btn-secondary"
                 onClick={handleReset}
-                disabled={saving || !dirty}
+                disabled={saving || !dirty || loading}
               >
                 Reset
               </button>
@@ -245,7 +460,7 @@ function Settings() {
                 type="button"
                 className="btn btn-primary"
                 onClick={handleSave}
-                disabled={saving}
+                disabled={saving || loading}
               >
                 {saving ? "Saving…" : "Save Changes"}
               </button>
@@ -259,7 +474,11 @@ function Settings() {
                 type="button"
                 className="btn btn-sm btn-secondary"
                 style={{ marginLeft: 12 }}
-                onClick={fetchSettings}
+                onClick={() => {
+                  settingsCache.entry = null;
+                  autoRetryRef.current = 0;
+                  fetchSettings(true);
+                }}
               >
                 Retry
               </button>
@@ -273,29 +492,38 @@ function Settings() {
               </div>
               <div className="card-body">
                 <div className="form-grid">
-                  <div className="form-field">
+                  <div className={fieldClass("company_name")}>
                     <label>Company Name *</label>
                     <input
                       type="text"
                       value={form.company_name}
                       onChange={(e) => updateField("company_name", e.target.value)}
+                      maxLength={150}
+                      aria-invalid={!!fieldErrors.company_name}
                     />
+                    {fieldErrors.company_name && (
+                      <span className="field-error">{fieldErrors.company_name}</span>
+                    )}
                   </div>
-                  <div className="form-field">
+                  <div className={fieldClass("trading_name")}>
                     <label>Trading Name</label>
                     <input
                       type="text"
                       value={form.trading_name}
                       onChange={(e) => updateField("trading_name", e.target.value)}
+                      maxLength={150}
                     />
                   </div>
-                  <div className="form-field">
+                  <div className={fieldClass("tin")}>
                     <label>TIN / Tax ID</label>
                     <input
                       type="text"
                       value={form.tin}
                       onChange={(e) => updateField("tin", e.target.value)}
+                      maxLength={20}
+                      aria-invalid={!!fieldErrors.tin}
                     />
+                    {fieldErrors.tin && <span className="field-error">{fieldErrors.tin}</span>}
                   </div>
                   <div className="form-field">
                     <label>Industry</label>
@@ -350,13 +578,18 @@ function Settings() {
                       onChange={(e) => updateField("region", e.target.value)}
                     />
                   </div>
-                  <div className="form-field">
+                  <div className={fieldClass("zip_code")}>
                     <label>ZIP / Postal Code</label>
                     <input
                       type="text"
                       value={form.zip_code}
                       onChange={(e) => updateField("zip_code", e.target.value)}
+                      maxLength={12}
+                      aria-invalid={!!fieldErrors.zip_code}
                     />
+                    {fieldErrors.zip_code && (
+                      <span className="field-error">{fieldErrors.zip_code}</span>
+                    )}
                   </div>
                   <div className="form-field">
                     <label>Country</label>
@@ -384,29 +617,42 @@ function Settings() {
               </div>
               <div className="card-body">
                 <div className="form-grid">
-                  <div className="form-field">
+                  <div className={fieldClass("phone")}>
                     <label>Phone</label>
                     <input
                       type="text"
                       value={form.phone}
                       onChange={(e) => updateField("phone", e.target.value)}
+                      aria-invalid={!!fieldErrors.phone}
                     />
+                    {fieldErrors.phone && (
+                      <span className="field-error">{fieldErrors.phone}</span>
+                    )}
                   </div>
-                  <div className="form-field">
+                  <div className={fieldClass("email")}>
                     <label>Email</label>
                     <input
                       type="email"
                       value={form.email}
                       onChange={(e) => updateField("email", e.target.value)}
+                      aria-invalid={!!fieldErrors.email}
                     />
+                    {fieldErrors.email && (
+                      <span className="field-error">{fieldErrors.email}</span>
+                    )}
                   </div>
-                  <div className="form-field">
+                  <div className={fieldClass("website")}>
                     <label>Website</label>
                     <input
                       type="text"
                       value={form.website}
                       onChange={(e) => updateField("website", e.target.value)}
+                      placeholder="https://example.com"
+                      aria-invalid={!!fieldErrors.website}
                     />
+                    {fieldErrors.website && (
+                      <span className="field-error">{fieldErrors.website}</span>
+                    )}
                   </div>
                   <div className="form-field">
                     <label>Timezone</label>
@@ -485,7 +731,7 @@ function Settings() {
                       <option value="July">July</option>
                     </select>
                   </div>
-                  <div className="form-field">
+                  <div className={fieldClass("low_stock_threshold")}>
                     <label>Low Stock Threshold</label>
                     <input
                       type="number"
@@ -493,7 +739,11 @@ function Settings() {
                       step="any"
                       value={form.low_stock_threshold}
                       onChange={(e) => updateField("low_stock_threshold", e.target.value)}
+                      aria-invalid={!!fieldErrors.low_stock_threshold}
                     />
+                    {fieldErrors.low_stock_threshold && (
+                      <span className="field-error">{fieldErrors.low_stock_threshold}</span>
+                    )}
                   </div>
                   <div className="form-field">
                     <label>Auto-reorder</label>

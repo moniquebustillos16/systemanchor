@@ -19,14 +19,19 @@ class PurchaseOrder extends Model
         'supplier_id',
         'warehouse_id',
         'order_date',
+        'expected_date',
+        'reference',
+        'notes',
         'items',
         'total',
         'status',
     ];
 
     protected $casts = [
-        'order_date' => 'date',
-        'total'      => 'float',
+        'order_date'    => 'date',
+        'expected_date' => 'date',
+        'total'         => 'float',
+        'items'         => 'integer',
     ];
 
     protected static function boot()
@@ -37,21 +42,48 @@ class PurchaseOrder extends Model
             if (empty($model->id)) {
                 $model->id = (string) Str::uuid();
             }
+
             if (empty($model->po_number)) {
-                $model->po_number = 'PO-' . date('Y') . '-' . str_pad(
-                    (string) random_int(1, 9999),
-                    4,
-                    '0',
-                    STR_PAD_LEFT
-                );
+                $model->po_number = static::generateUniquePoNumber();
             }
+
             if (empty($model->order_date)) {
                 $model->order_date = now()->toDateString();
             }
+
             if (empty($model->status)) {
                 $model->status = 'pending';
             }
+
+            // Normalize items / total so validation + DB stay happy
+            if ($model->items === null || $model->items === '') {
+                $model->items = 1;
+            } else {
+                $model->items = (int) max(1, round((float) $model->items));
+            }
+
+            if ($model->total === null || $model->total === '') {
+                $model->total = 0;
+            }
         });
+    }
+
+    /**
+     * PO-YYYYMMDD-XXXX  (collision-resistant; retries on rare clash)
+     */
+    public static function generateUniquePoNumber(): string
+    {
+        $prefix = 'PO-' . now()->format('Ymd') . '-';
+
+        for ($i = 0; $i < 12; $i++) {
+            $candidate = $prefix . strtoupper(Str::random(4));
+            if (!static::withTrashed()->where('po_number', $candidate)->exists()) {
+                return $candidate;
+            }
+        }
+
+        // Extremely rare fallback
+        return $prefix . strtoupper(Str::random(8));
     }
 
     public function supplier()

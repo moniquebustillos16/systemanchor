@@ -319,6 +319,180 @@ function applyTheme(theme: "light" | "dark" | "system") {
   return resolved;
 }
 
+function getAuthToken(): string | null {
+  return (
+    localStorage.getItem("sa-auth") ||
+    localStorage.getItem("token") ||
+    localStorage.getItem("auth_token")
+  );
+}
+
+function isCanceled(err: unknown): boolean {
+  const e = err as any;
+  return e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError";
+}
+
+/* ===================== MODULE CACHE (survives Strict Mode remounts) ===================== */
+
+type CacheEntry<T> = { data: T; at: number };
+
+const PROFILE_TTL_MS = 5 * 60_000;
+const NOTIFS_TTL_MS = 45_000;
+const UNREAD_POLL_MS = 45_000; // was 8s — caused constant request spam
+const REQUEST_TIMEOUT_MS = 20_000;
+
+type ProfilePayload = {
+  name?: string;
+  email?: string;
+  image_url?: string | null;
+  roleName?: string | null;
+  theme?: "light" | "dark" | "system";
+};
+
+const profileCache: {
+  entry: CacheEntry<ProfilePayload> | null;
+  inflight: Promise<ProfilePayload | null> | null;
+} = { entry: null, inflight: null };
+
+const notifsCache: {
+  entry: CacheEntry<{ list: Notif[]; fromApi: boolean }> | null;
+  inflight: Promise<{ list: Notif[]; fromApi: boolean }> | null;
+} = { entry: null, inflight: null };
+
+const unreadCache: {
+  entry: CacheEntry<number> | null;
+  inflight: Promise<number> | null;
+  lastKnown: number;
+} = { entry: null, inflight: null, lastKnown: -1 };
+
+/** One bootstrap per session — remounts only hydrate / join in-flight */
+let topbarBootstrapStarted = false;
+
+function isFresh<T>(entry: CacheEntry<T> | null, ttl: number): entry is CacheEntry<T> {
+  return !!entry && Date.now() - entry.at < ttl;
+}
+
+function extractNotifRows(json: any): any[] {
+  if (Array.isArray(json?.data)) return json.data;
+  if (Array.isArray(json?.data?.data)) return json.data.data;
+  if (Array.isArray(json)) return json;
+  return [];
+}
+
+async function fetchProfileOnce(): Promise<ProfilePayload | null> {
+  if (isFresh(profileCache.entry, PROFILE_TTL_MS)) {
+    return profileCache.entry.data;
+  }
+  if (profileCache.inflight) return profileCache.inflight;
+
+  const token = getAuthToken();
+  if (!token) return null;
+
+  const request = (async (): Promise<ProfilePayload | null> => {
+    try {
+      const { data: json } = await api.get("/profile", { timeout: REQUEST_TIMEOUT_MS });
+      const data = json?.data ?? json;
+      const user = data?.user;
+      const settings = data?.settings;
+      const payload: ProfilePayload = {
+        name: user?.name,
+        email: user?.email,
+        image_url: resolveMediaUrl(user?.image_url || user?.image_path) || null,
+        roleName: user?.role?.name ?? null,
+        theme: settings?.theme,
+      };
+      profileCache.entry = { data: payload, at: Date.now() };
+      return payload;
+    } catch (err) {
+      if (isCanceled(err)) return profileCache.entry?.data ?? null;
+      return profileCache.entry?.data ?? null;
+    } finally {
+      profileCache.inflight = null;
+    }
+  })();
+
+  profileCache.inflight = request;
+  return request;
+}
+
+async function fetchNotificationsOnce(force = false): Promise<{ list: Notif[]; fromApi: boolean }> {
+  if (!force && isFresh(notifsCache.entry, NOTIFS_TTL_MS)) {
+    return notifsCache.entry.data;
+  }
+  if (notifsCache.inflight) return notifsCache.inflight;
+
+  const token = getAuthToken();
+  if (!token) {
+    const fallback = { list: INITIAL_NOTIFS, fromApi: false };
+    notifsCache.entry = { data: fallback, at: Date.now() };
+    return fallback;
+  }
+
+  const request = (async () => {
+    try {
+      const { data: json } = await api.get("/notifications", {
+        params: { per_page: 30 },
+        timeout: REQUEST_TIMEOUT_MS,
+      });
+      const mapped = extractNotifRows(json).map(mapApiNotif);
+      const result = { list: mapped, fromApi: true };
+      notifsCache.entry = { data: result, at: Date.now() };
+      // Keep unread cache in sync from the list when possible
+      const unread = mapped.filter((n) => !n.read).length;
+      unreadCache.entry = { data: unread, at: Date.now() };
+      unreadCache.lastKnown = unread;
+      return result;
+    } catch (err) {
+      if (isCanceled(err) && notifsCache.entry) return notifsCache.entry.data;
+      if (notifsCache.entry) return notifsCache.entry.data;
+      const fallback = { list: INITIAL_NOTIFS, fromApi: false };
+      notifsCache.entry = { data: fallback, at: Date.now() };
+      return fallback;
+    } finally {
+      notifsCache.inflight = null;
+    }
+  })();
+
+  notifsCache.inflight = request;
+  return request;
+}
+
+async function fetchUnreadCountOnce(force = false): Promise<number> {
+  if (!force && isFresh(unreadCache.entry, NOTIFS_TTL_MS)) {
+    return unreadCache.entry.data;
+  }
+  if (unreadCache.inflight) return unreadCache.inflight;
+
+  const token = getAuthToken();
+  if (!token) return 0;
+
+  const request = (async () => {
+    try {
+      const { data: json } = await api.get("/notifications/unread-count", {
+        timeout: REQUEST_TIMEOUT_MS,
+      });
+      const count = Number(json?.data?.unread_count ?? json?.unread_count ?? 0);
+      unreadCache.entry = { data: count, at: Date.now() };
+      return count;
+    } catch (err) {
+      if (isCanceled(err) && unreadCache.entry) return unreadCache.entry.data;
+      if (unreadCache.entry) return unreadCache.entry.data;
+      return unreadCache.lastKnown >= 0 ? unreadCache.lastKnown : 0;
+    } finally {
+      unreadCache.inflight = null;
+    }
+  })();
+
+  unreadCache.inflight = request;
+  return request;
+}
+
+/** Invalidate notification caches after mark-read / dismiss so the next open is fresh */
+function invalidateNotifCaches() {
+  notifsCache.entry = null;
+  unreadCache.entry = null;
+}
+
 /* ===================== COMPONENT ===================== */
 
 type TopbarProps = {
@@ -347,10 +521,16 @@ function Topbar({
   const [isDark, setIsDark] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
-  const [notifications, setNotifications] = useState<Notif[]>([]);
-  const [notifsLoading, setNotifsLoading] = useState(true);
-  const [notifsFromApi, setNotifsFromApi] = useState(false);
-  const [profileLoading, setProfileLoading] = useState(syncProfile);
+  const [notifications, setNotifications] = useState<Notif[]>(() =>
+    notifsCache.entry ? notifsCache.entry.data.list : []
+  );
+  const [notifsLoading, setNotifsLoading] = useState(() => !notifsCache.entry);
+  const [notifsFromApi, setNotifsFromApi] = useState(() =>
+    notifsCache.entry ? notifsCache.entry.data.fromApi : false
+  );
+  const [profileLoading, setProfileLoading] = useState(
+    () => syncProfile && !isFresh(profileCache.entry, PROFILE_TTL_MS)
+  );
 
   // Live user display (can be overridden by props)
   const [displayName, setDisplayName] = useState(propUserName ?? "Admin User");
@@ -377,14 +557,22 @@ function Topbar({
   useEffect(() => {
     if (unreadCount > prevUnreadRef.current) {
       setBadgePulse(true);
-      const t = window.setTimeout(() => setBadgePulse(false), 900);
+      const t = setTimeout(() => setBadgePulse(false), 900);
       prevUnreadRef.current = unreadCount;
-      return () => window.clearTimeout(t);
+      return () => clearTimeout(t);
     }
     prevUnreadRef.current = unreadCount;
   }, [unreadCount]);
 
-  /* ---------- Theme init + optional profile sync ---------- */
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  /* ---------- Theme init + optional profile sync (cached, deduped) ---------- */
   useEffect(() => {
     const stored = localStorage.getItem("sa-theme");
     const dark = stored === "dark";
@@ -396,51 +584,48 @@ function Topbar({
       return;
     }
 
-    const token =
-      localStorage.getItem("sa-auth") ||
-      localStorage.getItem("token") ||
-      localStorage.getItem("auth_token");
-    if (!token) {
+    if (!getAuthToken()) {
+      setProfileLoading(false);
+      return;
+    }
+
+    // Instant paint from cache
+    if (isFresh(profileCache.entry, PROFILE_TTL_MS)) {
+      const p = profileCache.entry.data;
+      if (p.name && !propUserName) {
+        setDisplayName(p.name);
+        setDisplayInitials(computeInitials(p.name));
+      }
+      if (p.email && !propUserEmail) setDisplayEmail(p.email);
+      if (p.image_url !== undefined && !propUserImageUrl) setDisplayImage(p.image_url);
+      if (p.roleName) setRoleName(p.roleName);
+      if (p.theme) {
+        const resolved = applyTheme(p.theme);
+        setIsDark(resolved === "dark");
+      }
       setProfileLoading(false);
       return;
     }
 
     let cancelled = false;
-
     (async () => {
-      try {
-        const { data: json } = await api.get("/profile");
-        if (cancelled) return;
-
-        const data = json?.data ?? json;
-        const user = data.user;
-        const settings = data.settings;
-
-        if (cancelled) return;
-
-        if (user?.name && !propUserName) {
-          setDisplayName(user.name);
-          setDisplayInitials(computeInitials(user.name));
-        }
-        if (user?.email && !propUserEmail) {
-          setDisplayEmail(user.email);
-        }
-        if ((user?.image_url || user?.image_path) && !propUserImageUrl) {
-          setDisplayImage(resolveMediaUrl(user.image_url) || null);
-        }
-        if (user?.role?.name) {
-          setRoleName(user.role.name);
-        }
-
-        if (settings?.theme) {
-          const resolved = applyTheme(settings.theme as "light" | "dark" | "system");
-          setIsDark(resolved === "dark");
-        }
-      } catch {
-        // silent – keep localStorage theme / default name
-      } finally {
-        if (!cancelled) setProfileLoading(false);
+      const p = await fetchProfileOnce();
+      if (cancelled || !mountedRef.current || !p) {
+        if (!cancelled && mountedRef.current) setProfileLoading(false);
+        return;
       }
+      if (p.name && !propUserName) {
+        setDisplayName(p.name);
+        setDisplayInitials(computeInitials(p.name));
+      }
+      if (p.email && !propUserEmail) setDisplayEmail(p.email);
+      if (p.image_url !== undefined && !propUserImageUrl) setDisplayImage(p.image_url);
+      if (p.roleName) setRoleName(p.roleName);
+      if (p.theme) {
+        const resolved = applyTheme(p.theme);
+        setIsDark(resolved === "dark");
+      }
+      if (mountedRef.current) setProfileLoading(false);
     })();
 
     return () => {
@@ -477,6 +662,22 @@ function Topbar({
       } | undefined;
       if (!detail) return;
 
+      // Keep module cache in sync so remounts / other pages don't re-hit /profile
+      const prev = profileCache.entry?.data ?? {};
+      profileCache.entry = {
+        data: {
+          ...prev,
+          name: detail.name ?? prev.name,
+          email: detail.email !== undefined ? detail.email || undefined : prev.email,
+          image_url:
+            detail.image_url !== undefined
+              ? resolveMediaUrl(detail.image_url)
+              : prev.image_url,
+          theme: detail.theme ?? prev.theme,
+        },
+        at: Date.now(),
+      };
+
       if (detail.name && !propUserName) {
         setDisplayName(detail.name);
         setDisplayInitials(computeInitials(detail.name));
@@ -503,14 +704,18 @@ function Topbar({
     const themeValue = next ? "dark" : "light";
     applyTheme(themeValue);
 
-    const token =
-      localStorage.getItem("sa-auth") ||
-      localStorage.getItem("token") ||
-      localStorage.getItem("auth_token");
-    if (!token) return;
+    // Update profile cache theme without a full refetch
+    if (profileCache.entry) {
+      profileCache.entry = {
+        data: { ...profileCache.entry.data, theme: themeValue },
+        at: profileCache.entry.at,
+      };
+    }
+
+    if (!getAuthToken()) return;
 
     try {
-      await api.put("/profile/settings", { theme: themeValue });
+      await api.put("/profile/settings", { theme: themeValue }, { timeout: REQUEST_TIMEOUT_MS });
     } catch {
       // local theme still applied
     }
@@ -579,116 +784,163 @@ function Topbar({
     }
   };
 
-  /* Notifications — load from API, fallback to demo data */
-  const fetchNotifications = useCallback(async () => {
-    const token =
-      localStorage.getItem("sa-auth") ||
-      localStorage.getItem("token") ||
-      localStorage.getItem("auth_token");
+  /* Notifications — cached + deduped; poll is light (unread-count only) */
+  const applyNotifs = useCallback((list: Notif[], fromApi: boolean) => {
+    if (!mountedRef.current) return;
+    setNotifications(list);
+    setNotifsFromApi(fromApi);
+    setNotifsLoading(false);
+  }, []);
 
-    if (!token) {
-      setNotifications(INITIAL_NOTIFS);
-      setNotifsFromApi(false);
-      setNotifsLoading(false);
+  const loadNotifications = useCallback(
+    async (force = false) => {
+      // Paint cache immediately
+      if (!force && isFresh(notifsCache.entry, NOTIFS_TTL_MS)) {
+        applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
+        return;
+      }
+      if (!force && notifsCache.entry) {
+        applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
+      } else if (!notifsCache.entry) {
+        setNotifsLoading(true);
+      }
+
+      const result = await fetchNotificationsOnce(force);
+      applyNotifs(result.list, result.fromApi);
+    },
+    [applyNotifs]
+  );
+
+  // Bootstrap once per session (Strict Mode safe).
+  // Defer network so page-critical XHRs (roles/permissions) are not starved on first paint.
+  useEffect(() => {
+    if (topbarBootstrapStarted) {
+      // Remount: hydrate from cache / join in-flight — no new network
+      if (notifsCache.entry) {
+        applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
+      } else if (notifsCache.inflight) {
+        notifsCache.inflight.then((r) => applyNotifs(r.list, r.fromApi)).catch(() => {});
+      }
+      return;
+    }
+    topbarBootstrapStarted = true;
+
+    // Instant UI from cache if present
+    if (notifsCache.entry) {
+      applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
       return;
     }
 
-    try {
-      const { data: json } = await api.get("/notifications", { params: { per_page: 30 } });
-      const rows = Array.isArray(json?.data)
-        ? json.data
-        : Array.isArray(json?.data?.data)
-          ? json.data.data
-          : Array.isArray(json)
-            ? json
-            : [];
-      const mapped = rows.map(mapApiNotif);
-      setNotifications(mapped);
-      setNotifsFromApi(true);
-    } catch {
-      setNotifications(INITIAL_NOTIFS);
-      setNotifsFromApi(false);
-    } finally {
-      setNotifsLoading(false);
+    // No cache → wait for idle / short delay so Roles catalog wins the first burst
+    let cancelled = false;
+    const run = () => {
+      if (!cancelled) void loadNotifications(false);
+    };
+
+    // Avoid `"x" in window` narrowing (can make `window` become `never` under some TS libs)
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+
+    let idleId: number | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    if (typeof w.requestIdleCallback === "function") {
+      idleId = w.requestIdleCallback(run, { timeout: 2500 });
+    } else {
+      timeoutId = setTimeout(run, 1800);
     }
-  }, []);
 
+    return () => {
+      cancelled = true;
+      if (idleId !== null && typeof w.cancelIdleCallback === "function") {
+        w.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
+  }, [loadNotifications, applyNotifs]);
+
+  // Refresh when panel opens — only if cache is stale (user opened the panel)
   useEffect(() => {
-    fetchNotifications();
-  }, [fetchNotifications]);
+    if (!notifOpen) return;
+    if (isFresh(notifsCache.entry, NOTIFS_TTL_MS)) return;
+    void loadNotifications(false);
+  }, [notifOpen, loadNotifications]);
 
-  // Refresh when panel opens
-  useEffect(() => {
-    if (notifOpen && notifsFromApi) {
-      fetchNotifications();
-    }
-  }, [notifOpen]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Near real-time: poll unread-count every 8s; auto-refresh list when count changes
+  // Poll unread-count every 45s. First tick deferred so it does not race page data.
   useEffect(() => {
     let cancelled = false;
-    let lastUnread = -1;
-
-    const hasToken = () =>
-      !!(
-        localStorage.getItem("sa-auth") ||
-        localStorage.getItem("token") ||
-        localStorage.getItem("auth_token")
-      );
 
     const tick = async () => {
-      if (document.visibilityState !== "visible" || cancelled || !hasToken()) return;
+      if (document.visibilityState !== "visible" || cancelled || !getAuthToken()) return;
       try {
-        const { data: json } = await api.get("/notifications/unread-count");
+        const count = await fetchUnreadCountOnce(true);
         if (cancelled) return;
-        const count = Number(json?.data?.unread_count ?? json?.unread_count ?? 0);
-        // First successful poll or count changed → full list refresh
-        if (lastUnread === -1 || count !== lastUnread) {
-          lastUnread = count;
-          await fetchNotifications();
+        const prev = unreadCache.lastKnown;
+        if (prev === -1) {
+          unreadCache.lastKnown = count;
+          if (!notifsCache.entry) await loadNotifications(false);
+          return;
+        }
+        if (count !== prev) {
+          unreadCache.lastKnown = count;
+          await loadNotifications(true);
         }
       } catch {
-        /* ignore transient network/CORS errors */
+        /* ignore transient errors */
       }
     };
 
-    // First tick soon so badge updates without full page refresh
-    const boot = window.setTimeout(tick, 1500);
-    const id = window.setInterval(tick, 8_000);
+    const boot = setTimeout(tick, 12_000);
+    const id = window.setInterval(tick, UNREAD_POLL_MS);
     return () => {
       cancelled = true;
-      window.clearTimeout(boot);
+      clearTimeout(boot);
       window.clearInterval(id);
     };
-  }, [fetchNotifications]);
+  }, [loadNotifications]);
 
-  // Other pages can fire: window.dispatchEvent(new Event("sa-notifications-refresh"))
+  // Other pages: window.dispatchEvent(new Event("sa-notifications-refresh"))
   useEffect(() => {
     const onRefresh = () => {
-      fetchNotifications();
+      invalidateNotifCaches();
+      void loadNotifications(true);
     };
     window.addEventListener("sa-notifications-refresh", onRefresh);
     return () => window.removeEventListener("sa-notifications-refresh", onRefresh);
-  }, [fetchNotifications]);
+  }, [loadNotifications]);
 
-  // Refresh when user returns to the tab
+  // Tab visible again — quiet revalidate only if stale
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === "visible") {
-        fetchNotifications();
-      }
+      if (document.visibilityState !== "visible") return;
+      if (isFresh(notifsCache.entry, NOTIFS_TTL_MS)) return;
+      void loadNotifications(false);
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
-  }, [fetchNotifications]);
+  }, [loadNotifications]);
 
-
+  const syncNotifCacheFromState = (list: Notif[]) => {
+    notifsCache.entry = {
+      data: { list, fromApi: notifsFromApi },
+      at: Date.now(),
+    };
+    const unread = list.filter((n) => !n.read).length;
+    unreadCache.entry = { data: unread, at: Date.now() };
+    unreadCache.lastKnown = unread;
+  };
 
   const markAllRead = async () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setNotifications((prev) => {
+      const next = prev.map((n) => ({ ...n, read: true }));
+      syncNotifCacheFromState(next);
+      return next;
+    });
     if (!notifsFromApi) return;
     try {
-      await api.post("/notifications/read-all");
+      await api.post("/notifications/read-all", null, { timeout: REQUEST_TIMEOUT_MS });
     } catch {
       /* optimistic UI kept */
     }
@@ -696,12 +948,14 @@ function Topbar({
 
   const markOneRead = async (id: string, e?: ReactMouseEvent) => {
     e?.stopPropagation();
-    setNotifications((prev) =>
-      prev.map((x) => (x.id === id ? { ...x, read: true } : x))
-    );
+    setNotifications((prev) => {
+      const next = prev.map((x) => (x.id === id ? { ...x, read: true } : x));
+      syncNotifCacheFromState(next);
+      return next;
+    });
     if (!notifsFromApi) return;
     try {
-      await api.post(`/notifications/${id}/read`);
+      await api.post(`/notifications/${id}/read`, null, { timeout: REQUEST_TIMEOUT_MS });
     } catch {
       /* optimistic */
     }
@@ -709,23 +963,29 @@ function Topbar({
 
   const dismissNotif = async (id: string, e: ReactMouseEvent) => {
     e.stopPropagation();
-    setNotifications((prev) => prev.filter((x) => x.id !== id));
+    setNotifications((prev) => {
+      const next = prev.filter((x) => x.id !== id);
+      syncNotifCacheFromState(next);
+      return next;
+    });
     if (!notifsFromApi) return;
     try {
-      await api.delete(`/notifications/${id}`);
+      await api.delete(`/notifications/${id}`, { timeout: REQUEST_TIMEOUT_MS });
     } catch {
       /* optimistic */
     }
   };
 
   const openNotif = async (n: Notif) => {
-    setNotifications((prev) =>
-      prev.map((x) => (x.id === n.id ? { ...x, read: true } : x))
-    );
+    setNotifications((prev) => {
+      const next = prev.map((x) => (x.id === n.id ? { ...x, read: true } : x));
+      syncNotifCacheFromState(next);
+      return next;
+    });
     setNotifOpen(false);
     if (notifsFromApi && !n.read) {
       try {
-        await api.post(`/notifications/${n.id}/read`);
+        await api.post(`/notifications/${n.id}/read`, null, { timeout: REQUEST_TIMEOUT_MS });
       } catch {
         /* ignore */
       }
@@ -775,6 +1035,15 @@ function Topbar({
 
   const handleLogout = () => {
     setUserOpen(false);
+    // Drop session caches so the next login doesn't show stale user data
+    profileCache.entry = null;
+    profileCache.inflight = null;
+    notifsCache.entry = null;
+    notifsCache.inflight = null;
+    unreadCache.entry = null;
+    unreadCache.inflight = null;
+    unreadCache.lastKnown = -1;
+    topbarBootstrapStarted = false;
     if (onLogout) onLogout();
     else {
       localStorage.removeItem("sa-auth");
