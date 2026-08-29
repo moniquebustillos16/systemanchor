@@ -15,20 +15,27 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware) {
 
-    $middleware->prepend(HandleCors::class);
+        // Force-remove Laravel CORS so only index.php handles it
+        // $middleware->remove(HandleCors::class);
 
-    $middleware->alias([
-        'permission' => PermissionMiddleware::class,
-    ]);
+        /*
+        |--------------------------------------------------------------------------
+        | Permission Middleware
+        |--------------------------------------------------------------------------
+        */
 
-    $middleware->redirectGuestsTo(function ($request) {
-        if ($request->expectsJson() || $request->is('api/*')) {
-            return null;
-        }
+        $middleware->alias([
+            'permission' => PermissionMiddleware::class,
+        ]);
 
-        return '/login';
-    });
-})
+        $middleware->redirectGuestsTo(function ($request) {
+            if ($request->expectsJson() || $request->is('api/*')) {
+                return null;
+            }
+
+            return '/login';
+        });
+    })
     ->withExceptions(function (Exceptions $exceptions) {
 
         $exceptions->render(function (
@@ -37,10 +44,11 @@ return Application::configure(basePath: dirname(__DIR__))
         ) {
             if ($request->expectsJson() || $request->is('api/*')) {
                 return response()->json([
-                    'message' => 'Unauthenticated.',
+                    'message' => 'Unauthenticated.'
                 ], 401);
             }
         });
 
     })
     ->create();
+
