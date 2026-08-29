@@ -2,16 +2,6 @@
 
 return [
 
-    /*
-    |--------------------------------------------------------------------------
-    | CORS – Bearer token API (no cookie credentials)
-    |--------------------------------------------------------------------------
-    |
-    | Frontend origin: http://localhost:5173
-    | API base URL:    http://localhost:8000/api
-    |
-    */
-
     'paths' => [
         'api/*',
         'sanctum/csrf-cookie',
@@ -34,8 +24,6 @@ return [
 
     'max_age' => 0,
 
-    // false = Bearer tokens only (matches axios withCredentials: false)
-    // set true only if you switch to Sanctum cookie SPA auth
     'supports_credentials' => false,
 
 ];
