@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../../api/axios";
+import { useProfile } from "../../hooks/useProfile";
 import "../css/Topbar.css";
 
 /* ===================== ICONS ===================== */
@@ -139,7 +140,7 @@ const IconChevronRight = () => (
   </svg>
 );
 
-/* ===================== SAMPLE SEARCH DATA ===================== */
+/* ===================== SEARCH / NOTIFS ===================== */
 
 type SearchHit = {
   type: string;
@@ -246,9 +247,7 @@ function formatRelativeTime(iso: string | null | undefined): string {
 }
 
 function mapApiNotif(row: any): Notif {
-  const type = ["warning", "success", "info", "danger"].includes(row.type)
-    ? row.type
-    : "info";
+  const type = ["warning", "success", "info", "danger"].includes(row.type) ? row.type : "info";
   return {
     id: String(row.id),
     type,
@@ -276,14 +275,9 @@ const NOTIF_ICONS: Record<string, () => ReactElement> = {
 
 /* ===================== HELPERS ===================== */
 
-
-
-/** Resolve relative storage URLs from Laravel (e.g. /storage/users/...) */
 function resolveMediaUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  if (/^https?:\/\//i.test(url) || url.startsWith("blob:") || url.startsWith("data:")) {
-    return url;
-  }
+  if (/^https?:\/\//i.test(url) || url.startsWith("blob:") || url.startsWith("data:")) return url;
   try {
     const base =
       (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
@@ -303,7 +297,7 @@ function computeInitials(name: string): string {
       .map((w) => w[0])
       .join("")
       .slice(0, 2)
-      .toUpperCase() || "AD"
+      .toUpperCase() || "?"
   );
 }
 
@@ -332,27 +326,13 @@ function isCanceled(err: unknown): boolean {
   return e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError";
 }
 
-/* ===================== MODULE CACHE (survives Strict Mode remounts) ===================== */
+/* ===================== NOTIF CACHE ===================== */
 
 type CacheEntry<T> = { data: T; at: number };
 
-const PROFILE_TTL_MS = 5 * 60_000;
 const NOTIFS_TTL_MS = 45_000;
-const UNREAD_POLL_MS = 45_000; // was 8s — caused constant request spam
+const UNREAD_POLL_MS = 45_000;
 const REQUEST_TIMEOUT_MS = 20_000;
-
-type ProfilePayload = {
-  name?: string;
-  email?: string;
-  image_url?: string | null;
-  roleName?: string | null;
-  theme?: "light" | "dark" | "system";
-};
-
-const profileCache: {
-  entry: CacheEntry<ProfilePayload> | null;
-  inflight: Promise<ProfilePayload | null> | null;
-} = { entry: null, inflight: null };
 
 const notifsCache: {
   entry: CacheEntry<{ list: Notif[]; fromApi: boolean }> | null;
@@ -365,7 +345,6 @@ const unreadCache: {
   lastKnown: number;
 } = { entry: null, inflight: null, lastKnown: -1 };
 
-/** One bootstrap per session — remounts only hydrate / join in-flight */
 let topbarBootstrapStarted = false;
 
 function isFresh<T>(entry: CacheEntry<T> | null, ttl: number): entry is CacheEntry<T> {
@@ -379,46 +358,8 @@ function extractNotifRows(json: any): any[] {
   return [];
 }
 
-async function fetchProfileOnce(): Promise<ProfilePayload | null> {
-  if (isFresh(profileCache.entry, PROFILE_TTL_MS)) {
-    return profileCache.entry.data;
-  }
-  if (profileCache.inflight) return profileCache.inflight;
-
-  const token = getAuthToken();
-  if (!token) return null;
-
-  const request = (async (): Promise<ProfilePayload | null> => {
-    try {
-      const { data: json } = await api.get("/profile", { timeout: REQUEST_TIMEOUT_MS });
-      const data = json?.data ?? json;
-      const user = data?.user;
-      const settings = data?.settings;
-      const payload: ProfilePayload = {
-        name: user?.name,
-        email: user?.email,
-        image_url: resolveMediaUrl(user?.image_url || user?.image_path) || null,
-        roleName: user?.role?.name ?? null,
-        theme: settings?.theme,
-      };
-      profileCache.entry = { data: payload, at: Date.now() };
-      return payload;
-    } catch (err) {
-      if (isCanceled(err)) return profileCache.entry?.data ?? null;
-      return profileCache.entry?.data ?? null;
-    } finally {
-      profileCache.inflight = null;
-    }
-  })();
-
-  profileCache.inflight = request;
-  return request;
-}
-
 async function fetchNotificationsOnce(force = false): Promise<{ list: Notif[]; fromApi: boolean }> {
-  if (!force && isFresh(notifsCache.entry, NOTIFS_TTL_MS)) {
-    return notifsCache.entry.data;
-  }
+  if (!force && isFresh(notifsCache.entry, NOTIFS_TTL_MS)) return notifsCache.entry.data;
   if (notifsCache.inflight) return notifsCache.inflight;
 
   const token = getAuthToken();
@@ -437,7 +378,6 @@ async function fetchNotificationsOnce(force = false): Promise<{ list: Notif[]; f
       const mapped = extractNotifRows(json).map(mapApiNotif);
       const result = { list: mapped, fromApi: true };
       notifsCache.entry = { data: result, at: Date.now() };
-      // Keep unread cache in sync from the list when possible
       const unread = mapped.filter((n) => !n.read).length;
       unreadCache.entry = { data: unread, at: Date.now() };
       unreadCache.lastKnown = unread;
@@ -458,9 +398,7 @@ async function fetchNotificationsOnce(force = false): Promise<{ list: Notif[]; f
 }
 
 async function fetchUnreadCountOnce(force = false): Promise<number> {
-  if (!force && isFresh(unreadCache.entry, NOTIFS_TTL_MS)) {
-    return unreadCache.entry.data;
-  }
+  if (!force && isFresh(unreadCache.entry, NOTIFS_TTL_MS)) return unreadCache.entry.data;
   if (unreadCache.inflight) return unreadCache.inflight;
 
   const token = getAuthToken();
@@ -487,7 +425,6 @@ async function fetchUnreadCountOnce(force = false): Promise<number> {
   return request;
 }
 
-/** Invalidate notification caches after mark-read / dismiss so the next open is fresh */
 function invalidateNotifCaches() {
   notifsCache.entry = null;
   unreadCache.entry = null;
@@ -501,7 +438,6 @@ type TopbarProps = {
   userEmail?: string;
   userImageUrl?: string;
   onLogout?: () => void;
-  /** When true (default), fetch /api/profile to populate name/theme/avatar */
   syncProfile?: boolean;
 };
 
@@ -528,17 +464,16 @@ function Topbar({
   const [notifsFromApi, setNotifsFromApi] = useState(() =>
     notifsCache.entry ? notifsCache.entry.data.fromApi : false
   );
-  const [profileLoading, setProfileLoading] = useState(
-    () => syncProfile && !isFresh(profileCache.entry, PROFILE_TTL_MS)
-  );
 
-  // Live user display (can be overridden by props)
-  const [displayName, setDisplayName] = useState(propUserName ?? "Admin User");
+  /* No loading state — show empty until data arrives, or last known name */
+  const [displayName, setDisplayName] = useState(propUserName ?? "");
   const [displayEmail, setDisplayEmail] = useState(propUserEmail ?? "");
   const [displayInitials, setDisplayInitials] = useState(
-    propUserInitials ?? computeInitials(propUserName ?? "Admin User")
+    propUserInitials ?? (propUserName ? computeInitials(propUserName) : "")
   );
-  const [displayImage, setDisplayImage] = useState<string | null>(propUserImageUrl ?? null);
+  const [displayImage, setDisplayImage] = useState<string | null>(
+    propUserImageUrl ? resolveMediaUrl(propUserImageUrl) : null
+  );
   const [roleName, setRoleName] = useState<string | null>(null);
 
   const searchRef = useRef<HTMLInputElement>(null);
@@ -572,68 +507,63 @@ function Topbar({
     };
   }, []);
 
-  /* ---------- Theme init + optional profile sync (cached, deduped) ---------- */
+  /* Profile: minimal = only GET /profile (no sessions/activity/2fa) */
+  const { user: profileUser, settings: profileSettings } = useProfile({
+    enabled: syncProfile,
+    minimal: true,
+  });
+
   useEffect(() => {
-    const stored = localStorage.getItem("sa-theme");
-    const dark = stored === "dark";
-    setIsDark(dark);
-    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    if (!profileUser) return;
 
-    if (!syncProfile) {
-      setProfileLoading(false);
-      return;
+    if (profileUser.name && !propUserName) {
+      setDisplayName(profileUser.name);
+      setDisplayInitials(computeInitials(profileUser.name));
     }
-
-    if (!getAuthToken()) {
-      setProfileLoading(false);
-      return;
+    if (profileUser.email != null && !propUserEmail) {
+      setDisplayEmail(profileUser.email);
     }
+    if (profileUser.image_url !== undefined && !propUserImageUrl) {
+      setDisplayImage(resolveMediaUrl(profileUser.image_url) || null);
+    }
+    if (profileUser.role?.name) {
+      setRoleName(profileUser.role.name);
+    }
+    if (profileSettings?.theme) {
+      const resolved = applyTheme(profileSettings.theme);
+      setIsDark(resolved === "dark");
+    }
+  }, [profileUser, profileSettings, propUserName, propUserEmail, propUserImageUrl]);
 
-    // Instant paint from cache
-    if (isFresh(profileCache.entry, PROFILE_TTL_MS)) {
-      const p = profileCache.entry.data;
-      if (p.name && !propUserName) {
-        setDisplayName(p.name);
-        setDisplayInitials(computeInitials(p.name));
+  /* Live updates when Profile page saves */
+  useEffect(() => {
+    const onProfileUpdated = (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        name?: string;
+        email?: string;
+        image_url?: string | null;
+        theme?: "light" | "dark" | "system";
+      } | undefined;
+      if (!detail) return;
+
+      if (detail.name) {
+        setDisplayName(detail.name);
+        setDisplayInitials(computeInitials(detail.name));
       }
-      if (p.email && !propUserEmail) setDisplayEmail(p.email);
-      if (p.image_url !== undefined && !propUserImageUrl) setDisplayImage(p.image_url);
-      if (p.roleName) setRoleName(p.roleName);
-      if (p.theme) {
-        const resolved = applyTheme(p.theme);
+      if (detail.email !== undefined) setDisplayEmail(detail.email || "");
+      if (detail.image_url !== undefined) {
+        setDisplayImage(resolveMediaUrl(detail.image_url) || null);
+      }
+      if (detail.theme) {
+        const resolved = applyTheme(detail.theme);
         setIsDark(resolved === "dark");
       }
-      setProfileLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    (async () => {
-      const p = await fetchProfileOnce();
-      if (cancelled || !mountedRef.current || !p) {
-        if (!cancelled && mountedRef.current) setProfileLoading(false);
-        return;
-      }
-      if (p.name && !propUserName) {
-        setDisplayName(p.name);
-        setDisplayInitials(computeInitials(p.name));
-      }
-      if (p.email && !propUserEmail) setDisplayEmail(p.email);
-      if (p.image_url !== undefined && !propUserImageUrl) setDisplayImage(p.image_url);
-      if (p.roleName) setRoleName(p.roleName);
-      if (p.theme) {
-        const resolved = applyTheme(p.theme);
-        setIsDark(resolved === "dark");
-      }
-      if (mountedRef.current) setProfileLoading(false);
-    })();
-
-    return () => {
-      cancelled = true;
     };
-  }, [syncProfile, propUserName, propUserEmail, propUserImageUrl]);
 
-  // Keep display in sync if parent forces new props
+    window.addEventListener("sa-profile-updated", onProfileUpdated);
+    return () => window.removeEventListener("sa-profile-updated", onProfileUpdated);
+  }, []);
+
   useEffect(() => {
     if (propUserName) {
       setDisplayName(propUserName);
@@ -651,52 +581,12 @@ function Topbar({
     }
   }, [propUserImageUrl]);
 
-  /* Live sync when Profile page updates name / avatar / theme */
   useEffect(() => {
-    const onProfileUpdated = (e: Event) => {
-      const detail = (e as CustomEvent).detail as {
-        name?: string;
-        email?: string;
-        image_url?: string | null;
-        theme?: "light" | "dark" | "system";
-      } | undefined;
-      if (!detail) return;
-
-      // Keep module cache in sync so remounts / other pages don't re-hit /profile
-      const prev = profileCache.entry?.data ?? {};
-      profileCache.entry = {
-        data: {
-          ...prev,
-          name: detail.name ?? prev.name,
-          email: detail.email !== undefined ? detail.email || undefined : prev.email,
-          image_url:
-            detail.image_url !== undefined
-              ? resolveMediaUrl(detail.image_url)
-              : prev.image_url,
-          theme: detail.theme ?? prev.theme,
-        },
-        at: Date.now(),
-      };
-
-      if (detail.name && !propUserName) {
-        setDisplayName(detail.name);
-        setDisplayInitials(computeInitials(detail.name));
-      }
-      if (detail.email !== undefined && !propUserEmail) {
-        setDisplayEmail(detail.email || "");
-      }
-      if (detail.image_url !== undefined && !propUserImageUrl) {
-        setDisplayImage(resolveMediaUrl(detail.image_url) || null);
-      }
-      if (detail.theme) {
-        const resolved = applyTheme(detail.theme);
-        setIsDark(resolved === "dark");
-      }
-    };
-
-    window.addEventListener("sa-profile-updated", onProfileUpdated);
-    return () => window.removeEventListener("sa-profile-updated", onProfileUpdated);
-  }, [propUserName, propUserEmail, propUserImageUrl]);
+    const stored = localStorage.getItem("sa-theme");
+    const dark = stored === "dark";
+    setIsDark(dark);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  }, []);
 
   const toggleDarkMode = async () => {
     const next = !isDark;
@@ -704,24 +594,14 @@ function Topbar({
     const themeValue = next ? "dark" : "light";
     applyTheme(themeValue);
 
-    // Update profile cache theme without a full refetch
-    if (profileCache.entry) {
-      profileCache.entry = {
-        data: { ...profileCache.entry.data, theme: themeValue },
-        at: profileCache.entry.at,
-      };
-    }
-
     if (!getAuthToken()) return;
-
     try {
       await api.put("/profile/settings", { theme: themeValue }, { timeout: REQUEST_TIMEOUT_MS });
     } catch {
-      // local theme still applied
+      /* local theme kept */
     }
   };
 
-  /* Global search */
   const handleSearch = useCallback((q: string) => {
     setQuery(q);
     setActiveIndex(-1);
@@ -784,7 +664,6 @@ function Topbar({
     }
   };
 
-  /* Notifications — cached + deduped; poll is light (unread-count only) */
   const applyNotifs = useCallback((list: Notif[], fromApi: boolean) => {
     if (!mountedRef.current) return;
     setNotifications(list);
@@ -794,7 +673,6 @@ function Topbar({
 
   const loadNotifications = useCallback(
     async (force = false) => {
-      // Paint cache immediately
       if (!force && isFresh(notifsCache.entry, NOTIFS_TTL_MS)) {
         applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
         return;
@@ -804,18 +682,14 @@ function Topbar({
       } else if (!notifsCache.entry) {
         setNotifsLoading(true);
       }
-
       const result = await fetchNotificationsOnce(force);
       applyNotifs(result.list, result.fromApi);
     },
     [applyNotifs]
   );
 
-  // Bootstrap once per session (Strict Mode safe).
-  // Defer network so page-critical XHRs (roles/permissions) are not starved on first paint.
   useEffect(() => {
     if (topbarBootstrapStarted) {
-      // Remount: hydrate from cache / join in-flight — no new network
       if (notifsCache.entry) {
         applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
       } else if (notifsCache.inflight) {
@@ -825,19 +699,16 @@ function Topbar({
     }
     topbarBootstrapStarted = true;
 
-    // Instant UI from cache if present
     if (notifsCache.entry) {
       applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
       return;
     }
 
-    // No cache → wait for idle / short delay so Roles catalog wins the first burst
     let cancelled = false;
     const run = () => {
       if (!cancelled) void loadNotifications(false);
     };
 
-    // Avoid `"x" in window` narrowing (can make `window` become `never` under some TS libs)
     const w = window as Window & {
       requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
       cancelIdleCallback?: (id: number) => void;
@@ -861,17 +732,14 @@ function Topbar({
     };
   }, [loadNotifications, applyNotifs]);
 
-  // Refresh when panel opens — only if cache is stale (user opened the panel)
   useEffect(() => {
     if (!notifOpen) return;
     if (isFresh(notifsCache.entry, NOTIFS_TTL_MS)) return;
     void loadNotifications(false);
   }, [notifOpen, loadNotifications]);
 
-  // Poll unread-count every 45s. First tick deferred so it does not race page data.
   useEffect(() => {
     let cancelled = false;
-
     const tick = async () => {
       if (document.visibilityState !== "visible" || cancelled || !getAuthToken()) return;
       try {
@@ -888,10 +756,9 @@ function Topbar({
           await loadNotifications(true);
         }
       } catch {
-        /* ignore transient errors */
+        /* ignore */
       }
     };
-
     const boot = setTimeout(tick, 12_000);
     const id = window.setInterval(tick, UNREAD_POLL_MS);
     return () => {
@@ -901,7 +768,6 @@ function Topbar({
     };
   }, [loadNotifications]);
 
-  // Other pages: window.dispatchEvent(new Event("sa-notifications-refresh"))
   useEffect(() => {
     const onRefresh = () => {
       invalidateNotifCaches();
@@ -911,7 +777,6 @@ function Topbar({
     return () => window.removeEventListener("sa-notifications-refresh", onRefresh);
   }, [loadNotifications]);
 
-  // Tab visible again — quiet revalidate only if stale
   useEffect(() => {
     const onVis = () => {
       if (document.visibilityState !== "visible") return;
@@ -942,7 +807,7 @@ function Topbar({
     try {
       await api.post("/notifications/read-all", null, { timeout: REQUEST_TIMEOUT_MS });
     } catch {
-      /* optimistic UI kept */
+      /* optimistic */
     }
   };
 
@@ -993,7 +858,6 @@ function Topbar({
     if (n.page) navigate(n.page);
   };
 
-  /* Keyboard: Escape closes panels */
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -1007,7 +871,6 @@ function Topbar({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  /* Outside click */
   useEffect(() => {
     const onClick = (e: globalThis.MouseEvent) => {
       const t = e.target as Node;
@@ -1015,18 +878,13 @@ function Topbar({
         setShowResults(false);
         setActiveIndex(-1);
       }
-      if (notifRef.current && !notifRef.current.contains(t)) {
-        setNotifOpen(false);
-      }
-      if (userRef.current && !userRef.current.contains(t)) {
-        setUserOpen(false);
-      }
+      if (notifRef.current && !notifRef.current.contains(t)) setNotifOpen(false);
+      if (userRef.current && !userRef.current.contains(t)) setUserOpen(false);
     };
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  // Scroll active search result into view
   useEffect(() => {
     if (activeIndex < 0 || !resultsRef.current) return;
     const el = resultsRef.current.querySelector(`[data-index="${activeIndex}"]`);
@@ -1035,9 +893,6 @@ function Topbar({
 
   const handleLogout = () => {
     setUserOpen(false);
-    // Drop session caches so the next login doesn't show stale user data
-    profileCache.entry = null;
-    profileCache.inflight = null;
     notifsCache.entry = null;
     notifsCache.inflight = null;
     unreadCache.entry = null;
@@ -1061,7 +916,6 @@ function Topbar({
     searchRef.current?.focus();
   };
 
-  // Group results by type
   const groupedResults = useMemo(() => {
     const map = new Map<string, SearchHit[]>();
     for (const r of results) {
@@ -1072,9 +926,14 @@ function Topbar({
     return map;
   }, [results]);
 
+  const shownName = displayName || propUserName || "";
+  const shownInitials =
+    displayInitials ||
+    propUserInitials ||
+    (shownName ? computeInitials(shownName) : "");
+
   return (
     <header className="header">
-      {/* Global search */}
       <div className="global-search" ref={searchWrapRef}>
         <button
           type="button"
@@ -1100,12 +959,7 @@ function Topbar({
           aria-expanded={showResults}
         />
         {query && (
-          <button
-            type="button"
-            className="search-clear"
-            onClick={clearSearch}
-            aria-label="Clear search"
-          >
+          <button type="button" className="search-clear" onClick={clearSearch} aria-label="Clear search">
             <IconX />
           </button>
         )}
@@ -1133,9 +987,7 @@ function Topbar({
                       <div
                         key={`${r.type}-${r.label}`}
                         data-index={idx}
-                        className={`search-result-item ${
-                          activeIndex === idx ? "is-active" : ""
-                        }`}
+                        className={`search-result-item ${activeIndex === idx ? "is-active" : ""}`}
                         onClick={() => goToResult(r)}
                         onMouseEnter={() => setActiveIndex(idx)}
                         role="option"
@@ -1145,12 +997,8 @@ function Topbar({
                           <TypeIcon />
                         </span>
                         <span className="search-result-text">
-                          <span className="search-result-label">
-                            {highlightMatch(r.label, query)}
-                          </span>
-                          {r.subtitle && (
-                            <span className="search-result-sub">{r.subtitle}</span>
-                          )}
+                          <span className="search-result-label">{highlightMatch(r.label, query)}</span>
+                          {r.subtitle && <span className="search-result-sub">{r.subtitle}</span>}
                         </span>
                         <span className="search-result-type">{r.type}</span>
                       </div>
@@ -1178,7 +1026,6 @@ function Topbar({
       </div>
 
       <div className="header-actions">
-        {/* Theme toggle */}
         <button
           className="header-btn"
           type="button"
@@ -1189,7 +1036,6 @@ function Topbar({
           {isDark ? <IconSun /> : <IconMoon />}
         </button>
 
-        {/* Notifications */}
         <div className="notif-wrap" ref={notifRef}>
           <button
             className="header-btn"
@@ -1213,9 +1059,7 @@ function Topbar({
             <div className="notif-header">
               <span className="fw-600">
                 Notifications
-                {unreadCount > 0 && (
-                  <span className="notif-count-badge">{unreadCount}</span>
-                )}
+                {unreadCount > 0 && <span className="notif-count-badge">{unreadCount}</span>}
               </span>
               {unreadCount > 0 && (
                 <button type="button" className="mark-read-btn" onClick={markAllRead}>
@@ -1318,12 +1162,9 @@ function Topbar({
           </div>
         </div>
 
-        {/* User menu */}
         <div className="user-menu" ref={userRef}>
           <div
-            className={`user-avatar ${displayImage ? "has-image" : ""} ${
-              profileLoading ? "is-loading" : ""
-            }`}
+            className={`user-avatar ${displayImage ? "has-image" : ""}`}
             onClick={() => {
               setUserOpen((v) => !v);
               setNotifOpen(false);
@@ -1338,31 +1179,19 @@ function Topbar({
                 setUserOpen((v) => !v);
               }
             }}
-            title={displayName}
+            title={shownName || undefined}
           >
-            {displayImage ? (
-              <img src={displayImage} alt="" />
-            ) : (
-              displayInitials
-            )}
+            {displayImage ? <img src={displayImage} alt="" /> : shownInitials || "?"}
           </div>
           <div className={`dropdown-menu ${userOpen ? "show" : ""}`} id="user-dropdown">
             <div className="dropdown-user-info">
               <div className="dropdown-user-avatar">
-                {displayImage ? (
-                  <img src={displayImage} alt="" />
-                ) : (
-                  <span>{displayInitials}</span>
-                )}
+                {displayImage ? <img src={displayImage} alt="" /> : <span>{shownInitials || "?"}</span>}
               </div>
               <div className="dropdown-user-meta">
-                <div className="dropdown-user-name">{displayName}</div>
-                {displayEmail && (
-                  <div className="dropdown-user-email">{displayEmail}</div>
-                )}
-                {roleName && (
-                  <div className="dropdown-user-role">{roleName}</div>
-                )}
+                <div className="dropdown-user-name">{shownName || "\u00A0"}</div>
+                {displayEmail ? <div className="dropdown-user-email">{displayEmail}</div> : null}
+                {roleName ? <div className="dropdown-user-role">{roleName}</div> : null}
               </div>
             </div>
             <div className="dropdown-divider" />

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useStockMovementsList } from "../../hooks/useStockMovements";
+import { invalidateStockMovements } from "../../lib/invalidate";
 import "../css/Main.css";
 
 
@@ -57,7 +59,7 @@ function extractArr<T>(json: unknown): T[] {
   return [];
 }
 
-/* ── Module cache (survives Strict Mode) ───────────────────── */
+/* ── Module cache (survives Strict M`ode) ───────────────────── */
 const SM_TTL = 60_000;
 type CE<T> = { data: T; at: number };
 const productsCache: { entry: CE<any[]> | null; inflight: Promise<any[]> | null } = { entry: null, inflight: null };
@@ -319,10 +321,44 @@ function StockMovements() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [filterType, setFilterType] = useState<string>("all");
+
+    const {
+    rows: movementRows,
+    isLoading: movLoading,
+    isFetching: movFetching,
+    refetch: refetchMovements,
+    } = useStockMovementsList({
+    page: 1,
+    perPage: 50,
+    search: debouncedSearch,
+    type:
+      filterType === "all"
+        ? ""
+        : ({ in: "IN", out: "OUT", transfer: "TRANSFER", adjust: "ADJUSTMENT" } as Record<string, string>)[
+            filterType
+          ] ?? filterType,
+    enabled: true,
+  });
+
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
+   const [userPermissions, setUserPermissions] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem("permissions");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [permsLoaded, setPermsLoaded] = useState(() => {
+    try {
+      return !!localStorage.getItem("permissions");
+    } catch {
+      return false;
+    }
+  });
 
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -469,7 +505,7 @@ function StockMovements() {
     }
 
     // 5) Dev fallback
-    finish(["*"]);
+    finish([]);
   }, []);
 
   useEffect(() => {
@@ -481,15 +517,14 @@ function StockMovements() {
     "movements.view",
     "stock_movements.view",
     "stock-movements.view",
-    "inventory.view"
+    
   );
   const canCreate = can(
     userPermissions,
     "movements.create",
     "stock_movements.create",
     "stock-movements.create",
-    "inventory.create",
-    "inventory.update"
+   
   );
 
   const loadWarehouses = useCallback(async (force = false): Promise<WarehouseOpt[]> => {
@@ -630,18 +665,7 @@ function StockMovements() {
     }
   }, [loadProducts, loadWarehouses]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      await Promise.all([bootstrapMeta(true), loadHistory(true)]);
-    } catch (e) {
-      console.error(e);
-      setError(e instanceof Error ? e.message : "Failed to load");
-    } finally {
-      setLoading(false);
-    }
-  }, [bootstrapMeta, loadHistory]);
+   [bootstrapMeta, loadHistory];
 
   // Defer products/warehouses so initial paint only waits on stock-movements.
   // Load from cache immediately; network fetch after history or when modal opens.
@@ -659,32 +683,35 @@ function StockMovements() {
     return () => clearTimeout(t);
   }, [bootstrapMeta]);
 
-  // History on filter/search change + initial (paint cache first)
+  // History on filter/search change + initial (paint cache first)  /* Phase 6: TanStack Query → history */
+    // Once we have shown any rows this session, never full-page load again
+  const hasDataRef = useRef(history.length > 0);
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Only show skeleton if we have nothing to display
-      setHistory((prev) => {
-        if (prev.length === 0) setLoading(true);
-        else setLoading(false);
-        return prev;
-      });
-      setError(null);
-      try {
-        await loadHistory(false);
-      } catch (e) {
-        if (!cancelled) {
-          console.error(e);
-          setError(e instanceof Error ? e.message : "Failed to load movements");
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadHistory]);
+    if (history.length > 0) hasDataRef.current = true;
+  }, [history.length]);
+
+  // Sync TanStack rows → local history (keep previous while empty+loading)
+  useEffect(() => {
+    if (!movementRows) return;
+    if (movementRows.length === 0 && movLoading) return;
+
+    setHistory(movementRows as ApiMovement[]);
+    setLoading(false);
+    setError(null);
+  }, [movementRows, movLoading]);
+
+  // Table skeletons only when we have nothing to show
+  useEffect(() => {
+    if (history.length === 0 && movLoading) {
+      setLoading(true);
+    } else {
+      setLoading(false);
+    }
+  }, [movLoading, history.length]);
+
+  const pageLoading =
+    !hasDataRef.current && history.length === 0 && movLoading;
 
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === productId) ?? null,
@@ -792,7 +819,8 @@ function StockMovements() {
       );
       resetForm();
       setModalOpen(false);
-      await refresh();
+      await refetchMovements();
+      void invalidateStockMovements();
     } catch (e: any) {
       console.error(e);
       const body = e.response?.data;
@@ -822,6 +850,53 @@ function StockMovements() {
       ? "Transfer reference…"
       : "Count session / ticket…";
 
+    if (pageLoading) {
+    return (
+      <div className="stock-movements-page">
+        <Sidebar />
+        <div className="main-wrapper">
+          <Topbar />
+          <main className="content">
+            <div
+              style={{
+                minHeight: "calc(100vh - 120px)",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 16,
+                padding: 32,
+              }}
+              role="status"
+              aria-live="polite"
+              aria-busy="true"
+            >
+              <div
+                className="roles-spinner"
+                style={{ width: 36, height: 36, borderWidth: 3 }}
+              />
+              <div style={{ textAlign: "center", maxWidth: 320 }}>
+                <div
+                  style={{
+                    fontSize: 16,
+                    fontWeight: 600,
+                    marginBottom: 6,
+                    letterSpacing: "-0.01em",
+                  }}
+                >
+                  Loading stock movements
+                </div>
+                <div className="text-muted" style={{ fontSize: 13, lineHeight: 1.5 }}>
+                  Fetching movement history and warehouse data…
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="stock-movements-page">
       <Sidebar />
@@ -840,13 +915,16 @@ function StockMovements() {
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => refresh()}
-                disabled={loading}
+                              onClick={() => {
+                  void refetchMovements();
+                  void bootstrapMeta(true);
+                }}
+                disabled={movFetching || loading}
               >
-                <IconRefresh /> Refresh
+                <IconRefresh /> {movFetching ? "Refreshing…" : "Refresh"}
               </button>
               {canCreate && (
-                <button type="button" className="btn btn-primary" onClick={() => openModal()}>
+               <button type="button" className="btn btn-primary" onClick={() => openModal()}>
                   <IconPlus /> Create Stock Movement
                 </button>
               )}

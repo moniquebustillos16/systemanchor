@@ -2,6 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useSuppliers } from "../../hooks/usePartners";
+import {
+  createSupplier,
+  updateSupplier,
+  deleteSupplier,
+} from "../../api/partners";
+import { invalidateSuppliers } from "../../lib/invalidate";
 import "../css/Partners.css";
 
 
@@ -189,12 +196,10 @@ function countOrdersBySupplier(orders: PurchaseOrderLite[]): Map<string, number>
 }
 
 function Suppliers() {
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [poCounts, setPoCounts] = useState<Map<string, number>>(new Map());
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [status, setStatus] = useState("all");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [poCounts, setPoCounts] = useState<Map<string, number>>(new Map());
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
@@ -213,6 +218,44 @@ function Suppliers() {
   });
   const [offerInput, setOfferInput] = useState("");
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSearch(search), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+
+  const {
+    rows: supplierRows,
+    isLoading: loading,
+    
+    isError,
+    error: queryError,
+    refetch,
+  } = useSuppliers({
+    search: debouncedSearch,
+    status,
+    perPage: 100,
+    enabled: true,
+  });
+
+  const suppliers: Supplier[] = useMemo(
+    () =>
+      (supplierRows ?? []).map((raw) => {
+        const s = raw as unknown as Supplier;
+        return {
+          ...s,
+          id: String(s.id),
+          score: Number(s.score ?? 0),
+          product_offers: s.product_offers ?? null,
+          orders: Number(s.orders_count ?? s.orders ?? 0),
+        };
+      }),
+    [supplierRows]
+  );
+
+  const error = isError
+    ? (queryError as Error)?.message ?? "Unable to load suppliers"
+    : null;
 
   const formOfferTags = useMemo(
     () => parseProductOffers(form.product_offers),
@@ -295,7 +338,7 @@ function Suppliers() {
     } catch { /* */ }
     finish(["*"]);
   }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
+  useEffect(() => { void fetchUserPermissions(); }, [fetchUserPermissions]);
   const canView = can(userPermissions, "suppliers.view");
   const canCreate = can(userPermissions, "suppliers.create");
   const canUpdate = can(userPermissions, "suppliers.update");
@@ -314,49 +357,13 @@ function Suppliers() {
     }
   }, []);
 
-  const fetchSuppliers = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set("search", search.trim());
-      if (status !== "all") params.set("status", status);
-      params.set("per_page", "100");
-
-      const [{ data: json }] = await Promise.all([
-        api.get("/suppliers", { params: Object.fromEntries(params) }),
-        fetchPoCounts(),
-      ]);
-      const list: Supplier[] = Array.isArray(json)
-        ? json
-        : (json as PaginatedResponse<Supplier>)?.data ?? [];
-      setSuppliers(
-        list.map((s: Supplier) => ({
-          ...s,
-          id: String(s.id),
-          score: Number(s.score),
-          product_offers: s.product_offers ?? null,
-          orders: Number(s.orders_count ?? s.orders ?? 0),
-        }))
-      );
-    } catch (err: any) {
-      const msg =
-        err?.response?.data?.message ||
-        err?.message ||
-        "Unable to load suppliers";
-      setError(String(msg));
-      setSuppliers([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [search, status, fetchPoCounts]);
-
   useEffect(() => {
-    const t = setTimeout(() => {
-      fetchSuppliers();
-    }, 300);
-    return () => clearTimeout(t);
-  }, [fetchSuppliers]);
+    void fetchPoCounts();
+  }, [fetchPoCounts]);
+
+  const fetchSuppliers = useCallback(async () => {
+    await Promise.all([refetch(), fetchPoCounts()]);
+  }, [refetch, fetchPoCounts]);
 
   const orderCountFor = useCallback(
     (s: Supplier): number => {
@@ -439,9 +446,9 @@ function Suppliers() {
       };
 
       if (editing) {
-        await api.put(`/suppliers/${editing.id}`, payload);
+        await updateSupplier(editing.id, payload);
       } else {
-        await api.post("/suppliers", payload);
+        await createSupplier(payload);
       }
 
       showToast(
@@ -450,7 +457,8 @@ function Suppliers() {
         editing ? "Supplier updated successfully." : "Supplier created successfully."
       );
       setModalOpen(false);
-      fetchSuppliers();
+      await invalidateSuppliers();
+      await fetchSuppliers();
     } catch (err: any) {
       const body = err?.response?.data;
       const msg =
@@ -474,12 +482,13 @@ function Suppliers() {
     if (!window.confirm(warn)) return;
 
     try {
-      await api.delete(`/suppliers/${s.id}`);
+      await deleteSupplier(s.id);
 
       showToast("success", "Deleted", `"${s.name}" removed.`);
       setDetailOpen(false);
       setSelected(null);
-      fetchSuppliers();
+      await invalidateSuppliers();
+      await fetchSuppliers();
     } catch (err: any) {
       const body = err?.response?.data;
       const msg =

@@ -2,12 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useWarehouses } from "../../hooks/useWarehouses";
 import "../css/Warehouse.css";
 
-
-
-
-/* ── Role permissions ─────────────────────────────────────── */
+/* ── Types ─────────────────────────────────────────────────── */
 type AuthPayload = {
   permissions?: string[];
   data?: { permissions?: string[]; user?: { permissions?: string[] } };
@@ -18,87 +16,6 @@ type AuthPayload = {
   };
   role_id?: string;
 };
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
-  return needed.some((n) => perms.includes(n));
-}
-
-const svg = {
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
-
-const IconPlus = () => (
-  <svg {...svg} width="16" height="16">
-    <circle cx="12" cy="12" r="10" />
-    <line x1="12" y1="8" x2="12" y2="16" />
-    <line x1="8" y1="12" x2="16" y2="12" />
-  </svg>
-);
-const IconRefresh = () => (
-  <svg {...svg} width="16" height="16">
-    <polyline points="23 4 23 10 17 10" />
-    <polyline points="1 20 1 14 7 14" />
-    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-  </svg>
-);
-const IconSearch = () => (
-  <svg {...svg} width="16" height="16">
-    <circle cx="11" cy="11" r="8" />
-    <path d="M21 21l-4.35-4.35" />
-  </svg>
-);
-const IconPlay = () => (
-  <svg {...svg} width="14" height="14">
-    <polygon points="5 3 19 12 5 21 5 3" />
-  </svg>
-);
-const IconCheck = () => (
-  <svg {...svg} width="14" height="14">
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-const IconEdit = () => (
-  <svg {...svg} width="14" height="14">
-    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 3z" />
-  </svg>
-);
-const IconTrash = () => (
-  <svg {...svg} width="14" height="14">
-    <polyline points="3 6 5 6 21 6" />
-    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-  </svg>
-);
-const IconX = () => (
-  <svg {...svg} width="18" height="18">
-    <line x1="18" y1="6" x2="6" y2="18" />
-    <line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-const IconClipboard = () => (
-  <svg {...svg} width="16" height="16">
-    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-    <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
-  </svg>
-);
 
 type Warehouse = {
   id: string;
@@ -123,17 +40,54 @@ type Count = {
   status: string;
 };
 
+type ToastState = {
+  type: "success" | "error" | "info";
+  title: string;
+  msg: string;
+};
+
+/* ── Constants ─────────────────────────────────────────────── */
 const ZONES = [
   "Zone A - Receiving",
   "Zone B - Bulk Storage",
   "Zone C - Picking",
   "Zone D - Shipping",
-];
+] as const;
 
-function getItems(json: unknown): any[] {
+/* ── Permission helpers ────────────────────────────────────── */
+function extractPermissions(json: unknown): string[] {
+  if (!json || typeof json !== "object") return [];
+  const j = json as AuthPayload;
+
+  if (Array.isArray(j.permissions)) return j.permissions.map(String);
+  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
+  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
+
+  const rolePerms = j.user?.role?.permissions;
+  if (Array.isArray(rolePerms)) {
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
+  }
+
+  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
+  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
+
+  return [];
+}
+
+function can(perms: string[], ...needed: string[]): boolean {
+  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) {
+    return true;
+  }
+  return needed.some((n) => perms.includes(n));
+}
+
+/* ── Domain helpers ────────────────────────────────────────── */
+function getItems(json: unknown): unknown[] {
   if (Array.isArray(json)) return json;
   const o = json as Record<string, unknown>;
-  if (Array.isArray(o?.data)) return o.data as any[];
+  if (Array.isArray(o?.data)) return o.data as unknown[];
   return [];
 }
 
@@ -158,9 +112,81 @@ function varianceClass(v: string | null | undefined): string {
   return String(v).startsWith("+") ? "var-pos" : "var-neg";
 }
 
+/* ── Icons ─────────────────────────────────────────────────── */
+const svg = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.8,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+const IconPlus = () => (
+  <svg {...svg} width="16" height="16">
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="8" x2="12" y2="16" />
+    <line x1="8" y1="12" x2="16" y2="12" />
+  </svg>
+);
+
+const IconRefresh = () => (
+  <svg {...svg} width="16" height="16">
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </svg>
+);
+
+const IconSearch = () => (
+  <svg {...svg} width="16" height="16">
+    <circle cx="11" cy="11" r="8" />
+    <path d="M21 21l-4.35-4.35" />
+  </svg>
+);
+
+const IconPlay = () => (
+  <svg {...svg} width="14" height="14">
+    <polygon points="5 3 19 12 5 21 5 3" />
+  </svg>
+);
+
+const IconCheck = () => (
+  <svg {...svg} width="14" height="14">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+const IconEdit = () => (
+  <svg {...svg} width="14" height="14">
+    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 3z" />
+  </svg>
+);
+
+const IconTrash = () => (
+  <svg {...svg} width="14" height="14">
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+  </svg>
+);
+
+const IconX = () => (
+  <svg {...svg} width="18" height="18">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
+
+const IconClipboard = () => (
+  <svg {...svg} width="16" height="16">
+    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+    <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+  </svg>
+);
+
+/* ── Component ─────────────────────────────────────────────── */
 function CycleCount() {
   const [rows, setRows] = useState<Count[]>([]);
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -169,16 +195,12 @@ function CycleCount() {
   const [showForm, setShowForm] = useState(false);
   const [editRow, setEditRow] = useState<Count | null>(null);
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<{
-    type: string;
-    title: string;
-    msg: string;
-  } | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
 
   const [whId, setWhId] = useState("");
-  const [zone, setZone] = useState(ZONES[0]);
+  const [zone, setZone] = useState<string>(ZONES[0]);
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [counter, setCounter] = useState("");
 
@@ -186,13 +208,44 @@ function CycleCount() {
   const [editSystem, setEditSystem] = useState(0);
   const [editCounter, setEditCounter] = useState("");
 
-  const showToast = (type: string, title: string, msg: string) => {
-    setToast({ type, title, msg });
-    setTimeout(() => setToast(null), 3200);
-  };
+  const {
+    rows: whRows,
+    isLoading: whLoading,
+    refetch: refetchWarehouses,
+  } = useWarehouses({ enabled: true });
 
+  const warehouses: Warehouse[] = useMemo(
+    () =>
+      (whRows ?? []).map((w: Record<string, unknown>) => ({
+        id: String(w.id),
+        code: String(w.code ?? ""),
+        name: String(w.name ?? ""),
+      })),
+    [whRows]
+  );
+
+  // Default warehouse for schedule form once list arrives
+  useEffect(() => {
+    if (warehouses.length > 0) {
+      setWhId((prev) => prev || warehouses[0].id);
+    }
+  }, [warehouses]);
+
+  const showToast = useCallback(
+    (type: ToastState["type"], title: string, msg: string) => {
+      setToast({ type, title, msg });
+      window.setTimeout(() => setToast(null), 3200);
+    },
+    []
+  );
+
+  /* ── Permissions ─────────────────────────────────────────── */
   const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => { setUserPermissions(list); setPermsLoaded(true); };
+    const finish = (list: string[]) => {
+      setUserPermissions(list);
+      setPermsLoaded(true);
+    };
+
     try {
       for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
         const raw = localStorage.getItem(key);
@@ -204,7 +257,10 @@ function CycleCount() {
             return;
           }
           const list = extractPermissions(parsed);
-          if (list.length > 0) { finish(list); return; }
+          if (list.length > 0) {
+            finish(list);
+            return;
+          }
           const u = parsed?.data ?? parsed?.user ?? parsed;
           const rid = u?.role_id || u?.role?.id;
           if (rid) {
@@ -212,53 +268,63 @@ function CycleCount() {
               const { data: json } = await api.get(`/roles/${rid}/permissions`);
               const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
               if (Array.isArray(perms)) {
-                finish(perms.map((p: { name?: string } | string) => typeof p === "string" ? p : p?.name).filter(Boolean) as string[]);
+                finish(
+                  perms
+                    .map((p: { name?: string } | string) =>
+                      typeof p === "string" ? p : p?.name
+                    )
+                    .filter(Boolean) as string[]
+                );
                 return;
               }
-            } catch { /* */ }
+            } catch {
+              /* ignore */
+            }
           }
-        } catch { /* */ }
+        } catch {
+          /* ignore */
+        }
       }
-    } catch { /* */ }
+    } catch {
+      /* ignore */
+    }
+
     try {
       const { data: json } = await api.get("/me");
       const list = extractPermissions(json);
-      if (list.length > 0) { finish(list); return; }
-    } catch { /* */ }
+      if (list.length > 0) {
+        finish(list);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+
     finish(["*"]);
   }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
+
+  useEffect(() => {
+    void fetchUserPermissions();
+  }, [fetchUserPermissions]);
+
   const canView = can(userPermissions, "cycle_counts.view", "cycle-counts.view");
   const canCreate = can(userPermissions, "cycle_counts.create", "cycle-counts.create");
   const canUpdate = can(userPermissions, "cycle_counts.update", "cycle-counts.update");
+  const canDelete = canUpdate;
 
-  const loadWarehouses = useCallback(async () => {
-    try {
-      const { data: json } = await api.get("/warehouses", { params: { per_page: 200 } });
-      const list = getItems(json).map((w: any) => ({
-        id: String(w.id),
-        code: w.code ?? "",
-        name: w.name ?? "",
-      }));
-      setWarehouses(list);
-      if (list.length > 0) setWhId((prev) => prev || list[0].id);
-    } catch (e) {
-      console.error("Failed to load warehouses", e);
-    }
-  }, []);
-
+  /* ── Load cycle counts ───────────────────────────────────── */
   const loadCounts = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       const { data: json } = await api.get("/cycle-counts");
-      setRows(getItems(json));
-    } catch (e: any) {
-      setError(
-        e?.response?.data?.message ||
-        e?.message ||
-        "Failed to load cycle counts"
-      );
+      setRows(getItems(json) as Count[]);
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        (e as Error)?.message ||
+        "Failed to load cycle counts";
+      setError(msg);
       setRows([]);
     } finally {
       setLoading(false);
@@ -266,10 +332,10 @@ function CycleCount() {
   }, []);
 
   useEffect(() => {
-    loadWarehouses();
-    loadCounts();
-  }, [loadWarehouses, loadCounts]);
+    void loadCounts();
+  }, [loadCounts]);
 
+  /* ── Stats & filtered list ───────────────────────────────── */
   const stats = useMemo(() => {
     const completed = rows.filter((c) => c.status === "completed");
     const pending = rows.filter(
@@ -295,12 +361,7 @@ function CycleCount() {
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((c) => {
-        const hay = [
-          c.code,
-          c.warehouse?.code,
-          c.zone,
-          c.counter,
-        ]
+        const hay = [c.code, c.warehouse?.code, c.zone, c.counter]
           .filter(Boolean)
           .join(" ")
           .toLowerCase();
@@ -318,8 +379,12 @@ function CycleCount() {
     return list;
   }, [rows, search, status, whFilter]);
 
+  /* ── CRUD / actions ──────────────────────────────────────── */
   const schedule = async () => {
-    if (!canCreate) { showToast("error", "Permission denied", "You cannot schedule cycle counts."); return; }
+    if (!canCreate) {
+      showToast("error", "Permission denied", "You cannot schedule cycle counts.");
+      return;
+    }
     if (!whId) {
       showToast("error", "Validation", "Select a warehouse.");
       return;
@@ -339,30 +404,46 @@ function CycleCount() {
       setCounter("");
       showToast("success", "Scheduled", `${created.code ?? "Count"} scheduled.`);
       await loadCounts();
-    } catch (e: any) {
-      showToast("error", "Failed", e?.response?.data?.message || e?.message || "Could not schedule");
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        (e as Error)?.message ||
+        "Could not schedule";
+      showToast("error", "Failed", msg);
     } finally {
       setSaving(false);
     }
   };
 
   const startCount = async (row: Count) => {
-    if (!canUpdate) { showToast("error", "Permission denied", "You cannot update cycle counts."); return; }
+    if (!canUpdate) {
+      showToast("error", "Permission denied", "You cannot update cycle counts.");
+      return;
+    }
     try {
       const { data: body } = await api.put(`/cycle-counts/${row.id}`, {
         started_at: nowTime(),
         status: "pending",
       });
       const updated = (body?.data ?? body) as Count;
-      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...updated } : r)));
+      setRows((prev) =>
+        prev.map((r) => (r.id === row.id ? { ...r, ...updated } : r))
+      );
       showToast("success", "Started", `${row.code} started at ${nowTime()}.`);
-    } catch (e: any) {
-      showToast("error", "Failed", e?.response?.data?.message || e?.message || "Could not start");
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        (e as Error)?.message ||
+        "Could not start";
+      showToast("error", "Failed", msg);
     }
   };
 
   const openEdit = (row: Count) => {
-    if (!canUpdate && row.status !== "completed") { showToast("error", "Permission denied", "You cannot edit cycle counts."); return; }
+    if (!canUpdate && row.status !== "completed") {
+      showToast("error", "Permission denied", "You cannot edit cycle counts.");
+      return;
+    }
     setShowForm(false);
     setEditRow(row);
     setEditCounted(Number(row.counted) || 0);
@@ -371,7 +452,10 @@ function CycleCount() {
   };
 
   const saveEdit = async (complete = false) => {
-    if (!canUpdate) { showToast("error", "Permission denied", "You cannot update cycle counts."); return; }
+    if (!canUpdate) {
+      showToast("error", "Permission denied", "You cannot update cycle counts.");
+      return;
+    }
     if (!editRow) return;
     try {
       setSaving(true);
@@ -398,22 +482,33 @@ function CycleCount() {
           ? `${editRow.code} done · variance ${updated.variance ?? "—"}`
           : `${editRow.code} progress saved`
       );
-    } catch (e: any) {
-      showToast("error", "Failed", e?.response?.data?.message || e?.message || "Could not save");
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        (e as Error)?.message ||
+        "Could not save";
+      showToast("error", "Failed", msg);
     } finally {
       setSaving(false);
     }
   };
 
   const deleteCount = async (row: Count) => {
-    if (!canUpdate) { showToast("error", "Permission denied", "You cannot delete cycle counts."); return; }
+    if (!canDelete) {
+      showToast("error", "Permission denied", "You cannot delete cycle counts.");
+      return;
+    }
     if (!window.confirm(`Delete ${row.code}? This cannot be undone.`)) return;
     try {
       await api.delete(`/cycle-counts/${row.id}`);
       setRows((prev) => prev.filter((r) => r.id !== row.id));
       showToast("success", "Deleted", `${row.code} removed.`);
-    } catch (e: any) {
-      showToast("error", "Failed", e?.response?.data?.message || e?.message || "Could not delete");
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        (e as Error)?.message ||
+        "Could not delete";
+      showToast("error", "Failed", msg);
     }
   };
 
@@ -429,6 +524,13 @@ function CycleCount() {
     return Math.max(0, Math.round(acc * 10) / 10).toFixed(1);
   }, [editCounted, editSystem]);
 
+  const handleRefresh = () => {
+    void loadCounts();
+    void refetchWarehouses();
+    showToast("success", "Refreshed", "Counts reloaded.");
+  };
+
+  /* ── Render ──────────────────────────────────────────────── */
   return (
     <div className="warehouse-page">
       <Sidebar />
@@ -436,13 +538,18 @@ function CycleCount() {
         <Topbar />
         <main className="content">
           {permsLoaded && !canView && (
-            <div className="card" style={{ padding: 40, textAlign: "center", marginBottom: 16 }}>
+            <div
+              className="card"
+              style={{ padding: 40, textAlign: "center", marginBottom: 16 }}
+            >
               <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
               <p className="text-muted" style={{ margin: 0 }}>
-                You do not have permission to view this page. Ask an admin to grant <code>cycle_counts.view</code>.
+                You do not have permission to view this page. Ask an admin to grant{" "}
+                <code>cycle_counts.view</code>.
               </p>
             </div>
           )}
+
           <div className="page-header">
             <div>
               <h1 className="page-title">Cycle Count</h1>
@@ -454,26 +561,22 @@ function CycleCount() {
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => {
-                  loadCounts();
-                  loadWarehouses();
-                  showToast("success", "Refreshed", "Counts reloaded.");
-                }}
-                disabled={loading}
+                onClick={handleRefresh}
+                disabled={loading || whLoading}
               >
                 <IconRefresh /> Refresh
               </button>
               {canCreate && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => {
-                  setEditRow(null);
-                  setShowForm(true);
-                }}
-              >
-                <IconPlus /> New Count
-              </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setEditRow(null);
+                    setShowForm(true);
+                  }}
+                >
+                  <IconPlus /> New Count
+                </button>
               )}
             </div>
           </div>
@@ -510,9 +613,7 @@ function CycleCount() {
               type="button"
               className={`stat-card${status === "pending" ? " is-active" : ""}`}
               style={{ cursor: "pointer", textAlign: "left", width: "100%" }}
-              onClick={() =>
-                setStatus(status === "pending" ? "all" : "pending")
-              }
+              onClick={() => setStatus(status === "pending" ? "all" : "pending")}
             >
               <div className="stat-label">Pending</div>
               <div className="stat-value warning">
@@ -605,6 +706,14 @@ function CycleCount() {
                   type="button"
                   className="btn btn-secondary"
                   onClick={() => {
+                    if (!canCreate) {
+                      showToast(
+                        "error",
+                        "Permission denied",
+                        "You cannot schedule cycle counts."
+                      );
+                      return;
+                    }
                     setEditRow(null);
                     setShowForm(true);
                   }}
@@ -666,12 +775,14 @@ function CycleCount() {
                   placeholder="Search ID, warehouse, zone, counter…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
+                  aria-label="Search cycle counts"
                 />
               </div>
               <div className="table-filters">
                 <select
                   value={whFilter}
                   onChange={(e) => setWhFilter(e.target.value)}
+                  aria-label="Filter by warehouse"
                 >
                   <option value="all">All warehouses</option>
                   {warehouses.map((w) => (
@@ -680,7 +791,11 @@ function CycleCount() {
                     </option>
                   ))}
                 </select>
-                <select value={status} onChange={(e) => setStatus(e.target.value)}>
+                <select
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value)}
+                  aria-label="Filter by status"
+                >
                   <option value="all">All status</option>
                   <option value="pending">Pending</option>
                   <option value="in_progress">In progress</option>
@@ -726,13 +841,15 @@ function CycleCount() {
                           >
                             <IconClipboard />
                             <span>No counts match your filters</span>
-                            <button
-                              type="button"
-                              className="btn btn-primary"
-                              onClick={() => setShowForm(true)}
-                            >
-                              <IconPlus /> Schedule count
-                            </button>
+                            {canCreate && (
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                onClick={() => setShowForm(true)}
+                              >
+                                <IconPlus /> Schedule count
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -802,12 +919,12 @@ function CycleCount() {
                               </span>
                             </td>
                             <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
-                              {c.status !== "completed" && !isStarted(c) && (
+                              {c.status !== "completed" && !isStarted(c) && canUpdate && (
                                 <button
                                   type="button"
                                   className="btn btn-sm btn-secondary"
                                   title="Start count"
-                                  onClick={() => startCount(c)}
+                                  onClick={() => void startCount(c)}
                                   style={{ marginRight: 4, padding: "6px 8px" }}
                                 >
                                   <IconPlay />
@@ -824,12 +941,12 @@ function CycleCount() {
                               >
                                 <IconEdit />
                               </button>
-                              {c.status !== "completed" && (
+                              {c.status !== "completed" && canDelete && (
                                 <button
                                   type="button"
                                   className="btn btn-sm btn-secondary"
                                   title="Delete"
-                                  onClick={() => deleteCount(c)}
+                                  onClick={() => void deleteCount(c)}
                                   style={{
                                     padding: "6px 8px",
                                     color: "var(--sa-clay)",
@@ -875,6 +992,9 @@ function CycleCount() {
               maxHeight: "90vh",
               overflow: "auto",
             }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cc-schedule-title"
           >
             <div
               style={{
@@ -885,7 +1005,10 @@ function CycleCount() {
               }}
             >
               <div>
-                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 650 }}>
+                <h2
+                  id="cc-schedule-title"
+                  style={{ margin: 0, fontSize: 18, fontWeight: 650 }}
+                >
                   Schedule Cycle Count
                 </h2>
                 <p
@@ -903,14 +1026,16 @@ function CycleCount() {
                 className="btn btn-secondary"
                 onClick={() => setShowForm(false)}
                 disabled={saving}
+                aria-label="Close"
               >
                 <IconX />
               </button>
             </div>
             <div className="form-grid-2">
               <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                <label>Warehouse *</label>
+                <label htmlFor="cc-wh">Warehouse *</label>
                 <select
+                  id="cc-wh"
                   value={whId}
                   onChange={(e) => setWhId(e.target.value)}
                   disabled={saving}
@@ -927,8 +1052,9 @@ function CycleCount() {
                 </select>
               </div>
               <div className="form-field">
-                <label>Zone</label>
+                <label htmlFor="cc-zone">Zone</label>
                 <select
+                  id="cc-zone"
                   value={zone}
                   onChange={(e) => setZone(e.target.value)}
                   disabled={saving}
@@ -941,8 +1067,9 @@ function CycleCount() {
                 </select>
               </div>
               <div className="form-field">
-                <label>Scheduled Date</label>
+                <label htmlFor="cc-date">Scheduled Date</label>
                 <input
+                  id="cc-date"
                   type="date"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
@@ -950,8 +1077,9 @@ function CycleCount() {
                 />
               </div>
               <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                <label>Assign Counter</label>
+                <label htmlFor="cc-counter">Assign Counter</label>
                 <input
+                  id="cc-counter"
                   type="text"
                   value={counter}
                   onChange={(e) => setCounter(e.target.value)}
@@ -979,7 +1107,7 @@ function CycleCount() {
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={schedule}
+                onClick={() => void schedule()}
                 disabled={saving || !whId}
               >
                 {saving ? "Scheduling…" : "Schedule"}
@@ -1005,6 +1133,9 @@ function CycleCount() {
               maxHeight: "90vh",
               overflow: "auto",
             }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cc-edit-title"
           >
             <div
               style={{
@@ -1015,7 +1146,10 @@ function CycleCount() {
               }}
             >
               <div>
-                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 650 }}>
+                <h2
+                  id="cc-edit-title"
+                  style={{ margin: 0, fontSize: 18, fontWeight: 650 }}
+                >
                   {editRow.status === "completed" ? "View Count" : "Record Count"}
                 </h2>
                 <p
@@ -1025,8 +1159,7 @@ function CycleCount() {
                     color: "var(--sa-muted)",
                   }}
                 >
-                  {editRow.code} · {editRow.warehouse?.code ?? "—"} ·{" "}
-                  {editRow.zone}
+                  {editRow.code} · {editRow.warehouse?.code ?? "—"} · {editRow.zone}
                 </p>
               </div>
               <button
@@ -1034,6 +1167,7 @@ function CycleCount() {
                 className="btn btn-secondary"
                 onClick={() => setEditRow(null)}
                 disabled={saving}
+                aria-label="Close"
               >
                 <IconX />
               </button>
@@ -1058,8 +1192,9 @@ function CycleCount() {
 
             <div className="form-grid-2" style={{ marginTop: 16 }}>
               <div className="form-field">
-                <label>Physical Counted Qty</label>
+                <label htmlFor="cc-counted">Physical Counted Qty</label>
                 <input
+                  id="cc-counted"
                   type="number"
                   min={0}
                   value={editCounted}
@@ -1070,8 +1205,9 @@ function CycleCount() {
                 />
               </div>
               <div className="form-field">
-                <label>System Qty</label>
+                <label htmlFor="cc-system">System Qty</label>
                 <input
+                  id="cc-system"
                   type="number"
                   min={0}
                   value={editSystem}
@@ -1082,8 +1218,9 @@ function CycleCount() {
                 />
               </div>
               <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                <label>Counter</label>
+                <label htmlFor="cc-edit-counter">Counter</label>
                 <input
+                  id="cc-edit-counter"
                   type="text"
                   value={editCounter}
                   onChange={(e) => setEditCounter(e.target.value)}
@@ -1113,7 +1250,7 @@ function CycleCount() {
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => saveEdit(false)}
+                    onClick={() => void saveEdit(false)}
                     disabled={saving}
                   >
                     {saving ? "Saving…" : "Save Progress"}
@@ -1121,11 +1258,10 @@ function CycleCount() {
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => saveEdit(true)}
+                    onClick={() => void saveEdit(true)}
                     disabled={saving}
                   >
-                    <IconCheck />{" "}
-                    {saving ? "Saving…" : "Complete Count"}
+                    <IconCheck /> {saving ? "Saving…" : "Complete Count"}
                   </button>
                 </>
               )}

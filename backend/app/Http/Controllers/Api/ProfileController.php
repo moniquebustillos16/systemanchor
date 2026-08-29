@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
 
@@ -18,10 +19,9 @@ class ProfileController extends Controller
     private function currentUser(Request $request): User
     {
         if ($request->user()) {
-            return $request->user();
+            return $request->user()->loadMissing('role');
         }
 
-        // Dev fallback — remove in production when auth is always required
         $user = User::with('role')->whereNull('deleted_at')->orderBy('created_at')->first();
         if (!$user) {
             abort(401, 'No authenticated user');
@@ -48,60 +48,141 @@ class ProfileController extends Controller
         );
     }
 
-    /**
-     * Append a row to profile_activity if the table exists (optional).
-     */
+    private function userPayload(User $user): array
+    {
+        $user->loadMissing('role');
+
+        $imageUrl = $user->image_url;
+        if (!$imageUrl && $user->image_path) {
+            $imageUrl = Storage::disk('public')->url($user->image_path);
+        }
+
+        $role = null;
+        if ($user->relationLoaded('role') && $user->role) {
+            $role = [
+                'id'   => (string) $user->role->id,
+                'name' => (string) $user->role->name,
+            ];
+        }
+
+        return [
+            'id'                 => (string) $user->id,
+            'name'               => (string) ($user->name ?? ''),
+            'email'              => (string) ($user->email ?? ''),
+            'status'             => (string) ($user->status ?? 'active'),
+            'phone'              => $user->phone,
+            'job_title'          => $user->job_title,
+            'department'         => $user->department,
+            'image_path'         => $user->image_path,
+            'image_url'          => $imageUrl,
+            'role'               => $role,
+            'role_id'            => $user->role_id ? (string) $user->role_id : null,
+            'last_login_at'      => $user->last_login_at?->toIso8601String(),
+            'created_at'         => $user->created_at?->toIso8601String(),
+            'email_verified_at'  => $user->email_verified_at?->toIso8601String(),
+            'two_factor_enabled' => (bool) ($user->two_factor_enabled ?? false),
+        ];
+    }
+
+    private function settingsPayload(UserSetting $settings): array
+    {
+        return [
+            'language'            => $settings->language ?? 'English',
+            'timezone'            => $settings->timezone ?? 'Asia/Manila',
+            'date_format'         => $settings->date_format ?? 'YYYY-MM-DD',
+            'theme'               => $settings->theme ?? 'system',
+            'email_notifications' => (bool) $settings->email_notifications,
+            'push_notifications'  => (bool) $settings->push_notifications,
+            'low_stock_alerts'    => (bool) $settings->low_stock_alerts,
+            'order_alerts'        => (bool) $settings->order_alerts,
+            'digest_frequency'    => $settings->digest_frequency ?? 'daily',
+        ];
+    }
+
     private function logActivity(User $user, string $type, string $title, ?string $description = null): void
     {
         if (!Schema::hasTable('profile_activity')) {
             return;
         }
 
-        DB::table('profile_activity')->insert([
-            'id'          => (string) \Illuminate\Support\Str::uuid(),
-            'user_id'     => $user->id,
-            'type'        => $type,
-            'title'       => $title,
-            'description' => $description,
-            'ip_address'  => request()->ip(),
-            'user_agent'  => substr((string) request()->userAgent(), 0, 500),
-            'created_at'  => now(),
-            'updated_at'  => now(),
-        ]);
+        try {
+            DB::table('profile_activity')->insert([
+                'id'          => (string) Str::uuid(),
+                'user_id'     => $user->id,
+                'type'        => $type,
+                'title'       => $title,
+                'description' => $description,
+                'ip_address'  => request()->ip(),
+                'user_agent'  => substr((string) request()->userAgent(), 0, 500),
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ]);
+        } catch (\Throwable $e) {
+            report($e);
+        }
     }
 
-    /**
-     * GET /api/profile
-     */
+    private function parseTokenName(?string $name): array
+    {
+        $defaults = [
+            'device'   => 'Unknown device',
+            'browser'  => '—',
+            'os'       => '—',
+            'location' => '—',
+            'ip'       => '—',
+            'mobile'   => false,
+        ];
+
+        if (!$name) {
+            return $defaults;
+        }
+
+        $parts = array_map('trim', explode('|', $name));
+        $devicePart = $parts[0] ?? $name;
+        $ip = $parts[1] ?? null;
+        $location = $parts[2] ?? null;
+
+        $browser = $devicePart;
+        $os = '—';
+        if (preg_match('/^(.+?)\s+on\s+(.+)$/i', $devicePart, $m)) {
+            $browser = $m[1];
+            $os = $m[2];
+        }
+
+        $mobile = (bool) preg_match('/iphone|android|mobile/i', $devicePart);
+
+        return [
+            'device'   => $devicePart,
+            'browser'  => $browser,
+            'os'       => $os,
+            'location' => $location ?: '—',
+            'ip'       => $ip ?: '—',
+            'mobile'   => $mobile,
+        ];
+    }
+
+    /** GET /api/profile */
     public function show(Request $request)
     {
         $user = $this->currentUser($request);
-        $user->load('role');
         $settings = $this->ensureSettings($user);
-
-        // Ensure image_url is absolute when path exists
-        if ($user->image_path && !$user->image_url) {
-            $user->image_url = Storage::disk('public')->url($user->image_path);
-        }
 
         return response()->json([
             'data' => [
-                'user'     => $user,
-                'settings' => $settings,
+                'user'     => $this->userPayload($user),
+                'settings' => $this->settingsPayload($settings),
             ],
         ]);
     }
 
-    /**
-     * PUT /api/profile
-     */
+    /** PUT /api/profile */
     public function update(Request $request)
     {
         $user = $this->currentUser($request);
 
         $validated = $request->validate([
-            'name'       => 'sometimes|required|string|max:255',
-            'email'      => [
+            'name'  => 'sometimes|required|string|max:255',
+            'email' => [
                 'sometimes', 'required', 'email', 'max:255',
                 Rule::unique('users', 'email')->ignore($user->id),
             ],
@@ -111,7 +192,7 @@ class ProfileController extends Controller
         ]);
 
         $user->update($validated);
-        $user->load('role');
+        $user->refresh()->load('role');
         $settings = $this->ensureSettings($user);
 
         $this->logActivity($user, 'success', 'Profile updated', 'Account details were saved successfully');
@@ -119,15 +200,13 @@ class ProfileController extends Controller
         return response()->json([
             'message' => 'Profile updated successfully',
             'data'    => [
-                'user'     => $user->fresh(['role']),
-                'settings' => $settings,
+                'user'     => $this->userPayload($user),
+                'settings' => $this->settingsPayload($settings),
             ],
         ]);
     }
 
-    /**
-     * PUT /api/profile/password
-     */
+    /** PUT /api/profile/password */
     public function updatePassword(Request $request)
     {
         $user = $this->currentUser($request);
@@ -145,10 +224,8 @@ class ProfileController extends Controller
         }
 
         $user->update(['password' => Hash::make($validated['password'])]);
-
         $this->logActivity($user, 'warning', 'Password changed', 'Your account password was updated');
 
-        // Optionally revoke other tokens so password change forces re-login elsewhere
         if (method_exists($user, 'tokens')) {
             $currentTokenId = $request->user()?->currentAccessToken()?->id ?? null;
             $user->tokens()
@@ -159,9 +236,7 @@ class ProfileController extends Controller
         return response()->json(['message' => 'Password updated successfully']);
     }
 
-    /**
-     * PUT /api/profile/settings
-     */
+    /** PUT /api/profile/settings */
     public function updateSettings(Request $request)
     {
         $user = $this->currentUser($request);
@@ -179,7 +254,6 @@ class ProfileController extends Controller
             'digest_frequency'    => ['nullable', 'string', Rule::in(['off', 'daily', 'weekly'])],
         ]);
 
-        // Cast booleans if sent as "true"/"false" strings
         foreach (['email_notifications', 'push_notifications', 'low_stock_alerts', 'order_alerts'] as $boolKey) {
             if (array_key_exists($boolKey, $validated)) {
                 $validated[$boolKey] = filter_var($validated[$boolKey], FILTER_VALIDATE_BOOLEAN);
@@ -188,21 +262,22 @@ class ProfileController extends Controller
 
         $settings->update($validated);
 
-        if (isset($validated['theme'])) {
-            $this->logActivity($user, 'info', 'Theme preference saved', 'Switched to ' . $validated['theme'] . ' theme');
-        } else {
-            $this->logActivity($user, 'info', 'Settings updated', 'Preferences were saved');
-        }
+        $this->logActivity(
+            $user,
+            'info',
+            isset($validated['theme']) ? 'Theme preference saved' : 'Settings updated',
+            isset($validated['theme'])
+                ? 'Switched to '.$validated['theme'].' theme'
+                : 'Preferences were saved'
+        );
 
         return response()->json([
             'message' => 'Settings updated successfully',
-            'data'    => $settings->fresh(),
+            'data'    => $this->settingsPayload($settings->fresh()),
         ]);
     }
 
-    /**
-     * POST /api/profile/image
-     */
+    /** POST /api/profile/image */
     public function uploadImage(Request $request)
     {
         $user = $this->currentUser($request);
@@ -215,13 +290,14 @@ class ProfileController extends Controller
             Storage::disk('public')->delete($user->image_path);
         }
 
-        $path = $request->file('image')->store('users/' . $user->id, 'public');
+        $path = $request->file('image')->store('users/'.$user->id, 'public');
         $url  = Storage::disk('public')->url($path);
 
         $user->update([
             'image_path' => $path,
             'image_url'  => $url,
         ]);
+        $user->refresh()->load('role');
 
         $this->logActivity($user, 'success', 'Profile photo updated', 'New avatar uploaded');
 
@@ -230,14 +306,12 @@ class ProfileController extends Controller
             'data'    => [
                 'image_path' => $path,
                 'image_url'  => $url,
-                'user'       => $user->fresh()->load('role'),
+                'user'       => $this->userPayload($user),
             ],
         ]);
     }
 
-    /**
-     * DELETE /api/profile/image
-     */
+    /** DELETE /api/profile/image */
     public function deleteImage(Request $request)
     {
         $user = $this->currentUser($request);
@@ -246,42 +320,27 @@ class ProfileController extends Controller
             Storage::disk('public')->delete($user->image_path);
         }
 
-        $user->update([
-            'image_path' => null,
-            'image_url'  => null,
-        ]);
+        $user->update(['image_path' => null, 'image_url' => null]);
+        $user->refresh()->load('role');
 
         $this->logActivity($user, 'info', 'Profile photo removed', 'Avatar was deleted');
 
         return response()->json([
             'message' => 'Profile image removed',
-            'data'    => $user->fresh()->load('role'),
+            'data'    => $this->userPayload($user),
         ]);
     }
 
-    /* =====================================================================
-     |  Sessions  (Sanctum personal access tokens)
-     |  GET    /api/profile/sessions
-     |  DELETE /api/profile/sessions/{id}
-     |  DELETE /api/profile/sessions  (revoke all others)
-     * ===================================================================== */
-
-    /**
-     * List active sessions / tokens for the current user.
-     */
+    /** GET /api/profile/sessions */
     public function sessions(Request $request)
     {
         $user = $this->currentUser($request);
 
         if (!method_exists($user, 'tokens')) {
-            return response()->json([
-                'data'    => [],
-                'message' => 'Token-based sessions not available (install Laravel Sanctum)',
-            ]);
+            return response()->json(['data' => []]);
         }
 
-        $currentToken = $request->user()?->currentAccessToken();
-        $currentId    = $currentToken?->id;
+        $currentId = $request->user()?->currentAccessToken()?->id;
 
         $tokens = $user->tokens()
             ->orderByDesc('last_used_at')
@@ -291,19 +350,17 @@ class ProfileController extends Controller
                 $meta = $this->parseTokenName($token->name);
 
                 return [
-                    'id'          => (string) $token->id,
-                    'device'      => $meta['device'],
-                    'browser'     => $meta['browser'],
-                    'os'          => $meta['os'],
-                    'location'    => $meta['location'] ?? '—',
-                    'ip'          => $meta['ip'] ?? '—',
-                    'lastActive'  => $token->last_used_at
+                    'id'         => (string) $token->id,
+                    'device'     => $meta['device'],
+                    'browser'    => $meta['browser'],
+                    'os'         => $meta['os'],
+                    'location'   => $meta['location'] ?? '—',
+                    'ip'         => $meta['ip'] ?? '—',
+                    'lastActive' => $token->last_used_at
                         ? $token->last_used_at->diffForHumans()
                         : ($token->created_at?->diffForHumans() ?? '—'),
-                    'current'     => $currentId !== null && (int) $token->id === (int) $currentId,
-                    'mobile'      => $meta['mobile'] ?? false,
-                    'created_at'  => $token->created_at?->toIso8601String(),
-                    'last_used_at'=> $token->last_used_at?->toIso8601String(),
+                    'current'    => $currentId !== null && (int) $token->id === (int) $currentId,
+                    'mobile'     => $meta['mobile'] ?? false,
                 ];
             })
             ->values();
@@ -311,9 +368,7 @@ class ProfileController extends Controller
         return response()->json(['data' => $tokens]);
     }
 
-    /**
-     * Revoke one session/token (cannot revoke current session via this endpoint).
-     */
+    /** DELETE /api/profile/sessions/{id} */
     public function revokeSession(Request $request, string $id)
     {
         $user = $this->currentUser($request);
@@ -341,9 +396,7 @@ class ProfileController extends Controller
         return response()->json(['message' => 'Session revoked']);
     }
 
-    /**
-     * Revoke all sessions except the current one.
-     */
+    /** DELETE /api/profile/sessions */
     public function revokeOtherSessions(Request $request)
     {
         $user = $this->currentUser($request);
@@ -353,7 +406,6 @@ class ProfileController extends Controller
         }
 
         $currentId = $request->user()?->currentAccessToken()?->id;
-
         $query = $user->tokens();
         if ($currentId !== null) {
             $query->where('id', '!=', $currentId);
@@ -368,144 +420,80 @@ class ProfileController extends Controller
         ]);
     }
 
-    /**
-     * Best-effort parse of token name set at login, e.g.
-     * "Chrome on Windows 11 | 203.177.x.x | Naga City"
-     */
-    private function parseTokenName(?string $name): array
-    {
-        $name = $name ?: 'Unknown device';
-        $parts = array_map('trim', explode('|', $name));
-
-        $devicePart = $parts[0] ?? 'Unknown device';
-        $ip        = $parts[1] ?? null;
-        $location  = $parts[2] ?? null;
-
-        $mobile = (bool) preg_match('/iphone|android|mobile|ipad/i', $devicePart);
-
-        // "Chrome on Windows 11"
-        $browser = $devicePart;
-        $os      = '';
-        if (preg_match('/^(.+?)\s+on\s+(.+)$/i', $devicePart, $m)) {
-            $browser = $m[1];
-            $os      = $m[2];
-        }
-
-        return [
-            'device'   => $devicePart,
-            'browser'  => $browser,
-            'os'       => $os ?: '—',
-            'ip'       => $ip,
-            'location' => $location,
-            'mobile'   => $mobile,
-        ];
-    }
-
-    /* =====================================================================
-     |  Activity
-     |  GET /api/profile/activity
-     * ===================================================================== */
-
+    /** GET /api/profile/activity */
     public function activity(Request $request)
     {
         $user = $this->currentUser($request);
-        $limit = min(max((int) $request->query('limit', 20), 1), 50);
 
-        if (Schema::hasTable('profile_activity')) {
+        if (!Schema::hasTable('profile_activity')) {
+            return response()->json(['data' => []]);
+        }
+
+        try {
             $rows = DB::table('profile_activity')
                 ->where('user_id', $user->id)
                 ->orderByDesc('created_at')
-                ->limit($limit)
+                ->limit(30)
                 ->get()
-                ->map(fn ($row) => [
-                    'id'          => $row->id,
-                    'type'        => $row->type,
-                    'title'       => $row->title,
-                    'description' => $row->description,
-                    'time'        => \Carbon\Carbon::parse($row->created_at)->diffForHumans(),
-                    'created_at'  => $row->created_at,
-                ]);
+                ->map(function ($row) {
+                    return [
+                        'id'          => (string) $row->id,
+                        'type'        => $row->type ?? 'info',
+                        'title'       => $row->title ?? '',
+                        'description' => $row->description ?? '',
+                        'time'        => $row->created_at
+                            ? \Carbon\Carbon::parse($row->created_at)->diffForHumans()
+                            : '',
+                    ];
+                })
+                ->values();
 
             return response()->json(['data' => $rows]);
-        }
+        } catch (\Throwable $e) {
+            report($e);
 
-        // Fallback when table is missing — synthetic recent events from user fields
-        $items = [];
-
-        if ($user->updated_at) {
-            $items[] = [
-                'id'          => 'profile-updated',
-                'type'        => 'success',
-                'title'       => 'Profile updated',
-                'description' => 'Account details were last saved',
-                'time'        => $user->updated_at->diffForHumans(),
-                'created_at'  => $user->updated_at->toIso8601String(),
-            ];
+            return response()->json(['data' => []]);
         }
-        if ($user->last_login_at) {
-            $items[] = [
-                'id'          => 'last-login',
-                'type'        => 'info',
-                'title'       => 'Signed in',
-                'description' => 'Last successful login',
-                'time'        => $user->last_login_at->diffForHumans(),
-                'created_at'  => $user->last_login_at->toIso8601String(),
-            ];
-        }
-        if ($user->created_at) {
-            $items[] = [
-                'id'          => 'member-since',
-                'type'        => 'info',
-                'title'       => 'Account created',
-                'description' => 'Member since ' . $user->created_at->toFormattedDateString(),
-                'time'        => $user->created_at->diffForHumans(),
-                'created_at'  => $user->created_at->toIso8601String(),
-            ];
-        }
-
-        return response()->json(['data' => array_slice($items, 0, $limit)]);
     }
 
-    /* =====================================================================
-     |  Two-factor authentication (status + toggle stubs)
-     |  GET  /api/profile/2fa
-     |  POST /api/profile/2fa/enable
-     |  POST /api/profile/2fa/disable
-     |
-     |  Requires columns on users: two_factor_secret, two_factor_enabled (bool)
-     |  Or use Laravel Fortify / a package for full TOTP.
-     * ===================================================================== */
-
+    /** GET /api/profile/2fa */
     public function twoFactorStatus(Request $request)
     {
         $user = $this->currentUser($request);
 
-        $enabled = (bool) ($user->two_factor_enabled ?? false);
+        $enabled = false;
+        try {
+            if (Schema::hasColumn('users', 'two_factor_enabled')) {
+                $enabled = (bool) $user->two_factor_enabled;
+            } elseif (Schema::hasColumn('users', 'two_factor_secret')) {
+                $enabled = !empty($user->two_factor_secret);
+            }
+        } catch (\Throwable $e) {
+            report($e);
+        }
 
         return response()->json([
-            'data' => [
-                'enabled' => $enabled,
-                // Never return the raw secret in status
-            ],
+            'data' => ['enabled' => $enabled],
         ]);
     }
 
+    /** POST /api/profile/2fa/enable */
     public function enableTwoFactor(Request $request)
     {
         $user = $this->currentUser($request);
 
-        if (!Schema::hasColumn('users', 'two_factor_enabled')) {
-            return response()->json([
-                'message' => 'Two-factor columns not migrated yet. Add two_factor_enabled / two_factor_secret to users.',
-            ], 501);
+        try {
+            if (!Schema::hasColumn('users', 'two_factor_enabled')) {
+                return response()->json(['message' => '2FA column missing — run migration'], 501);
+            }
+            $user->update(['two_factor_enabled' => true]);
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(['message' => '2FA not available'], 501);
         }
 
-        // Minimal enable: flag only. Wire to Fortify/Google2FA for real secrets.
-        $user->forceFill([
-            'two_factor_enabled' => true,
-        ])->save();
-
-        $this->logActivity($user, 'success', 'Two-factor authentication enabled', 'Authenticator app protection is on');
+        $this->logActivity($user, 'success', '2FA enabled', 'Two-factor authentication was enabled');
 
         return response()->json([
             'message' => 'Two-factor authentication enabled',
@@ -513,64 +501,44 @@ class ProfileController extends Controller
         ]);
     }
 
+    /** POST /api/profile/2fa/disable */
     public function disableTwoFactor(Request $request)
     {
         $user = $this->currentUser($request);
 
-        $request->validate([
+        $validated = $request->validate([
             'password' => 'required|string',
         ]);
 
-        if (!Hash::check($request->input('password'), $user->password)) {
+        if (!Hash::check($validated['password'], $user->password)) {
             return response()->json([
                 'message' => 'Password is incorrect',
                 'errors'  => ['password' => ['Password is incorrect']],
             ], 422);
         }
 
-        if (!Schema::hasColumn('users', 'two_factor_enabled')) {
-            return response()->json([
-                'message' => 'Two-factor columns not migrated yet.',
-            ], 501);
+        try {
+            $updates = [];
+            if (Schema::hasColumn('users', 'two_factor_enabled')) {
+                $updates['two_factor_enabled'] = false;
+            }
+            if (Schema::hasColumn('users', 'two_factor_secret')) {
+                $updates['two_factor_secret'] = null;
+            }
+            if ($updates) {
+                $user->update($updates);
+            }
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(['message' => '2FA not available'], 501);
         }
 
-        $user->forceFill([
-            'two_factor_enabled' => false,
-            'two_factor_secret'  => null,
-        ])->save();
-
-        $this->logActivity($user, 'warning', 'Two-factor authentication disabled', 'Authenticator app protection was turned off');
+        $this->logActivity($user, 'warning', '2FA disabled', 'Two-factor authentication was disabled');
 
         return response()->json([
             'message' => 'Two-factor authentication disabled',
             'data'    => ['enabled' => false],
-        ]);
-    }
-
-    /**
-     * GET /api/profile/export — optional server-side export
-     */
-    public function export(Request $request)
-    {
-        $user = $this->currentUser($request);
-        $user->load('role');
-        $settings = $this->ensureSettings($user);
-
-        return response()->json([
-            'exported_at' => now()->toIso8601String(),
-            'user'        => [
-                'id'            => $user->id,
-                'name'          => $user->name,
-                'email'         => $user->email,
-                'phone'         => $user->phone,
-                'job_title'     => $user->job_title,
-                'department'    => $user->department,
-                'role'          => $user->role?->name,
-                'status'        => $user->status,
-                'created_at'    => $user->created_at,
-                'last_login_at' => $user->last_login_at,
-            ],
-            'settings'    => $settings,
         ]);
     }
 }

@@ -144,8 +144,7 @@ function Analytics() {
   }, []);
   useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
   const canView = can(userPermissions, "analytics.view", "reports.view", "dashboard.view");
-  const canCreate = can(userPermissions, "analytics.create", "reports.create");
-  const canUpdate = can(userPermissions, "analytics.update", "reports.update");
+ 
 
   const load = useCallback(async () => {
     setLoading(true);

@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useSalesOrders } from "../../hooks/useOrders";
+import { useWarehouses } from "../../hooks/useWarehouses";
+import { invalidateSalesOrders } from "../../lib/invalidate";
 import "../css/Orders.css";
 
 
@@ -18,6 +21,13 @@ type AuthPayload = {
   };
   role_id?: string;
 };
+function norm(s: string): string {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
+
 function extractPermissions(json: unknown): string[] {
   if (!json || typeof json !== "object") return [];
   const j = json as AuthPayload;
@@ -26,17 +36,49 @@ function extractPermissions(json: unknown): string[] {
   if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
   const rolePerms = j.user?.role?.permissions;
   if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
   }
   const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
   if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
   return [];
 }
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
-  return needed.some((n) => perms.includes(n));
+
+function isAdminPayload(json: unknown): boolean {
+  if (!json || typeof json !== "object") return false;
+  const j = json as Record<string, unknown>;
+  const data = j.data as Record<string, unknown> | undefined;
+  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
+  if (user?.is_admin === true || user?.isAdmin === true) return true;
+  const roleName = String(
+    (user?.role as { name?: string } | undefined)?.name ||
+      user?.role_name ||
+      (data?.role as { name?: string } | undefined)?.name ||
+      ""
+  ).toLowerCase();
+  return (
+    roleName === "admin" ||
+    roleName === "administrator" ||
+    roleName === "system admin" ||
+    roleName === "system administrator" ||
+    roleName === "super admin" ||
+    roleName === "superadmin"
+  );
 }
 
+function can(perms: string[], ...needed: string[]): boolean {
+  const normalized = perms.map(norm);
+  if (
+    normalized.includes("*") ||
+    normalized.includes("admin") ||
+    normalized.includes("super_admin") ||
+    normalized.includes("superadmin")
+  ) {
+    return true;
+  }
+  return needed.map(norm).some((n) => normalized.includes(n));
+}
 const svg = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -132,11 +174,6 @@ type Stats = {
   done: number;
 };
 
-type Paginated<T> = {
-  data: T[];
-  last_page?: number;
-  total?: number;
-};
 
 type SoForm = {
   customer_id: string;
@@ -251,6 +288,65 @@ function workflowIndex(status: string): number {
   return WORKFLOW_STEPS.indexOf(status as (typeof WORKFLOW_STEPS)[number]);
 }
 
+
+/** Pull array from Laravel list payloads (data / nested data / bare array / resources). */
+function extractList<T = unknown>(json: unknown): T[] {
+  if (!json) return [];
+  if (Array.isArray(json)) return json as T[];
+  if (typeof json !== "object") return [];
+  const o = json as Record<string, unknown>;
+  if (Array.isArray(o.data)) return o.data as T[];
+  const nested = o.data as Record<string, unknown> | undefined;
+  if (nested && Array.isArray(nested.data)) return nested.data as T[];
+  if (Array.isArray(o.items)) return o.items as T[];
+  if (Array.isArray(o.warehouses)) return o.warehouses as T[];
+  if (Array.isArray(o.customers)) return o.customers as T[];
+  if (Array.isArray(o.results)) return o.results as T[];
+  return [];
+}
+
+/* ── Meta cache (instant reopen of New SO modal) ───────────── */
+const SO_META_TTL = 60_000;
+const SS_SO_META = "so:lastMeta";
+
+type SoMetaSnap = {
+  at: number;
+  warehouses: Warehouse[];
+  customers: Customer[];
+  products: ProductOpt[];
+};
+
+type SoMetaStore = {
+  entry: SoMetaSnap | null;
+  inflight: Promise<SoMetaSnap> | null;
+};
+
+function soMetaStore(): SoMetaStore {
+  const g = globalThis as unknown as { __saSoMetaCache?: SoMetaStore };
+  if (!g.__saSoMetaCache) g.__saSoMetaCache = { entry: null, inflight: null };
+  return g.__saSoMetaCache;
+}
+
+function readSoMetaSS(): SoMetaSnap | null {
+  try {
+    const raw = sessionStorage.getItem(SS_SO_META);
+    if (!raw) return null;
+    const snap = JSON.parse(raw) as SoMetaSnap;
+    if (!snap?.at || Date.now() - snap.at > 10 * 60_000) return null;
+    return snap;
+  } catch {
+    return null;
+  }
+}
+
+function writeSoMetaSS(snap: SoMetaSnap) {
+  try {
+    sessionStorage.setItem(SS_SO_META, JSON.stringify(snap));
+  } catch {
+    /* quota */
+  }
+}
+
 function SalesOrders() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -259,6 +355,23 @@ function SalesOrders() {
   const [page, setPage] = useState(1);
   const pageSize = 15;
 
+  const {
+    rows: soRows,
+    meta: soMeta,
+    stats: soStats,
+    isLoading: soLoading,
+    isFetching: soFetching,
+    refetchAll: refetchSOs,
+  } = useSalesOrders({
+    page,
+    perPage: pageSize,
+    search: debouncedSearch,
+    status,
+    warehouseId: wh === "all" || !wh ? null : wh,
+    enabled: true,
+  });
+
+
   const [orders, setOrders] = useState<SalesOrder[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [total, setTotal] = useState(0);
@@ -266,9 +379,41 @@ function SalesOrders() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [products, setProducts] = useState<ProductOpt[]>([]);
+  const bootMeta = soMetaStore().entry ?? readSoMetaSS();
+
+  // Shared React Query cache (same key as prefetchAppData) — fast like SO list
+  const {
+    rows: warehouseRows,
+    isLoading: warehousesLoading,
+    isFetching: warehousesFetching,
+    refetch: refetchWarehouses,
+  } = useWarehouses({ enabled: true, perPage: 200 });
+
+  const warehouses = useMemo<Warehouse[]>(() => {
+    const fromQuery = (warehouseRows as Warehouse[])
+      .map((w) => {
+        const r = w as Warehouse & Record<string, unknown>;
+        return {
+          id: String(r.id ?? ""),
+          code: String(r.code ?? r.name ?? r.id ?? ""),
+          name: r.name != null ? String(r.name) : undefined,
+        };
+      })
+      .filter((w) => !!w.id)
+      .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
+    if (fromQuery.length > 0) return fromQuery;
+    // Fallback to session/module cache while query boots
+    return bootMeta?.warehouses ?? [];
+  }, [warehouseRows, bootMeta?.warehouses]);
+
+  const [customers, setCustomers] = useState<Customer[]>(
+    () => bootMeta?.customers ?? []
+  );
+  const [products, setProducts] = useState<ProductOpt[]>(
+    () => bootMeta?.products ?? []
+  );
+  const [metaLoading, setMetaLoading] = useState(false);
+  const whBusy = warehousesLoading || warehousesFetching || metaLoading;
 
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<SoForm>(emptyForm);
@@ -286,46 +431,79 @@ function SalesOrders() {
     setTimeout(() => setToast(null), 3200);
   };
 
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => { setUserPermissions(list); setPermsLoaded(true); };
-    try {
-      for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
-            finish(parsed as string[]);
-            return;
-          }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) { finish(list); return; }
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          const rid = u?.role_id || u?.role?.id;
-          if (rid) {
-            try {
-              const { data: json } = await api.get(`/roles/${rid}/permissions`);
-              const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-              if (Array.isArray(perms)) {
-                finish(perms.map((p: { name?: string } | string) => typeof p === "string" ? p : p?.name).filter(Boolean) as string[]);
-                return;
-              }
-            } catch { /* */ }
-          }
-        } catch { /* */ }
-      }
-    } catch { /* */ }
+    const fetchUserPermissions = useCallback(async () => {
+    const finish = (list: string[]) => {
+      setUserPermissions(list);
+      setPermsLoaded(true);
+    };
+
+    // 1) /me first
     try {
       const { data: json } = await api.get("/me");
-      const list = extractPermissions(json);
-      if (list.length > 0) { finish(list); return; }
-    } catch { /* */ }
+      if (json) {
+        if (isAdminPayload(json)) {
+          finish(["*"]);
+          return;
+        }
+        const list = extractPermissions(json);
+        if (list.length > 0) {
+          finish(list);
+          return;
+        }
+      }
+    } catch {
+      /* fall through */
+    }
+
+    // 2) localStorage only if /me empty/failed
+    for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
+      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (isAdminPayload(parsed)) {
+          finish(["*"]);
+          return;
+        }
+        if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
+          finish(parsed as string[]);
+          return;
+        }
+        const list = extractPermissions(parsed);
+        if (list.length > 0) {
+          finish(list);
+          return;
+        }
+      } catch {
+        /* next */
+      }
+    }
+
     finish(["*"]);
   }, []);
   useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
-  const canView = can(userPermissions, "sales_orders.view", "sales-orders.view", "so.view");
-  const canCreate = can(userPermissions, "sales_orders.create", "sales-orders.create", "so.create");
-  const canUpdate = can(userPermissions, "sales_orders.update", "sales-orders.update", "so.update");
+    const canView = can(
+    userPermissions,
+    "sales_orders.view",
+    "sales-orders.view",
+    "sales_order.view",
+    "so.view",
+    "orders.view"
+  );
+  const canCreate = can(
+    userPermissions,
+    "sales_orders.create",
+    "sales-orders.create",
+    "sales_order.create",
+    "so.create"
+  );
+  const canUpdate = can(
+    userPermissions,
+    "sales_orders.update",
+    "sales-orders.update",
+    "sales_order.update",
+    "so.update"
+  );
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -335,121 +513,169 @@ function SalesOrders() {
     return () => clearTimeout(t);
   }, [search]);
 
-  const fetchMeta = useCallback(async () => {
-    try {
-      const [cuSettled, whSettled, prodSettled] = await Promise.allSettled([
-        api.get("/customers", { params: { per_page: 100 } }),
-        api.get("/warehouses"),
-        api.get("/products", { params: { per_page: 200 } }),
-      ]);
+  /** Customers + products only. Warehouses come from useWarehouses (React Query). */
+  const fetchMeta = useCallback(async (force = false): Promise<SoMetaSnap> => {
+    const store = soMetaStore();
 
-      if (cuSettled.status === "fulfilled") {
-        const json = cuSettled.value.data;
-        const list: Customer[] = Array.isArray(json) ? json : json.data ?? [];
-        setCustomers(
-          list
-            .map((c) => ({ id: String(c.id), name: c.name }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-        );
+    if (
+      !force &&
+      store.entry &&
+      Date.now() - store.entry.at < SO_META_TTL &&
+      (store.entry.customers.length > 0 || store.entry.products.length > 0)
+    ) {
+      setCustomers(store.entry.customers);
+      setProducts(store.entry.products);
+      return store.entry;
+    }
+
+    if (store.inflight && !force) {
+      const snap = await store.inflight;
+      setCustomers(snap.customers);
+      setProducts(snap.products);
+      return snap;
+    }
+
+    if (!force && store.entry) {
+      setCustomers(store.entry.customers);
+      setProducts(store.entry.products);
+    }
+
+    setMetaLoading(true);
+    const work = (async (): Promise<SoMetaSnap> => {
+      const cuSettled = await api
+        .get("/customers", { params: { per_page: 100 }, timeout: 12000 })
+        .then((r) => r.data)
+        .catch(() => null);
+
+      let nextCu: Customer[] = store.entry?.customers ?? [];
+      if (cuSettled != null) {
+        nextCu = extractList<Customer>(cuSettled)
+          .map((c) => ({ id: String(c.id), name: c.name }))
+          .filter((c) => !!c.id)
+          .sort((a, b) => a.name.localeCompare(b.name));
       }
+      setCustomers(nextCu);
 
-      if (whSettled.status === "fulfilled") {
-        const json = whSettled.value.data;
-        const list: Warehouse[] = Array.isArray(json) ? json : json.data ?? [];
-        setWarehouses(
-          list
-            .map((w) => ({ id: String(w.id), code: w.code, name: w.name }))
-            .sort((a, b) => a.code.localeCompare(b.code))
-        );
-      }
-
-      if (prodSettled.status === "fulfilled") {
-        const json = prodSettled.value.data;
-        const list: ProductOpt[] = Array.isArray(json) ? json : json.data ?? [];
-        setProducts(
-          list
+      let nextProd: ProductOpt[] = store.entry?.products ?? [];
+      try {
+        const { data: invJson } = await api.get("/inventories", {
+          params: { per_page: 200 },
+          timeout: 15000,
+        });
+        nextProd = extractList<ProductOpt>(invJson)
+          .map((p) => ({
+            id: String(p.id),
+            sku: p.sku,
+            name: p.name,
+            price: p.price,
+            qty: p.qty,
+            status: (p as ProductOpt & { status?: string }).status,
+          }))
+          .filter((p) => !!p.id && (!p.status || p.status === "active"))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      } catch {
+        try {
+          const { data } = await api.get("/products", {
+            params: { per_page: 200 },
+            timeout: 12000,
+          });
+          nextProd = extractList<ProductOpt>(data)
             .map((p) => ({
               id: String(p.id),
               sku: p.sku,
               name: p.name,
               price: p.price,
               qty: p.qty,
-              status: p.status,
             }))
-            .filter((p) => !p.status || p.status === "active")
-            .sort((a, b) => a.name.localeCompare(b.name))
-        );
+            .filter((p) => !!p.id)
+            .sort((a, b) => a.name.localeCompare(b.name));
+        } catch {
+          /* keep previous */
+        }
       }
+      setProducts(nextProd);
+
+      const snap: SoMetaSnap = {
+        at: Date.now(),
+        warehouses: store.entry?.warehouses ?? [],
+        customers: nextCu,
+        products: nextProd,
+      };
+      store.entry = snap;
+      if (nextCu.length > 0 || nextProd.length > 0) writeSoMetaSS(snap);
+      return snap;
+    })();
+
+    store.inflight = work;
+    try {
+      return await work;
     } catch (e) {
       console.error("[SalesOrders] meta fetch failed:", e);
+      return (
+        store.entry ?? {
+          at: Date.now(),
+          warehouses: [],
+          customers: [],
+          products: [],
+        }
+      );
+    } finally {
+      store.inflight = null;
+      setMetaLoading(false);
     }
   }, []);
 
-  const fetchOrders = useCallback(async () => {
-    setLoading(true);
+  /* Phase 7: TanStack Query owns list + stats */
+  useEffect(() => {
+    if (!soRows) return;
+    const rows = (soRows as SalesOrder[]).map((row) => {
+      const cached = readCachedSoLines(row.so_number);
+      return {
+        ...row,
+        lines: row.lines?.length ? row.lines : cached.length ? cached : row.lines,
+      };
+    });
+    setOrders(rows);
+    setTotal(soMeta.total);
+    setLastPage(soMeta.last_page);
+    setLoading(false);
     setError(null);
-
-    const params = new URLSearchParams();
-    params.set("per_page", String(pageSize));
-    params.set("page", String(page));
-    params.set("sort", "order_date");
-    params.set("dir", "desc");
-    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
-    if (status !== "all") params.set("status", status);
-    if (wh !== "all") params.set("warehouse_id", wh);
-
-    try {
-      const query: Record<string, string | number> = Object.fromEntries(params);
-      const [listSettled, statsSettled] = await Promise.allSettled([
-        api.get("/sales-orders", { params: query }),
-        api.get("/sales-orders/stats"),
-      ]);
-
-      if (listSettled.status === "rejected") {
-        const e: any = listSettled.reason;
-        throw new Error(
-          `Orders HTTP ${e?.response?.status ?? "?"}: ${String(e?.response?.data?.message || e?.message || "").slice(0, 200)}`
-        );
-      }
-      if (statsSettled.status === "rejected") {
-        const e: any = statsSettled.reason;
-        throw new Error(`Stats HTTP ${e?.response?.status ?? "?"}`);
-      }
-
-      const listJson: Paginated<SalesOrder> | SalesOrder[] = listSettled.value.data;
-      const statsJson: Stats = statsSettled.value.data;
-
-      const rawRows = Array.isArray(listJson) ? listJson : listJson.data ?? [];
-      const rows = rawRows.map((row) => {
-        const cached = readCachedSoLines(row.so_number);
-        return {
-          ...row,
-          lines: row.lines?.length ? row.lines : cached.length ? cached : row.lines,
-        };
-      });
-
-      setOrders(rows);
-      setTotal(Array.isArray(listJson) ? rows.length : listJson.total ?? rows.length);
-      setLastPage(Array.isArray(listJson) ? 1 : listJson.last_page ?? 1);
-      setStats(statsJson);
-    } catch (e) {
-      console.error(e);
-      setError(e instanceof Error ? e.message : "Failed to load sales orders");
-      setOrders([]);
-      setTotal(0);
-      setLastPage(1);
-    } finally {
-      setLoading(false);
-    }
-  }, [page, debouncedSearch, status, wh]);
+  }, [soRows, soMeta]);
 
   useEffect(() => {
-    fetchOrders();
-  }, [fetchOrders]);
+    if (!soStats) return;
+    setStats(soStats as Stats);
+  }, [soStats]);
 
   useEffect(() => {
-    fetchMeta();
+    if (soRows.length === 0 && soLoading) setLoading(true);
+    else if (!soLoading) setLoading(false);
+  }, [soLoading, soRows.length]);
+
+  // Warm meta on mount (non-blocking)
+  useEffect(() => {
+    void fetchMeta(false);
   }, [fetchMeta]);
+
+  // Auto-select first warehouse when list arrives while create modal is open
+  useEffect(() => {
+    if (!showAdd) return;
+    if (warehouses.length === 0) return;
+    setForm((f) => {
+      if (f.warehouse_id && warehouses.some((w) => w.id === f.warehouse_id)) return f;
+      return { ...f, warehouse_id: warehouses[0].id };
+    });
+  }, [showAdd, warehouses]);
+
+  // Auto-select first customer when list arrives while create modal is open
+  useEffect(() => {
+    if (!showAdd) return;
+    if (customers.length === 0) return;
+    setForm((f) => {
+      if (f.customer_id && customers.some((c) => c.id === f.customer_id)) return f;
+      return { ...f, customer_id: customers[0].id };
+    });
+  }, [showAdd, customers]);
 
   useEffect(() => {
     document.body.classList.toggle("modal-open", showAdd || !!viewOrder);
@@ -458,16 +684,39 @@ function SalesOrders() {
 
   const statsView = stats ?? { all: 0, pending: 0, total_value: 0, done: 0 };
 
+  /** Open modal immediately — never block on network. */
   const openAdd = () => {
-    if (!canCreate) { showToast("error", "Permission denied", "You cannot create sales orders."); return; }
+    if (!canCreate) {
+      showToast("error", "Permission denied", "You cannot create sales orders.");
+      return;
+    }
+    setFormError(null);
     setForm({
       ...emptyForm(),
       customer_id: customers[0]?.id ?? "",
       warehouse_id: warehouses[0]?.id ?? "",
     });
-    setFormError(null);
     setShowAdd(true);
+
+    // Background only — does not delay the modal
+    if (warehouses.length === 0) void refetchWarehouses();
+    if (customers.length === 0 || products.length === 0) void fetchMeta(true);
   };
+
+  // Keep session cache in sync when React Query warehouses arrive
+  useEffect(() => {
+    if (warehouses.length === 0) return;
+    const store = soMetaStore();
+    const prev = store.entry;
+    const snap: SoMetaSnap = {
+      at: Date.now(),
+      warehouses,
+      customers: prev?.customers ?? customers,
+      products: prev?.products ?? products,
+    };
+    store.entry = snap;
+    writeSoMetaSS(snap);
+  }, [warehouses, customers, products]);
 
   const setLine = (key: string, patch: Partial<SoLine>) => {
     setForm((f) => ({
@@ -536,6 +785,11 @@ function SalesOrders() {
 
     if (!form.customer_id) {
       setFormError("Customer is required.");
+      return;
+    }
+
+    if (warehouses.length > 0 && !form.warehouse_id) {
+      setFormError("Select a warehouse for fulfillment.");
       return;
     }
 
@@ -649,7 +903,8 @@ function SalesOrders() {
         }, 500);
       }
       setPage(1);
-      await fetchOrders();
+      await refetchSOs();
+         void invalidateSalesOrders();
       setViewOrder({
         id: soId || String(Date.now()),
         so_number: soNumber,
@@ -697,6 +952,7 @@ function SalesOrders() {
     try {
       await api.put(`/sales-orders/${order.id}`, { status: nextStatus });
       showToast("success", "Status updated", `${order.so_number} → ${nextStatus}`);
+      void invalidateSalesOrders();
     } catch (err) {
       setOrders((rows) =>
         rows.map((r) => (r.id === order.id ? { ...r, status: prev } : r))
@@ -740,16 +996,23 @@ function SalesOrders() {
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  fetchOrders();
-                  fetchMeta();
+                  void refetchSOs();
+                  void refetchWarehouses();
+                  void fetchMeta(true);
                   showToast("success", "Refreshed", "Orders reloaded.");
                 }}
-                disabled={loading}
+                disabled={soFetching || loading}
               >
-                <IconRefresh /> Refresh
+                <IconRefresh /> {soFetching ? "Refreshing…" : "Refresh"}
               </button>
               {canCreate && (
-              <button type="button" className="btn btn-primary" onClick={openAdd}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={openAdd}
+                disabled={saving}
+                title="Create a new sales order"
+              >
                 <IconPlus /> New Sales Order
               </button>
               )}
@@ -960,6 +1223,7 @@ function SalesOrders() {
                             type="button"
                             className="btn btn-primary"
                             onClick={openAdd}
+                            disabled={saving}
                           >
                             <IconPlus /> New Sales Order
                           </button>
@@ -1172,21 +1436,50 @@ function SalesOrders() {
                 </div>
 
                 <div className="form-field">
-                  <label>Warehouse</label>
-                  <select
-                    value={form.warehouse_id}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, warehouse_id: e.target.value }))
-                    }
-                    disabled={saving}
-                  >
-                    <option value="">— None —</option>
-                    {warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name ? `${w.code} — ${w.name}` : w.code}
-                      </option>
-                    ))}
-                  </select>
+                  <label>Warehouse {warehouses.length > 0 ? "*" : ""}</label>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <select
+                      value={form.warehouse_id}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, warehouse_id: e.target.value }))
+                      }
+                      disabled={saving || whBusy}
+                      style={{ flex: 1 }}
+                      required={warehouses.length > 0}
+                    >
+                      {warehouses.length === 0 ? (
+                        <option value="">
+                          {whBusy ? "Loading warehouses…" : "— No warehouses —"}
+                        </option>
+                      ) : (
+                        <>
+                          <option value="">— Select warehouse —</option>
+                          {warehouses.map((w) => (
+                            <option key={w.id} value={w.id}>
+                              {w.name ? `${w.code} — ${w.name}` : w.code}
+                            </option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                    {warehouses.length === 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        disabled={whBusy || saving}
+                        onClick={() => void refetchWarehouses()}
+                        title="Reload warehouses"
+                      >
+                        {whBusy ? "…" : "Retry"}
+                      </button>
+                    )}
+                  </div>
+                  {warehouses.length === 0 && !whBusy && (
+                    <span className="po-field-hint" style={{ display: "block", marginTop: 6 }}>
+                      No warehouses loaded. Open Warehouses and create at least one site, then
+                      click Retry.
+                    </span>
+                  )}
                 </div>
 
                 <div className="form-field">
@@ -1274,7 +1567,6 @@ function SalesOrders() {
                     const selected = products.find((p) => p.id === line.product_id);
                     const stock = line.product_id ? stockOf(line.product_id) : null;
                     const stockErr = lineStockError(line);
-                    const qtyNum = Number(line.qty) || 0;
                     const maxAttr = stock !== null ? Math.max(0, stock) : undefined;
                     const stockClass =
                       stock === null

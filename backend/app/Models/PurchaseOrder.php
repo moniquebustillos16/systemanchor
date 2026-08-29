@@ -22,6 +22,7 @@ class PurchaseOrder extends Model
         'expected_date',
         'reference',
         'notes',
+        'product_name',  // ← required
         'items',
         'total',
         'status',

@@ -2,9 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useCustomers } from "../../hooks/usePartners";
+import {
+  createCustomer,
+  updateCustomer,
+  deleteCustomer,
+} from "../../api/partners";
+import { invalidateCustomers } from "../../lib/invalidate";
 import "../css/Partners.css";
-
-
 
 /* ── Role permissions ─────────────────────────────────────── */
 type AuthPayload = {
@@ -25,14 +30,17 @@ function extractPermissions(json: unknown): string[] {
   if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
   const rolePerms = j.user?.role?.permissions;
   if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
   }
   const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
   if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
   return [];
 }
 function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
+  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin"))
+    return true;
   return needed.some((n) => perms.includes(n));
 }
 
@@ -80,14 +88,6 @@ type Customer = {
   updated_at?: string;
 };
 
-type PaginatedResponse = {
-  data: Customer[];
-  current_page: number;
-  last_page: number;
-  per_page: number;
-  total: number;
-};
-
 function healthClass(orders: number, open: number) {
   if (open > 1) return "mid";
   if (orders >= 50) return "high";
@@ -102,14 +102,15 @@ function healthLabel(orders: number, open: number) {
   return "New";
 }
 
-
 function Customers() {
-  const [customers, setCustomers] = useState<Customer[]>([]);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [status, setStatus] = useState("all");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
+  const [toast, setToast] = useState<{
+    type: string;
+    title: string;
+    msg: string;
+  } | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
 
@@ -125,93 +126,119 @@ function Customers() {
   });
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSearch(search), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+
+  const {
+    rows: customerRows,
+    isLoading: loading,
+    isFetching,
+    isError,
+    error: queryError,
+    refetch,
+  } = useCustomers({
+    search: debouncedSearch,
+    status,
+    perPage: 100,
+    enabled: true,
+  });
+
+  const customers: Customer[] = useMemo(
+    () =>
+      (customerRows ?? []).map((raw) => {
+        const c = raw as unknown as Customer;
+        return {
+          ...c,
+          id: String(c.id),
+          orders: Number(c.orders ?? 0),
+          revenue: Number(c.revenue ?? 0),
+          open: Number(c.open ?? 0),
+        };
+      }),
+    [customerRows]
+  );
+
+  const error = isError
+    ? (queryError as Error)?.message ?? "Unable to load customers"
+    : null;
+
   const showToast = (type: string, title: string, msg: string) => {
     setToast({ type, title, msg });
     setTimeout(() => setToast(null), 3000);
   };
 
   const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => { setUserPermissions(list); setPermsLoaded(true); };
+    const finish = (list: string[]) => {
+      setUserPermissions(list);
+      setPermsLoaded(true);
+    };
     try {
       for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
         const raw = localStorage.getItem(key);
         if (!raw) continue;
         try {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
+          if (
+            Array.isArray(parsed) &&
+            parsed.every((x: unknown) => typeof x === "string")
+          ) {
             finish(parsed as string[]);
             return;
           }
           const list = extractPermissions(parsed);
-          if (list.length > 0) { finish(list); return; }
+          if (list.length > 0) {
+            finish(list);
+            return;
+          }
           const u = parsed?.data ?? parsed?.user ?? parsed;
           const rid = u?.role_id || u?.role?.id;
           if (rid) {
             try {
               const { data: json } = await api.get(`/roles/${rid}/permissions`);
-              const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
+              const perms =
+                json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
               if (Array.isArray(perms)) {
-                finish(perms.map((p: { name?: string } | string) => typeof p === "string" ? p : p?.name).filter(Boolean) as string[]);
+                finish(
+                  perms
+                    .map((p: { name?: string } | string) =>
+                      typeof p === "string" ? p : p?.name
+                    )
+                    .filter(Boolean) as string[]
+                );
                 return;
               }
-            } catch { /* */ }
+            } catch {
+              /* */
+            }
           }
-        } catch { /* */ }
+        } catch {
+          /* */
+        }
       }
-    } catch { /* */ }
+    } catch {
+      /* */
+    }
     try {
       const { data: json } = await api.get("/me");
       const list = extractPermissions(json);
-      if (list.length > 0) { finish(list); return; }
-    } catch { /* */ }
+      if (list.length > 0) {
+        finish(list);
+        return;
+      }
+    } catch {
+      /* */
+    }
     finish(["*"]);
   }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
+  useEffect(() => {
+    void fetchUserPermissions();
+  }, [fetchUserPermissions]);
+
   const canView = can(userPermissions, "customers.view");
   const canCreate = can(userPermissions, "customers.create");
   const canUpdate = can(userPermissions, "customers.update");
-
-  const fetchCustomers = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set("search", search.trim());
-      if (status !== "all") params.set("status", status);
-      params.set("per_page", "100");
-
-      const { data: json } = await api.get("/customers", {
-        params: Object.fromEntries(params),
-      });
-      const list: Customer[] = Array.isArray(json)
-        ? json
-        : (json as PaginatedResponse)?.data ?? [];
-      setCustomers(
-        list.map((c: Customer) => ({
-          ...c,
-          orders: c.orders ?? 0,
-          revenue: c.revenue ?? 0,
-          open: c.open ?? 0,
-        }))
-      );
-    } catch (err: any) {
-      const msg =
-        err?.response?.data?.message ||
-        err?.message ||
-        "Unable to load customers";
-      setError(String(msg));
-      setCustomers([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [search, status]);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      fetchCustomers();
-    }, 300);
-    return () => clearTimeout(t);
-  }, [fetchCustomers]);
 
   const stats = useMemo(() => {
     const active = customers.filter((c) => c.status === "active").length;
@@ -225,7 +252,10 @@ function Customers() {
   }, [customers]);
 
   const openCreate = () => {
-    if (!canCreate) { showToast("error", "Permission denied", "You cannot create customers."); return; }
+    if (!canCreate) {
+      showToast("error", "Permission denied", "You cannot create customers.");
+      return;
+    }
     setEditing(null);
     setForm({
       name: "",
@@ -239,7 +269,10 @@ function Customers() {
   };
 
   const openEdit = (c: Customer) => {
-    if (!canUpdate) { showToast("error", "Permission denied", "You cannot update customers."); return; }
+    if (!canUpdate) {
+      showToast("error", "Permission denied", "You cannot update customers.");
+      return;
+    }
     setEditing(c);
     setForm({
       name: c.name || "",
@@ -271,24 +304,27 @@ function Customers() {
       };
 
       if (editing) {
-        await api.put(`/customers/${editing.id}`, payload);
+        await updateCustomer(editing.id, payload);
       } else {
-        await api.post("/customers", payload);
+        await createCustomer(payload);
       }
 
       showToast(
         "success",
         editing ? "Updated" : "Created",
-        editing ? "Customer updated successfully." : "Customer created successfully."
+        editing
+          ? "Customer updated successfully."
+          : "Customer created successfully."
       );
       setModalOpen(false);
-      fetchCustomers();
-    } catch (err: any) {
-      const body = err?.response?.data;
+      await invalidateCustomers();
+      await refetch();
+    } catch (err: unknown) {
+      const body = (err as { response?: { data?: any } })?.response?.data;
       const msg =
         body?.message ||
         (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        err?.message ||
+        (err as Error)?.message ||
         "Save failed";
       showToast("error", "Error", String(msg));
     } finally {
@@ -297,14 +333,17 @@ function Customers() {
   };
 
   const handleDelete = async (c: Customer) => {
-    if (!canUpdate) { showToast("error", "Permission denied", "You cannot delete customers."); return; }
+    if (!canUpdate) {
+      showToast("error", "Permission denied", "You cannot delete customers.");
+      return;
+    }
     if (!window.confirm(`Delete customer "${c.name}"?`)) return;
 
     try {
-      await api.delete(`/customers/${c.id}`);
-
+      await deleteCustomer(c.id);
       showToast("success", "Deleted", `"${c.name}" removed.`);
-      fetchCustomers();
+      await invalidateCustomers();
+      await refetch();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Delete failed";
       showToast("error", "Error", msg);
@@ -316,7 +355,17 @@ function Customers() {
       showToast("info", "Export", "No customers to export.");
       return;
     }
-    const header = ["Name", "Contact", "Email", "Phone", "City", "Status", "Orders", "Revenue", "Open"];
+    const header = [
+      "Name",
+      "Contact",
+      "Email",
+      "Phone",
+      "City",
+      "Status",
+      "Orders",
+      "Revenue",
+      "Open",
+    ];
     const rows = customers.map((c) =>
       [
         c.name,
@@ -350,10 +399,14 @@ function Customers() {
         <Topbar />
         <main className="content">
           {permsLoaded && !canView && (
-            <div className="card" style={{ padding: 40, textAlign: "center", marginBottom: 16 }}>
+            <div
+              className="card"
+              style={{ padding: 40, textAlign: "center", marginBottom: 16 }}
+            >
               <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
               <p className="text-muted" style={{ margin: 0 }}>
-                You do not have permission to view this page. Ask an admin to grant <code>customers.view</code>.
+                You do not have permission to view this page. Ask an admin to
+                grant <code>customers.view</code>.
               </p>
             </div>
           )}
@@ -365,23 +418,32 @@ function Customers() {
               </p>
             </div>
             <div className="page-actions">
-              <button type="button" className="btn btn-secondary" onClick={handleExport}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleExport}
+              >
                 <IconDownload /> Export
               </button>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  fetchCustomers();
+                  void refetch();
                   showToast("success", "Refreshed", "Customer list reloaded.");
                 }}
+                disabled={isFetching}
               >
-                Recalculate Scores
+                {isFetching ? "Refreshing…" : "Recalculate Scores"}
               </button>
               {canCreate && (
-              <button type="button" className="btn btn-primary" onClick={openCreate}>
-                <IconPlus /> Add Customer
-              </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={openCreate}
+                >
+                  <IconPlus /> Add Customer
+                </button>
               )}
             </div>
           </div>
@@ -394,7 +456,9 @@ function Customers() {
             </div>
             <div className="stat-card">
               <div className="stat-label">Total Revenue</div>
-              <div className="stat-value">${stats.totalRev.toLocaleString()}</div>
+              <div className="stat-value">
+                ${stats.totalRev.toLocaleString()}
+              </div>
               <div className="stat-hint">From sales orders</div>
             </div>
             <div className="stat-card">
@@ -408,7 +472,9 @@ function Customers() {
                 {stats.top?.name?.split(" ")[0] || "—"}
               </div>
               <div className="stat-hint">
-                {stats.top ? `$${(stats.top.revenue ?? 0).toLocaleString()}` : ""}
+                {stats.top
+                  ? `$${(stats.top.revenue ?? 0).toLocaleString()}`
+                  : ""}
               </div>
             </div>
           </div>
@@ -425,7 +491,10 @@ function Customers() {
                 />
               </div>
               <div className="table-filters">
-                <select value={status} onChange={(e) => setStatus(e.target.value)}>
+                <select
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value)}
+                >
                   <option value="all">All statuses</option>
                   <option value="active">Active</option>
                   <option value="inactive">Inactive</option>
@@ -463,7 +532,7 @@ function Customers() {
                           type="button"
                           className="btn btn-sm btn-secondary"
                           style={{ marginLeft: 12 }}
-                          onClick={fetchCustomers}
+                          onClick={() => void refetch()}
                         >
                           Retry
                         </button>
@@ -498,7 +567,9 @@ function Customers() {
                             </span>
                           </td>
                           <td className="fw-600">{orders}</td>
-                          <td className="fw-600">${revenue.toLocaleString()}</td>
+                          <td className="fw-600">
+                            ${revenue.toLocaleString()}
+                          </td>
                           <td>{open}</td>
                           <td>
                             <span className={`status-badge status-${c.status}`}>
@@ -509,20 +580,20 @@ function Customers() {
                             <div style={{ display: "flex", gap: 6 }}>
                               {canUpdate && (
                                 <>
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-secondary"
-                                onClick={() => openEdit(c)}
-                              >
-                                Edit
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-secondary"
-                                onClick={() => handleDelete(c)}
-                              >
-                                Delete
-                              </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm btn-secondary"
+                                    onClick={() => openEdit(c)}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm btn-secondary"
+                                    onClick={() => void handleDelete(c)}
+                                  >
+                                    Delete
+                                  </button>
                                 </>
                               )}
                             </div>
@@ -572,7 +643,9 @@ function Customers() {
                   <input
                     required
                     value={form.name}
-                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, name: e.target.value }))
+                    }
                     placeholder="Company / account name"
                   />
                 </label>
@@ -580,7 +653,9 @@ function Customers() {
                   <span>Contact</span>
                   <input
                     value={form.contact}
-                    onChange={(e) => setForm((f) => ({ ...f, contact: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, contact: e.target.value }))
+                    }
                     placeholder="Contact person"
                   />
                 </label>
@@ -589,7 +664,9 @@ function Customers() {
                   <input
                     type="email"
                     value={form.email}
-                    onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, email: e.target.value }))
+                    }
                     placeholder="email@example.com"
                   />
                 </label>
@@ -597,7 +674,9 @@ function Customers() {
                   <span>Phone</span>
                   <input
                     value={form.phone}
-                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, phone: e.target.value }))
+                    }
                     placeholder="+63 …"
                   />
                 </label>
@@ -605,7 +684,9 @@ function Customers() {
                   <span>City</span>
                   <input
                     value={form.city}
-                    onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, city: e.target.value }))
+                    }
                     placeholder="City"
                   />
                 </label>
@@ -613,7 +694,9 @@ function Customers() {
                   <span>Status</span>
                   <select
                     value={form.status}
-                    onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, status: e.target.value }))
+                    }
                   >
                     <option value="active">Active</option>
                     <option value="inactive">Inactive</option>
@@ -637,7 +720,11 @@ function Customers() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="btn btn-primary" disabled={saving}>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={saving}
+                >
                   {saving ? "Saving…" : editing ? "Update" : "Create"}
                 </button>
               </div>

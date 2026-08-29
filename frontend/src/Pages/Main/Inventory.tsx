@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useInventoryPage } from "../../hooks/useInventory";
+import { invalidateInventory } from "../../lib/invalidate"
 import "../css/Main.css";
 
 const svg = {
@@ -356,7 +358,11 @@ function productToForm(p: Product): ProductForm {
 }
 
 type Toast = { type: "success" | "error"; title: string; message?: string } | null;
-
+type UserWarehouseScope = {
+  accessAll: boolean;
+  warehouseIds: string[];
+  warehouses: Warehouse[];
+};
 /* ── Module cache (survives Strict Mode remounts) ─────────────── */
 const INV_CACHE_TTL = 60_000;
 const SS_LIST_KEY = "inv:lastList";
@@ -379,6 +385,29 @@ const permsCache: { entry: CacheEntry<string[]> | null; inflight: Promise<string
   inflight: null,
 };
 let invMetaBootstrapped = false;
+let invHasShownData = false;
+
+/** Cache full product (with images) so View/Edit don't refetch the same id. */
+const detailCache = new Map<string, { product: Product; at: number }>();
+const DETAIL_CACHE_TTL = 60_000;
+
+function getCachedDetail(id: string): Product | null {
+  const e = detailCache.get(String(id));
+  if (!e) return null;
+  if (Date.now() - e.at > DETAIL_CACHE_TTL) {
+    detailCache.delete(String(id));
+    return null;
+  }
+  return e.product;
+}
+
+function setCachedDetail(p: Product) {
+  if (!p?.id) return;
+  detailCache.set(String(p.id), {
+    product: normalizeProductImages(p),
+    at: Date.now(),
+  });
+}
 
 function isFresh<T>(e: CacheEntry<T> | null | undefined): e is CacheEntry<T> {
   return !!e && Date.now() - e.at < INV_CACHE_TTL;
@@ -470,14 +499,48 @@ function Inventory() {
   const [tab, setTab] = useState<Tab>("products");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+ 
+  
   const [filterCat, setFilterCat] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterWh, setFilterWh] = useState("all");
+  const [whScope, setWhScope] = useState<UserWarehouseScope | null>(null);
+  const [whScopeLoading, setWhScopeLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("sku");
   const [sortAsc, setSortAsc] = useState(true);
   const [page, setPage] = useState(1);
   const pageSize = 50;
+  
+ 
+  const effectiveWarehouseId =
+  filterWh !== "all"
+    ? filterWh
+    : whScope && !whScope.accessAll && whScope.warehouseIds.length === 1
+      ? whScope.warehouseIds[0]
+      : null;
 
+    
+  
+    const {
+      
+    stats: queryStats,
+    list,
+    isLoading: invLoading,
+    isFetching: invFetching,
+    refetchAll,
+
+    
+  } = useInventoryPage({
+  page,
+  perPage: pageSize,
+  search: debouncedSearch,
+  status: filterStatus === "all" ? "" : filterStatus,
+  categoryId: filterCat === "all" ? null : filterCat,
+  warehouseId: effectiveWarehouseId,
+  sort: sortKey === "status" ? "sku" : sortKey,
+  dir: sortAsc ? "asc" : "desc",
+});
+    
   const [products, setProducts] = useState<Product[]>(() => {
     if (listCache.size) {
       const first = listCache.values().next().value;
@@ -507,7 +570,25 @@ function Inventory() {
     () => metaCache.entry?.data.suppliers ?? bootMeta?.suppliers ?? []
   );
   const [metaLoading, setMetaLoading] = useState(false);
+  const warehousesForFilter = useMemo(() => {
+  // Still loading scope → show whatever we have from allWarehouses
+  if (!whScope) return allWarehouses;
 
+  // User can see all warehouses
+  if (whScope.accessAll) return allWarehouses;
+
+  if (whScope.warehouseIds.length === 0) return [];
+
+  const allowedIds = new Set(whScope.warehouseIds.map(String));
+
+  // Prefer full objects from allWarehouses (has proper name)
+  const fromAll = allWarehouses.filter((w) => allowedIds.has(String(w.id)));
+
+  if (fromAll.length > 0) return fromAll;
+
+  // Fallback: use the warehouses that came from the scope endpoint
+  return whScope.warehouses ?? [];
+}, [whScope, allWarehouses]);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>("add");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -530,8 +611,26 @@ function Inventory() {
   const [deletingCat, setDeletingCat] = useState(false);
 
   const [confirmDelete, setConfirmDelete] = useState<Product | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
+   const [userPermissions, setUserPermissions] = useState<string[]>(() => {
+    try {
+      if (permsCache.entry?.data?.length) return permsCache.entry.data;
+      const raw = localStorage.getItem("permissions");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [permsLoaded, setPermsLoaded] = useState(() => {
+    try {
+      if (permsCache.entry) return true;
+      return !!localStorage.getItem("permissions");
+    } catch {
+      return false;
+    }
+  });
+
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -596,40 +695,59 @@ function Inventory() {
     }
 
     const work = (async (): Promise<string[]> => {
-      let roleId: string | null = null;
-      try {
-        for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
-          const raw = localStorage.getItem(key);
-          if (!raw) continue;
-          const parsed = JSON.parse(raw);
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          roleId = u?.role_id || u?.role?.id || null;
-          if (roleId) break;
-        }
-      } catch {
-        /* ignore */
-      }
+  let roleId: string | null = null;
+  let roleName = "";
 
-      try {
-        const json = await fetchMeShared();
-        const u = (json as any)?.data ?? (json as any)?.user ?? json;
-        roleId = u?.role_id || u?.role?.id || (json as any)?.role_id || roleId;
-      } catch {
-        /* ignore */
-      }
+  try {
+    for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      const u = parsed?.data ?? parsed?.user ?? parsed;
+      roleId = u?.role_id || u?.role?.id || null;
+      roleName = u?.role?.name || u?.role_name || "";
+      if (roleId) break;
+    }
+  } catch {
+    /* ignore */
+  }
 
-      if (roleId) {
-        try {
-          const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-          const names = namesFromRolePermsPayload(json);
-          return names;
-        } catch {
-          /* fall through */
-        }
-      }
+  try {
+    const json = await fetchMeShared();
+    const u = (json as any)?.data ?? (json as any)?.user ?? json;
+    roleId = u?.role_id || u?.role?.id || (json as any)?.role_id || roleId;
+    roleName = u?.role?.name || u?.role_name || roleName;
+  } catch {
+    /* ignore */
+  }
 
-      return [];
-    })();
+  // Admin → full access
+  const normalizedRole = String(roleName)
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .trim();
+
+  if (
+    ["admin", "administrator", "super admin", "superadmin", "system admin", "system administrator", "root"].includes(
+      normalizedRole
+    )
+  ) {
+    return ["*"];
+  }
+
+  // Normal role → load permissions
+  if (roleId) {
+    try {
+      const { data: json } = await api.get(`/roles/${roleId}/permissions`);
+      const names = namesFromRolePermsPayload(json);
+      return names;
+    } catch {
+      /* fall through */
+    }
+  }
+
+  return [];
+})();
 
     permsCache.inflight = work;
     try {
@@ -641,11 +759,120 @@ function Inventory() {
     }
   }, []);
 
+
+  const fetchUserWarehouseScope = useCallback(async () => {
+  setWhScopeLoading(true);
+  try {
+    let userId: string | null = null;
+    let accessAll = false;
+    let warehouses: Warehouse[] = [];
+
+    try {
+      const me = await fetchMeShared();
+      const u = (me as any)?.data ?? (me as any)?.user ?? me;
+      userId = u?.id ? String(u.id) : null;
+      accessAll = Boolean(u?.access_all_warehouses);
+
+      const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
+      if (Array.isArray(fromMe) && fromMe.length > 0) {
+        warehouses = fromMe.map((w: any) =>
+          typeof w === "string"
+            ? { id: String(w), code: "", name: undefined }
+            : {
+                id: String(w.id),
+                code: w.code ?? "",
+                name: w.name,
+              }
+        );
+      }
+    } catch {
+      /* continue */
+    }
+
+    if (userId && warehouses.length === 0) {
+      try {
+        const { data: json } = await api.get(`/users/${userId}/warehouses`);
+const payload = (json as any)?.data ?? json;
+
+accessAll = Boolean(payload?.access_all_warehouses);
+
+// Safely extract array no matter the response shape
+let list: any[] = [];
+const raw = payload?.warehouses ?? payload?.data ?? payload;
+
+if (Array.isArray(raw)) {
+  list = raw;
+} else if (Array.isArray(raw?.data)) {
+  list = raw.data;
+} else if (raw && typeof raw === "object") {
+  // sometimes Laravel returns a single object or collection-like
+  list = Object.values(raw).filter(
+    (v: any) => v && typeof v === "object" && v.id
+  );
+}
+
+warehouses = list.map((w: any) => ({
+  id: String(w.id),
+  code: w.code ?? "",
+  name: w.name ?? "",
+}));
+      } catch (e) {
+        console.warn("[Inventory] /users/:id/warehouses failed", e);
+      }
+    }
+
+    if (warehouses.length === 0 && userId) {
+      try {
+        const me = await fetchMeShared();
+        const u = (me as any)?.data ?? (me as any)?.user ?? me;
+        if (u?.warehouse_id) {
+          warehouses = [
+            {
+              id: String(u.warehouse_id),
+              code: u.warehouse?.code ?? "",
+              name: u.warehouse?.name,
+            },
+          ];
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const warehouseIds = Array.from(
+      new Set(warehouses.map((w) => w.id).filter(Boolean))
+    );
+
+    setWhScope({
+      accessAll,
+      warehouseIds,
+      warehouses,
+    });
+  } catch (e) {
+    console.error("[Inventory] warehouse scope failed", e);
+    setWhScope({ accessAll: false, warehouseIds: [], warehouses: [] });
+  } finally {
+    setWhScopeLoading(false);
+  }
+}, []);
+
+    
   // Soft revalidate permissions once on enter (uses cache if fresh; single-flight)
   useEffect(() => {
-    void fetchUserPermissions(false);
-  }, [fetchUserPermissions]);
+  void fetchUserWarehouseScope();
+}, [fetchUserWarehouseScope]);
 
+useEffect(() => {
+    void fetchUserPermissions();
+  }, [fetchUserPermissions]);
+  
+useEffect(() => {
+  if (!whScope || whScope.accessAll) return;
+  if (filterWh === "all" && whScope.warehouseIds.length === 1) {
+    setFilterWh(whScope.warehouseIds[0]);
+    setPage(1);
+  }
+}, [whScope, filterWh]);
   // Only re-fetch permissions when tab becomes visible AND cache is stale
   useEffect(() => {
     const onVisible = () => {
@@ -661,7 +888,7 @@ function Inventory() {
   const canCreate = can(userPermissions, "inventory.create", "inventories.create", "products.create");
   const canUpdate = can(userPermissions, "inventory.update", "inventories.update", "products.update");
   const canDelete = can(userPermissions, "inventory.delete", "inventories.delete", "products.delete");
-  const canManageCategories = can(
+     const canManageCategories = can(
     userPermissions,
     "categories.create",
     "categories.update",
@@ -669,6 +896,36 @@ function Inventory() {
     "inventory.create",
     "inventory.update"
   );
+
+  // Once we have shown any data this session, never use full-page loader again
+  // (same idea as Dashboard: loading && !lastUpdated)
+    const hasDataRef = useRef(
+    products.length > 0 || total > 0 || !!statsCache.entry || !!bootstrapList()
+  );
+
+  useEffect(() => {
+    if (products.length > 0 || total > 0) {
+      hasDataRef.current = true;
+    }
+  }, [products.length, total]);
+
+    // Module-level flag: once true, stays true for the whole tab session
+  // even after navigate away and back to Inventory
+  if (products.length > 0 || total > 0) {
+    invHasShownData = true;
+  }
+  if (
+    !invHasShownData &&
+    (listCache.size > 0 || !!statsCache.entry || !!bootstrapList())
+  ) {
+    invHasShownData = true;
+  }
+
+  const pageLoading =
+    tab === "products" &&
+    !invHasShownData &&
+    products.length === 0 &&
+    invLoading;
 
   const fetchMeta = useCallback(async (force = false) => {
     if (!force && isFresh(metaCache.entry)) {
@@ -980,9 +1237,43 @@ function Inventory() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+    /* Phase 5: TanStack Query owns list + stats (old fetchInventory mount disabled) */
+  // useEffect(() => {
+  //   void fetchInventory();
+  // }, [fetchInventory]);
+
   useEffect(() => {
-    void fetchInventory();
-  }, [fetchInventory]);
+    if (!list.rows) return;
+
+    // Keep previous rows while a fetch is in progress (avoids empty flash + full-page loader)
+    if (list.rows.length === 0 && invLoading) return;
+
+    const rows = (list.rows as Product[]).map((r) => normalizeProductImages(r));
+    setProducts(rows);
+    setTotal(list.meta.total);
+    setLastPage(list.meta.last_page);
+    setLoading(false);
+    setError(null);
+  }, [list.rows, list.meta, invLoading]);
+
+  useEffect(() => {
+    if (!queryStats) return;
+    setStats({
+      total_products: queryStats.total_products,
+      low_stock: queryStats.low_stock,
+      out_of_stock: queryStats.out_of_stock,
+      inventory_value: queryStats.inventory_value,
+    });
+  }, [queryStats]);
+
+  useEffect(() => {
+    // Skeletons only when we have no rows to show yet
+    if (products.length === 0 && invLoading) {
+      setLoading(true);
+    } else {
+      setLoading(false);
+    }
+  }, [invLoading, products.length]);
 
   useEffect(() => {
     return () => {
@@ -1308,14 +1599,18 @@ function Inventory() {
     }
   };
 
-  const openEdit = (p: Product) => {
+      const openEdit = (p: Product) => {
     if (!canUpdate) {
       showToast("error", "Permission denied", "You cannot edit products.");
       return;
     }
+
+    const cached = getCachedDetail(p.id);
+    const source = cached ?? p;
+
     setModalMode("edit");
-    setEditingId(p.id);
-    setForm(productToForm(p));
+    setEditingId(source.id);
+    setForm(productToForm(source));
     setFormError(null);
     clearImages();
     setModalOpen(true);
@@ -1329,31 +1624,55 @@ function Inventory() {
       setExistingImages(imgs);
     };
 
-    if (p.images && p.images.length > 0) {
-      applyImages(p);
-    } else {
-      api
-        .get(`/inventories/${p.id}`)
-        .then((res) => {
-          const full = (res.data?.data ?? res.data) as Product;
-          if (full?.images) applyImages(full);
-        })
-        .catch(() => {});
+    if ((source.images?.length ?? 0) > 0) {
+      applyImages(source);
+      return;
     }
-  };
 
-  const openView = (p: Product) => {
-    setViewProduct(p);
+    api
+      .get(`/inventories/${source.id}`)
+      .then((res) => {
+        const full = (res.data?.data ?? res.data) as Product;
+        if (!full?.images) return;
+        const normalized = normalizeProductImages(full);
+        setCachedDetail(normalized);
+        // Only apply if still editing this product
+        setEditingId((currentId) => {
+          if (currentId === source.id) applyImages(normalized);
+          return currentId;
+        });
+      })
+      .catch(() => {});
+  };
+      const openView = (p: Product) => {
+    const cached = getCachedDetail(p.id);
+    const initial = cached ?? p;
+
+    setViewProduct(initial);
     setViewImageIndex(0);
-    if (!(p.images && p.images.length > 0) && p.id) {
-      api
-        .get(`/inventories/${p.id}`)
-        .then((res) => {
-          const full = res.data?.data ?? res.data;
-          if (full && full.id) setViewProduct(full as Product);
-        })
-        .catch(() => {});
-    }
+
+    const hasImages = (initial.images?.length ?? 0) > 0;
+    if (hasImages || !p.id) return;
+
+    const requestedId = String(p.id);
+
+    api
+      .get(`/inventories/${p.id}`)
+      .then((res) => {
+        const full = (res.data?.data ?? res.data) as Product;
+        if (!full?.id) return;
+
+        const normalized = normalizeProductImages(full);
+        setCachedDetail(normalized);
+
+        // Only update UI if user is still viewing THIS product
+        setViewProduct((current) => {
+          if (!current) return current; // user closed the modal
+          if (String(current.id) !== requestedId) return current; // switched product
+          return normalized;
+        });
+      })
+      .catch(() => {});
   };
 
   const closeView = () => {
@@ -1550,6 +1869,7 @@ function Inventory() {
         setProducts((prev) => prev.map((p) => (p.id === tempId ? realRow : p)));
         bustListCaches();
         refreshStatsBg();
+        void invalidateInventory();
       } catch (err: any) {
         // Rollback optimistic create
         setProducts(prevRows);
@@ -1615,6 +1935,8 @@ function Inventory() {
         }
         bustListCaches();
         refreshStatsBg();
+        if (editingId) detailCache.delete(String(editingId));
+        void invalidateInventory();
       } catch (err: any) {
         // Rollback optimistic edit
         if (prevSnapshot) {
@@ -1652,6 +1974,8 @@ function Inventory() {
       await api.delete(`/inventories/${doomed.id}`);
       bustListCaches();
       refreshStatsBg();
+      detailCache.delete(String(doomed.id));
+      void invalidateInventory();
     } catch (err: any) {
       setProducts(prevRows);
       setTotal(prevTotal);
@@ -1669,12 +1993,59 @@ function Inventory() {
     }
   };
 
-  const statsView = stats ?? {
+     const statsView = stats ?? {
     total_products: 0,
     low_stock: 0,
     out_of_stock: 0,
     inventory_value: 0,
   };
+
+  if (pageLoading) {
+    return (
+      <div className="inventory-page">
+        <Sidebar />
+        <div className="main-wrapper">
+          <Topbar />
+          <main className="content">
+            <div
+              style={{
+                minHeight: "calc(100vh - 120px)",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 16,
+                padding: 32,
+              }}
+              role="status"
+              aria-live="polite"
+              aria-busy="true"
+            >
+              <div
+                className="roles-spinner"
+                style={{ width: 36, height: 36, borderWidth: 3 }}
+              />
+              <div style={{ textAlign: "center", maxWidth: 320 }}>
+                <div
+                  style={{
+                    fontSize: 16,
+                    fontWeight: 600,
+                    marginBottom: 6,
+                    letterSpacing: "-0.01em",
+                  }}
+                >
+                  Loading inventory
+                </div>
+                <div className="text-muted" style={{ fontSize: 13, lineHeight: 1.5 }}>
+                  Fetching products, stock levels, and warehouse data…
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="inventory-page">
@@ -1690,17 +2061,18 @@ function Inventory() {
               </p>
             </div>
             <div className="page-actions">
-              <button
+                            <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  fetchInventory();
-                  fetchMeta();
+                  void refetchAll();
+                  void fetchMeta(true);
                 }}
-                disabled={loading || metaLoading}
+                disabled={invFetching || metaLoading}
               >
-                <IconRefresh /> Refresh
+                <IconRefresh /> {invFetching ? "Refreshing…" : "Refresh"}
               </button>
+
               {tab === "categories"
                 ? canManageCategories && (
                     <button type="button" className="btn btn-primary" onClick={openAddCategory}>
@@ -1715,7 +2087,9 @@ function Inventory() {
             </div>
           </div>
 
-          {permsLoaded && !canView ? (
+            {permsLoaded && !canView ? (  
+              
+
             <div className="card" style={{ padding: 40, textAlign: "center" }}>
               <div className="empty-state">
                 <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
@@ -1727,6 +2101,27 @@ function Inventory() {
             </div>
           ) : (
           <>
+                    {invFetching && (
+            <div
+              className="card"
+              style={{
+                padding: "10px 16px",
+                marginBottom: 14,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                fontSize: 13,
+              }}
+              role="status"
+            >
+              <div
+                className="roles-spinner"
+                style={{ width: 16, height: 16, borderWidth: 2, flexShrink: 0 }}
+              />
+              <span className="text-muted">Refreshing inventory…</span>
+            </div>
+          )}
+
 
           <div className="inv-tabs">
             <button
@@ -1812,20 +2207,23 @@ function Inventory() {
                       <option value="low-stock">Low stock</option>
                       <option value="out-of-stock">Out of stock</option>
                     </select>
-                    <select
-                      value={filterWh}
-                      onChange={(e) => {
-                        setFilterWh(e.target.value);
-                        setPage(1);
-                      }}
-                    >
-                      <option value="all">All warehouses</option>
-                      {warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {w.name ? `${w.code} — ${w.name}` : w.code}
-                        </option>
-                      ))}
-                    </select>
+               <select
+  value={filterWh}
+  onChange={(e) => {
+    setFilterWh(e.target.value);
+    setPage(1);
+  }}
+  disabled={whScopeLoading}
+>
+  {(whScope?.accessAll ?? true) && (
+    <option value="all">All warehouses</option>
+  )}
+ {warehousesForFilter.map((w) => (
+  <option key={w.id} value={w.id}>
+    {w.name?.trim() || w.code || "(No name)"}
+  </option>
+))}
+</select>
                   </div>
                 </div>
 

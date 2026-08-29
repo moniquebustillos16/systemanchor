@@ -9,32 +9,7 @@ import {
 import { NavLink, useLocation } from "react-router-dom";
 import api from "../../api/axios";
 import "../css/Sidebar.css";
-
-/* ------------------------------------------------------------------ */
-/* Logo                                                               */
-/* ------------------------------------------------------------------ */
-
-const IconLogo = () => (
-  <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path
-      d="M24 4L42 14V34L24 44L6 34V14L24 4Z"
-      fill="rgba(255,254,251,0.12)"
-      stroke="#FFFEFB"
-      strokeWidth="1.8"
-      strokeLinejoin="round"
-    />
-    <path d="M24 12V32" stroke="#FFFEFB" strokeWidth="2.2" strokeLinecap="round" />
-    <circle cx="24" cy="12" r="2.8" fill="#FFFEFB" />
-    <path d="M15 26h18" stroke="#FFFEFB" strokeWidth="2" strokeLinecap="round" />
-    <path
-      d="M17 33l7 7 7-7"
-      stroke="#FFFEFB"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
+import mainLogo from "../../assets/main_logo.png";
 
 /* ------------------------------------------------------------------ */
 /* Icons (static – never re-create)                                   */
@@ -197,15 +172,35 @@ const NAV: NavSection[] = [
     items: [
       { id: "dashboard", label: "Dashboard", icon: "home", path: "/dashboard" },
       { id: "products", label: "Inventory", icon: "box", path: "/products" },
-      { id: "stock-movements", label: "Stock Movements", icon: "repeat", path: "/stock-movements" },
+      {
+        id: "stock-movements",
+        label: "Stock Movements",
+        icon: "repeat",
+        path: "/stock-movements",
+      },
     ],
   },
   {
     section: "Orders",
     items: [
-      { id: "purchase-orders", label: "Purchase Orders", icon: "file", path: "/purchase-orders" },
-      { id: "sales-orders", label: "Sales Orders", icon: "cart", path: "/sales-orders" },
-      { id: "goods-receiving", label: "Receiving", icon: "package", path: "/goods-receiving" },
+      {
+        id: "purchase-orders",
+        label: "Purchase Orders",
+        icon: "file",
+        path: "/purchase-orders",
+      },
+      {
+        id: "sales-orders",
+        label: "Sales Orders",
+        icon: "cart",
+        path: "/sales-orders",
+      },
+      {
+        id: "goods-receiving",
+        label: "Receiving",
+        icon: "package",
+        path: "/goods-receiving",
+      },
       { id: "shipping", label: "Shipping", icon: "truck", path: "/shipping" },
       { id: "returns", label: "Returns", icon: "rotate", path: "/returns" },
     ],
@@ -213,9 +208,19 @@ const NAV: NavSection[] = [
   {
     section: "Warehouse",
     items: [
-      { id: "warehouses", label: "Locations", icon: "building", path: "/warehouses" },
+      {
+        id: "warehouses",
+        label: "Locations",
+        icon: "building",
+        path: "/warehouses",
+      },
       { id: "capacity", label: "Capacity", icon: "pie", path: "/capacity" },
-      { id: "cycle-count", label: "Cycle Count", icon: "check-square", path: "/cycle-count" },
+      {
+        id: "cycle-count",
+        label: "Cycle Count",
+        icon: "check-square",
+        path: "/cycle-count",
+      },
     ],
   },
   {
@@ -229,7 +234,12 @@ const NAV: NavSection[] = [
     section: "Insights",
     items: [
       { id: "reports", label: "Reports", icon: "file-text", path: "/reports" },
-      { id: "analytics", label: "Analytics", icon: "bar-chart", path: "/analytics" },
+      {
+        id: "analytics",
+        label: "Analytics",
+        icon: "bar-chart",
+        path: "/analytics",
+      },
     ],
   },
   {
@@ -237,7 +247,12 @@ const NAV: NavSection[] = [
     items: [
       { id: "users", label: "Users", icon: "user-plus", path: "/users" },
       { id: "roles", label: "Roles", icon: "shield", path: "/roles" },
-      { id: "company-settings", label: "Settings", icon: "settings", path: "/company-settings" },
+      {
+        id: "company-settings",
+        label: "Settings",
+        icon: "settings",
+        path: "/company-settings",
+      },
     ],
   },
 ];
@@ -270,14 +285,9 @@ function writeSavedScroll(top: number) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Permission gating — SAME module keys/aliases as Roles MODULE_CATALOG */
+/* Permission gating                                                  */
 /* ------------------------------------------------------------------ */
 
-/**
- * Normalize permission tokens for comparison.
- * Keep dots so "inventory.view" stays module="inventory" + action="view".
- * (Replacing "." with "_" broke canView and hid Inventory / other items.)
- */
 function normPerm(name: string): string {
   return String(name || "")
     .trim()
@@ -286,13 +296,21 @@ function normPerm(name: string): string {
 }
 
 /**
- * Nav item id → module keys (must match Roles.tsx MODULE_CATALOG aliases).
- * Only .view / .read (etc.) on these modules unlock the nav item.
- * (e.g. inventory.view → show Inventory; inventory.create alone → hide).
+ * Must stay in sync with Roles.tsx MODULE_CATALOG aliases.
  */
 const NAV_MODULES: Record<string, string[]> = {
   dashboard: ["dashboard", "home", "overview"],
-  products: ["inventory", "inventories", "stock", "items", "item", "products", "product", "skus", "sku"],
+  products: [
+    "inventory",
+    "inventories",
+    "stock",
+    "items",
+    "item",
+    "products",
+    "product",
+    "skus",
+    "sku",
+  ],
   "stock-movements": [
     "stock_movements",
     "stock_movement",
@@ -303,8 +321,19 @@ const NAV_MODULES: Record<string, string[]> = {
     "adjustments",
     "adjustment",
   ],
-  "purchase-orders": ["purchase_orders", "purchase_order", "po", "purchases", "purchase"],
-  "sales-orders": ["sales_orders", "sales_order", "so", "orders", "order", "sales"],
+  "purchase-orders": [
+    "purchase_orders",
+    "purchase_order",
+    "po",
+    "purchases",
+    "purchase",
+  ],
+  "sales-orders": [
+    "sales_orders",
+    "sales_order",
+    "so",
+    "sales",
+  ],
   "goods-receiving": [
     "receiving",
     "receipts",
@@ -315,7 +344,16 @@ const NAV_MODULES: Record<string, string[]> = {
   ],
   shipping: ["shipping", "shipments", "shipment", "outbound", "dispatch"],
   returns: ["returns", "return", "rma"],
-  warehouses: ["locations", "location", "warehouses", "warehouse", "bins", "bin", "zones", "zone"],
+  warehouses: [
+    "locations",
+    "location",
+    "warehouses",
+    "warehouse",
+    "bins",
+    "bin",
+    "zones",
+    "zone",
+  ],
   capacity: ["capacity", "space", "utilization"],
   "cycle-count": [
     "cycle_count",
@@ -341,7 +379,21 @@ const NAV_MODULES: Record<string, string[]> = {
   ],
 };
 
-/** Flatten any API permission payload into normalized name strings. */
+/** System items – never shown to non-admins */
+const SYSTEM_ITEM_IDS = new Set(["users", "roles", "company-settings"]);
+
+const VIEW_ACTIONS = new Set([
+  "view",
+  "read",
+  "list",
+  "index",
+  "show",
+  "access",
+  "get",
+]);
+
+const FULL_ACCESS = new Set(["*", "admin", "super_admin", "superadmin"]);
+
 function coercePermList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
@@ -351,7 +403,7 @@ function coercePermList(raw: unknown): string[] {
       if (n) out.push(n);
     } else if (p && typeof p === "object") {
       const o = p as Record<string, unknown>;
-      const name = o.name ?? o.permission ?? o.key ?? o.slug;
+      const name = o.name ?? o.permission ?? o.key ?? o.slug ?? o.code;
       if (typeof name === "string") {
         const n = normPerm(name);
         if (n) out.push(n);
@@ -365,34 +417,27 @@ function extractPermissions(json: unknown): string[] {
   if (!json || typeof json !== "object") return [];
   const j = json as Record<string, unknown>;
 
-  const top = coercePermList(j.permissions);
-  if (top.length) return top;
+  const candidates: unknown[] = [
+    j.permissions,
+    j.permission_names,
+    (j.data as any)?.permissions,
+    (j.data as any)?.permission_names,
+    (j.user as any)?.permissions,
+    (j.user as any)?.permission_names,
+    (j.user as any)?.role?.permissions,
+    (j.data as any)?.user?.permissions,
+    (j.data as any)?.user?.permission_names,
+    (j.data as any)?.role?.permissions,
+    (j.role as any)?.permissions,
+  ];
 
-  const data = j.data as Record<string, unknown> | undefined;
-  if (data) {
-    const fromData = coercePermList(data.permissions);
-    if (fromData.length) return fromData;
+  for (const raw of candidates) {
+    const list = coercePermList(raw);
+    if (list.length > 0) return list;
   }
 
-  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
-  if (user) {
-    const fromUser = coercePermList(user.permissions);
-    if (fromUser.length) return fromUser;
-
-    const named = coercePermList(user.permission_names);
-    if (named.length) return named;
-
-    const role = user.role as Record<string, unknown> | undefined;
-    if (role) {
-      const fromRole = coercePermList(role.permissions);
-      if (fromRole.length) return fromRole;
-    }
-  }
-
-  const dataRole = data?.role as Record<string, unknown> | undefined;
-  if (dataRole) {
-    const fromRole = coercePermList(dataRole.permissions);
-    if (fromRole.length) return fromRole;
+  if (Array.isArray(json)) {
+    return coercePermList(json);
   }
 
   return [];
@@ -401,8 +446,6 @@ function extractPermissions(json: unknown): string[] {
 function isAdminRoleName(name: unknown): boolean {
   if (typeof name !== "string") return false;
   const key = name.trim().toLowerCase();
-  // Only real admin roles — do NOT match every name containing "admin" in a phrase
-  // unless it is clearly an admin role (Admin, System Admin, Administrator).
   return (
     key === "admin" ||
     key === "administrator" ||
@@ -420,8 +463,11 @@ function extractAdminFlag(json: unknown): boolean {
   const data = j.data as Record<string, unknown> | undefined;
   const user = (j.user || data?.user) as Record<string, unknown> | undefined;
 
-  // Explicit flags some APIs send
-  if (user?.is_admin === true || user?.isAdmin === true || data?.is_admin === true) {
+  if (
+    user?.is_admin === true ||
+    user?.isAdmin === true ||
+    data?.is_admin === true
+  ) {
     return true;
   }
 
@@ -434,63 +480,114 @@ function extractAdminFlag(json: unknown): boolean {
 
   if (isAdminRoleName(roleName)) return true;
 
-  // Full-access markers already in the permission list
   const perms = extractPermissions(json);
-  if (perms.some((p) => p === "*" || p === "admin" || p.endsWith(".*"))) {
+  if (perms.some((p) => FULL_ACCESS.has(p) || p.endsWith(".*"))) {
     return true;
   }
 
   return false;
 }
 
-/** Actions that mean “can open this page in the sidebar”. */
-const VIEW_ACTIONS = new Set(["view", "read", "list", "index", "show", "access"]);
-
 /**
- * Show nav item ONLY when the user has a VIEW/READ permission for that module.
- * Unchecking .view in Roles must hide the item — create/update/delete alone are not enough.
- *
- * SHOW:  inventory.view, products.read, stock.list
- * HIDE:  inventory.create, inventory.update, inventory.delete (without .view)
+ * Show nav item when the user has a VIEW/READ style permission for that module.
+ * System items are strictly admin-only.
+ * Dashboard is always visible to any authenticated user.
  */
-function canView(perms: string[], itemId: string): boolean {
-  if (!perms.length) return false;
+function canView(perms: string[], itemId: string, isAdmin: boolean): boolean {
+  // 1. System section is strictly admin-only
+  if (SYSTEM_ITEM_IDS.has(itemId) && !isAdmin) {
+    return false;
+  }
 
-  for (const raw of perms) {
-    const p = normPerm(raw);
-    if (p === "*" || p === "admin" || p === "super_admin" || p === "superadmin") {
-      return true;
-    }
+  // 2. Dashboard is always visible
+  if (itemId === "dashboard") {
+    return true;
+  }
+
+  // No permissions at all → hide
+  if (!perms.length) {
+    return false;
+  }
+
+  // 3. Full access
+  const hasFullAccess = perms.some((p) => FULL_ACCESS.has(normPerm(p)));
+  if (hasFullAccess) {
+    return true;
   }
 
   const modules = NAV_MODULES[itemId];
-  if (!modules || modules.length === 0) return true;
+  if (!modules || modules.length === 0) {
+    return true; // unknown item → show by default
+  }
 
   const modSet = new Set(modules.map(normPerm));
 
   for (const raw of perms) {
     const p = normPerm(raw);
 
-    // Bare name with no action (rare) — treat as view grant
-    if (!p.includes(".")) {
+    // 4. Bare module name (no action) → treat as view
+    if (!p.includes(".") && !p.includes("_")) {
       if (modSet.has(p)) return true;
       continue;
     }
 
-    const [moduleKey, action] = p.split(".");
-    if (!moduleKey || !modSet.has(moduleKey)) continue;
+    // 5. Standard "module.action" format
+    const parts = p.split(/[._]/); // supports both inventory.view and inventory_view
+    if (parts.length >= 2) {
+      const possibleModule = parts[0];
+      const possibleAction = parts[parts.length - 1];
 
-    // Only view/read/list (or module.*) unlock the sidebar entry
-    if (action && VIEW_ACTIONS.has(action)) return true;
-    if (action === "*") return true;
+      if (modSet.has(possibleModule)) {
+        if (
+          !possibleAction ||
+          possibleAction === "*" ||
+          VIEW_ACTIONS.has(possibleAction)
+        ) {
+          return true;
+        }
+      }
+
+      // also try the middle parts (e.g. stock_movements.view → "stock_movements")
+      const joinedModule = parts.slice(0, -1).join("_");
+      if (modSet.has(joinedModule)) {
+        if (
+          !possibleAction ||
+          possibleAction === "*" ||
+          VIEW_ACTIONS.has(possibleAction)
+        ) {
+          return true;
+        }
+      }
+    }
+
+    // 6. Fallback – any permission that contains the module key + a view-like word
+    for (const m of modSet) {
+      if (p.includes(m)) {
+        const hasViewWord =
+          VIEW_ACTIONS.has(p.split(/[._]/).pop() || "") ||
+          p.includes("view") ||
+          p.includes("read") ||
+          p.includes("list") ||
+          p.includes("show") ||
+          p.includes("access") ||
+          p.includes("index");
+
+        if (hasViewWord) {
+          return true;
+        }
+      }
+    }
   }
 
   return false;
 }
 
-/** Module-level cache + inflight so Strict Mode / remounts share one load */
-let permsCache: { list: string[]; at: number } | null = null;
-let permsInflight: Promise<string[]> | null = null;
+/* ------------------------------------------------------------------ */
+/* Cache helpers                                                      */
+/* ------------------------------------------------------------------ */
+
+let permsCache: { list: string[]; isAdmin: boolean; at: number } | null = null;
+let permsInflight: Promise<{ list: string[]; isAdmin: boolean }> | null = null;
 const PERMS_TTL_MS = 5 * 60_000;
 
 function isPermsFresh(): boolean {
@@ -505,14 +602,11 @@ function clearPermsCache() {
   store.inflight = null;
 }
 
-/**
- * App-wide /me cache — shared with Inventory / Topbar (globalThis.__saMeCache).
- * Only ONE network /me per TTL window across Sidebar + pages.
- */
 type SharedMe = {
   entry: { data: unknown; at: number } | null;
   inflight: Promise<unknown> | null;
 };
+
 function sharedMeStore(): SharedMe {
   const g = globalThis as unknown as { __saMeCache?: SharedMe };
   if (!g.__saMeCache) g.__saMeCache = { entry: null, inflight: null };
@@ -526,7 +620,6 @@ async function fetchMeShared(force = false): Promise<unknown> {
   }
   if (!force && store.inflight) return store.inflight;
 
-  // force=true: drop in-flight so we always hit the network after a role save
   if (force) {
     store.entry = null;
     store.inflight = null;
@@ -535,7 +628,6 @@ async function fetchMeShared(force = false): Promise<unknown> {
   store.inflight = api
     .get("/me", {
       timeout: 20_000,
-      // cache-bust so browsers / proxies do not serve a stale permission set
       params: force ? { _ts: Date.now() } : undefined,
     })
     .then((res) => {
@@ -572,8 +664,12 @@ function Sidebar({
   const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed);
   const collapsed = controlledCollapsed ?? internalCollapsed;
   const location = useLocation();
+
   const [userPermissions, setUserPermissions] = useState<string[]>(
     () => permsCache?.list ?? []
+  );
+  const [isAdmin, setIsAdmin] = useState<boolean>(
+    () => permsCache?.isAdmin ?? false
   );
   const [permsLoaded, setPermsLoaded] = useState(() => !!permsCache);
 
@@ -639,40 +735,45 @@ function Sidebar({
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleSidebar]);
 
-  /* ---- permissions (localStorage → shared /me; aligned with Roles matrix names) ---- */
+  /* ---- permissions ---- */
 
   useEffect(() => {
-    // Instant hydrate from cache (covers Strict Mode remount + page revisits)
     if (isPermsFresh()) {
       setUserPermissions(permsCache!.list);
+      setIsAdmin(permsCache!.isAdmin);
       setPermsLoaded(true);
       return;
     }
 
     let cancelled = false;
 
-    const apply = (list: string[]) => {
+    const apply = (list: string[], admin: boolean) => {
       if (cancelled) return;
       const normalized = list.map(normPerm);
-      permsCache = { list: normalized, at: Date.now() };
+      permsCache = { list: normalized, isAdmin: admin, at: Date.now() };
       setUserPermissions(normalized);
+      setIsAdmin(admin);
       setPermsLoaded(true);
     };
 
-    const loadPerms = async (): Promise<string[]> => {
-      // 1) Prefer /me (source of truth after role permission changes)
+    const loadPerms = async (): Promise<{
+      list: string[];
+      isAdmin: boolean;
+    }> => {
       try {
         const json = await fetchMeShared();
-        if (extractAdminFlag(json)) return ["*"];
-        const list = extractPermissions(json);
-        if (list.length > 0) return list.map(normPerm);
-        // Empty from API is valid — user truly has no grants
-        if (json) return [];
+        const admin = extractAdminFlag(json);
+
+        if (admin) {
+          return { list: ["*"], isAdmin: true };
+        }
+
+        const list = extractPermissions(json).map(normPerm);
+        return { list, isAdmin: false };
       } catch {
-        /* network / CORS – try local snapshots */
+        /* network failed – try local snapshots */
       }
 
-      // 2) localStorage / sessionStorage fallback when offline /me fails
       for (const key of [
         "permissions",
         "user_permissions",
@@ -687,68 +788,80 @@ function Sidebar({
         if (!raw) continue;
         try {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
-            return (parsed as string[]).map(normPerm);
+          if (
+            Array.isArray(parsed) &&
+            parsed.every((x: unknown) => typeof x === "string")
+          ) {
+            return {
+              list: (parsed as string[]).map(normPerm),
+              isAdmin: false,
+            };
           }
-          if (extractAdminFlag(parsed)) return ["*"];
-          const list = extractPermissions(parsed);
-          if (list.length > 0) return list.map(normPerm);
+          if (extractAdminFlag(parsed)) {
+            return { list: ["*"], isAdmin: true };
+          }
+          const list = extractPermissions(parsed).map(normPerm);
+          return { list, isAdmin: false };
         } catch {
           /* try next */
         }
       }
 
-      // Network failed and no local cache: keep nav usable
-      return ["*"];
+      // Last resort – keep the app usable
+      return { list: ["*"], isAdmin: true };
     };
 
-    // Deduplicate concurrent Sidebar mounts (Strict Mode)
     if (!permsInflight) {
       permsInflight = loadPerms().finally(() => {
         permsInflight = null;
       });
     }
 
-    permsInflight.then(apply).catch(() => {
-      if (!cancelled) apply(["*"]);
-    });
+    permsInflight
+      .then(({ list, isAdmin: admin }) => apply(list, admin))
+      .catch(() => {
+        if (!cancelled) apply(["*"], true);
+      });
 
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // After Roles save / logout: window.dispatchEvent(new Event("sa-permissions-refresh"))
+  // After Roles save / logout
   useEffect(() => {
     const onRefresh = () => {
-      // Drop every layer of cache so the next /me is a real network call
       clearPermsCache();
       setPermsLoaded(false);
+      setUserPermissions([]);
+      setIsAdmin(false);
 
       void (async () => {
         try {
           const json = await fetchMeShared(true); // force network
-          let list: string[];
-          if (extractAdminFlag(json)) {
-            list = ["*"];
-          } else {
-            list = extractPermissions(json).map(normPerm);
-          }
-          permsCache = { list, at: Date.now() };
-          // New array reference so React always re-filters nav items
+          const admin = extractAdminFlag(json);
+          const list = admin
+            ? ["*"]
+            : extractPermissions(json).map(normPerm);
+
+          permsCache = { list, isAdmin: admin, at: Date.now() };
           setUserPermissions([...list]);
+          setIsAdmin(admin);
         } catch {
-          /* keep previous list if network fails */
+          /* keep previous */
         } finally {
           setPermsLoaded(true);
         }
       })();
     };
+
     const onLogout = () => {
       clearPermsCache();
       setUserPermissions([]);
+      setIsAdmin(false);
       setPermsLoaded(false);
     };
+
     window.addEventListener("sa-permissions-refresh", onRefresh);
     window.addEventListener("sa-logout", onLogout);
     return () => {
@@ -765,9 +878,14 @@ function Sidebar({
         return location.pathname === "/dashboard" || location.pathname === "/";
       }
       if (path === "/products") {
-        return location.pathname === "/products" || location.pathname === "/inventory";
+        return (
+          location.pathname === "/products" ||
+          location.pathname === "/inventory"
+        );
       }
-      return location.pathname === path || location.pathname.startsWith(path + "/");
+      return (
+        location.pathname === path || location.pathname.startsWith(path + "/")
+      );
     },
     [location.pathname]
   );
@@ -803,10 +921,12 @@ function Sidebar({
           }
         }}
         aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        title={collapsed ? "Expand sidebar (⌘B)" : "Collapse sidebar (⌘B)"}
+        title={
+          collapsed ? "Expand sidebar (⌘B)" : "Collapse sidebar (⌘B)"
+        }
       >
         <div className="sidebar-logo" aria-hidden="true">
-          <IconLogo />
+          <img src={mainLogo} alt="" className="sidebar-logo-img" />
         </div>
         <div className="sidebar-brand-wrap">
           <span className="sidebar-brand">System Anchor</span>
@@ -822,9 +942,18 @@ function Sidebar({
         onScroll={handleNavScroll}
       >
         {NAV.map((section) => {
-          const visibleItems = section.items.filter(
-            (item) => !permsLoaded || canView(userPermissions, item.id)
-          );
+          // Entire System section is hidden for non-admins
+          if (section.section === "System" && !isAdmin) {
+            return null;
+          }
+
+          const visibleItems = section.items.filter((item) => {
+  // Don’t show anything until we know the permissions
+  if (!permsLoaded) return false;
+
+  return canView(userPermissions, item.id, isAdmin);
+});
+
           if (visibleItems.length === 0) return null;
 
           const hasActive = visibleItems.some((item) => isActive(item.path));
@@ -842,7 +971,9 @@ function Sidebar({
                   <NavLink
                     key={item.id}
                     to={item.path}
-                    className={() => `nav-item ${isActive(item.path) ? "active" : ""}`}
+                    className={() =>
+                      `nav-item ${isActive(item.path) ? "active" : ""}`
+                    }
                     title={collapsed ? item.label : undefined}
                     end={item.path === "/dashboard"}
                     preventScrollReset

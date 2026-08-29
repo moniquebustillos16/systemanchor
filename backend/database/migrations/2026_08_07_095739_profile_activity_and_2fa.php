@@ -5,7 +5,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
 /**
- * Optional migration for Profile activity feed + 2FA flags.
+ * Profile activity feed + optional user profile / 2FA columns.
  *
  * php artisan migrate
  */
@@ -13,10 +13,11 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // Activity log for Profile → Activity tab
         if (!Schema::hasTable('profile_activity')) {
             Schema::create('profile_activity', function (Blueprint $table) {
                 $table->uuid('id')->primary();
+                // Match your users.id type. If users.id is bigint, use:
+                // $table->foreignId('user_id')->constrained()->cascadeOnDelete();
                 $table->uuid('user_id')->index();
                 $table->string('type', 20)->default('info'); // success|warning|danger|info
                 $table->string('title', 150);
@@ -32,15 +33,14 @@ return new class extends Migration
             });
         }
 
-        // 2FA columns on users (simple flags; use Fortify for full TOTP)
+        // Add columns only if missing (checks outside Schema::table)
         Schema::table('users', function (Blueprint $table) {
             if (!Schema::hasColumn('users', 'two_factor_enabled')) {
-                $table->boolean('two_factor_enabled')->default(false)->after('password');
+                $table->boolean('two_factor_enabled')->default(false);
             }
             if (!Schema::hasColumn('users', 'two_factor_secret')) {
-                $table->text('two_factor_secret')->nullable()->after('two_factor_enabled');
+                $table->text('two_factor_secret')->nullable();
             }
-            // Profile fields used by frontend (add only if missing)
             if (!Schema::hasColumn('users', 'phone')) {
                 $table->string('phone', 50)->nullable();
             }
@@ -64,7 +64,13 @@ return new class extends Migration
         Schema::dropIfExists('profile_activity');
 
         Schema::table('users', function (Blueprint $table) {
-            foreach (['two_factor_secret', 'two_factor_enabled'] as $col) {
+            $cols = [
+                'two_factor_secret',
+                'two_factor_enabled',
+                // Uncomment if you also want these removed on rollback:
+                // 'phone', 'job_title', 'department', 'image_path', 'image_url',
+            ];
+            foreach ($cols as $col) {
                 if (Schema::hasColumn('users', $col)) {
                     $table->dropColumn($col);
                 }
