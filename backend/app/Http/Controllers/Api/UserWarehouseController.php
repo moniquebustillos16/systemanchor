@@ -155,38 +155,41 @@ class UserWarehouseController extends Controller
         $cacheKey = "user:{$userId}:warehouses";
 
         $payload = Cache::remember($cacheKey, self::CACHE_TTL, function () use ($userId) {
-            $userCols = ['id'];
-            foreach (['warehouse_id', 'access_all_warehouses'] as $c) {
-                if (Schema::hasColumn('users', $c)) {
-                    $userCols[] = $c;
-                }
-            }
-
             $user = User::query()
-                ->select($userCols)
+                ->with(['role:id,name'])
                 ->whereNull('deleted_at')
                 ->findOrFail($userId);
 
             $accessAll = (bool) ($user->access_all_warehouses ?? false);
 
-            $whCols = ['id', 'code', 'name', 'location', 'status', 'capacity'];
-            try {
-                $existing = Schema::getColumnListing('warehouses');
-                $whCols = array_values(array_filter($whCols, fn ($c) => in_array($c, $existing, true)));
-            } catch (\Throwable $e) {
-                $whCols = ['id', 'code', 'name'];
+            // Admin role → treat as full warehouse access (same as access_all_warehouses)
+            $roleName = strtolower(preg_replace('/[\s_-]+/', '', (string) ($user->role->name ?? $user->role_name ?? '')));
+            if (in_array($roleName, ['admin', 'administrator', 'superadmin', 'superadministrator', 'systemadmin', 'root', 'owner'], true)) {
+                $accessAll = true;
             }
 
             if ($accessAll) {
-                $q = Warehouse::query()->select($whCols);
+                $q = Warehouse::query()->orderBy('name');
                 if (Schema::hasColumn('warehouses', 'deleted_at')) {
                     $q->whereNull('deleted_at');
                 }
-                $warehouses = $q->orderBy('name')->get();
+                $warehouses = $q->get(['id', 'code', 'name', 'location', 'status']);
             } else {
-                $warehouses = $user->warehouses()->select($whCols)->orderBy('name')->get();
+                // Non-admin → only assigned warehouses
+                $warehouses = $user->warehouses()
+                    ->select([
+                        'warehouses.id',
+                        'warehouses.code',
+                        'warehouses.name',
+                        'warehouses.location',
+                        'warehouses.status',
+                    ])
+                    ->orderBy('warehouses.name')
+                    ->get();
+
+                // Also include primary warehouse if set
                 if (!empty($user->warehouse_id)) {
-                    $primary = Warehouse::query()->select($whCols)->where('id', $user->warehouse_id)->first();
+                    $primary = Warehouse::find($user->warehouse_id);
                     if ($primary && !$warehouses->contains('id', $primary->id)) {
                         $warehouses = $warehouses->prepend($primary);
                     }

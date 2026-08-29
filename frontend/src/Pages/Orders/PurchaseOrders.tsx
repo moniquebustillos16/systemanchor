@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { usePurchaseOrders } from "../../hooks/useOrders";
+import { useWarehouses } from "../../hooks/useWarehouses";
+import { invalidatePurchaseOrders } from "../../lib/invalidate";
 import "../css/Orders.css";
 
 
@@ -18,25 +21,98 @@ type AuthPayload = {
   };
   role_id?: string;
 };
+function norm(s: string): string {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
+
 function extractPermissions(json: unknown): string[] {
   if (!json || typeof json !== "object") return [];
   const j = json as AuthPayload;
+
   if (Array.isArray(j.permissions)) return j.permissions.map(String);
   if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
   if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
+
   const rolePerms = j.user?.role?.permissions;
   if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
   }
+
   const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
   if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
+
   return [];
 }
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
-  return needed.some((n) => perms.includes(n));
+
+function isAdminPayload(json: unknown): boolean {
+  if (!json || typeof json !== "object") return false;
+  const j = json as Record<string, unknown>;
+  const data = j.data as Record<string, unknown> | undefined;
+  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
+  if (user?.is_admin === true || user?.isAdmin === true) return true;
+  const roleName = String(
+    (user?.role as { name?: string } | undefined)?.name ||
+      user?.role_name ||
+      (data?.role as { name?: string } | undefined)?.name ||
+      ""
+  ).toLowerCase();
+  return (
+    roleName === "admin" ||
+    roleName === "administrator" ||
+    roleName === "system admin" ||
+    roleName === "system administrator" ||
+    roleName === "super admin" ||
+    roleName === "superadmin"
+  );
 }
 
+function can(perms: string[], ...needed: string[]): boolean {
+  if (!perms || perms.length === 0) return false;
+  const normalized = perms.map(norm);
+  // Inventory-style: wildcard = full access
+  if (
+    normalized.includes("*") ||
+    normalized.includes("admin") ||
+    normalized.includes("super_admin") ||
+    normalized.includes("superadmin")
+  ) {
+    return true;
+  }
+  return needed.map(norm).some((n) => normalized.includes(n));
+}
+
+/** Parse permission names from /roles/:id/permissions (same as Inventory) */
+function namesFromRolePermsPayload(json: unknown): string[] {
+  if (!json) return [];
+  const root = json as Record<string, unknown>;
+  const candidates = [
+    root.data,
+    root.permissions,
+    (root.data as Record<string, unknown> | undefined)?.permissions,
+    (root.data as Record<string, unknown> | undefined)?.data,
+    root,
+  ];
+  for (const c of candidates) {
+    if (!Array.isArray(c)) continue;
+    const names = c
+      .map((p) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object") {
+          const o = p as { name?: string; permission?: string; permission_name?: string };
+          return o.name || o.permission || o.permission_name || null;
+        }
+        return null;
+      })
+      .filter((x): x is string => !!x && x.length > 0);
+    if (names.length > 0) return names;
+  }
+  return [];
+}
 const svg = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -120,6 +196,13 @@ type Supplier = {
   product_offers?: string | null;
 };
 type Warehouse = { id: string; code: string; name?: string };
+
+/** Assigned warehouses for the logged-in user (same pattern as Inventory.tsx) */
+type UserWarehouseScope = {
+  accessAll: boolean;
+  warehouseIds: string[];
+  warehouses: Warehouse[];
+};
 type ProductOpt = {
   id: string;
   sku: string;
@@ -269,13 +352,6 @@ type Stats = {
   done: number;
 };
 
-type Paginated<T> = {
-  data: T[];
-  current_page?: number;
-  last_page?: number;
-  total?: number;
-};
-
 type PoForm = {
   supplier_id: string;
   warehouse_id: string;
@@ -365,7 +441,7 @@ function formatPeso(amount: number, fractionDigits = 0): string {
   })}`;
 }
 
-/** Pull array from Laravel list payloads (data / nested data / bare array). */
+/** Pull array from Laravel list payloads (data / nested data / bare array / resources). */
 function extractList<T = unknown>(json: unknown): T[] {
   if (!json) return [];
   if (Array.isArray(json)) return json as T[];
@@ -375,6 +451,13 @@ function extractList<T = unknown>(json: unknown): T[] {
   const nested = o.data as Record<string, unknown> | undefined;
   if (nested && Array.isArray(nested.data)) return nested.data as T[];
   if (Array.isArray(o.items)) return o.items as T[];
+  if (Array.isArray(o.warehouses)) return o.warehouses as T[];
+  if (Array.isArray(o.results)) return o.results as T[];
+  // Laravel ResourceCollection: { data: { data: [...] } } already handled;
+  // some controllers return { warehouses: { data: [...] } }
+  if (nested && Array.isArray((nested as { warehouses?: unknown }).warehouses)) {
+    return (nested as { warehouses: T[] }).warehouses;
+  }
   return [];
 }
 
@@ -519,6 +602,37 @@ function PurchaseOrders() {
   const [page, setPage] = useState(1);
   const pageSize = 15;
 
+  // Warehouse assignment scope (Inventory pattern) — declared before list query
+  const [whScope, setWhScope] = useState<UserWarehouseScope | null>(null);
+  const [whScopeLoading, setWhScopeLoading] = useState(true);
+
+  // Same as Inventory effectiveWarehouseId
+  const effectiveWarehouseId =
+    wh !== "all" && wh
+      ? wh
+      : whScope && !whScope.accessAll && whScope.warehouseIds.length === 1
+        ? whScope.warehouseIds[0]
+        : null;
+
+  const {
+    rows: poRows,
+    meta: poMeta,
+    stats: poStats,
+    isLoading: poLoading,
+    isFetching: poFetching,
+    refetchAll: refetchPOs,
+  } = usePurchaseOrders({
+    page,
+    perPage: pageSize,
+    search: debouncedSearch,
+    status,
+    warehouseId: effectiveWarehouseId,
+    supplierId: filterSupplier === "all" || !filterSupplier ? null : filterSupplier,
+    // Wait for warehouse scope so non-admin never briefly loads ALL warehouses' POs
+    enabled: !whScopeLoading,
+  });
+
+
   const bootKey = listCacheKey({
     page: 1,
     search: "",
@@ -547,6 +661,59 @@ function PurchaseOrders() {
     () => bootMeta?.products ?? []
   );
 
+  // Shared React Query cache (same as Dashboard / Receiving / Location)
+  const {
+    rows: whRows,
+    isLoading: whLoading,
+    isFetching: whFetching,
+    refetch: refetchWarehouses,
+  } = useWarehouses({ enabled: true, perPage: 200 });
+
+  /** Prefer useWarehouses; fall back to local meta bootstrap only if query empty */
+  const allWarehouseOptions = useMemo(() => {
+    const fromQuery = (whRows ?? [])
+      .map((w) => {
+        const r = w as Record<string, unknown>;
+        return {
+          id: String(r.id ?? ""),
+          code: String(r.code ?? r.name ?? r.id ?? ""),
+          name: r.name != null ? String(r.name) : undefined,
+        } as Warehouse;
+      })
+      .filter((w) => !!w.id)
+      .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
+    if (fromQuery.length > 0) return fromQuery;
+    return warehouses;
+  }, [whRows, warehouses]);
+
+  /**
+   * Warehouse dropdown options (fast path).
+   * - No scope yet → []
+   * - accessAll → full list (useWarehouses / meta); fallback to scope list
+   * - Assigned → show scope warehouses IMMEDIATELY (don't wait for /warehouses)
+   */
+  const warehouseOptions = useMemo(() => {
+    if (!whScope) return [];
+
+    if (whScope.accessAll) {
+      return allWarehouseOptions.length > 0
+        ? allWarehouseOptions
+        : (whScope.warehouses ?? []);
+    }
+
+    if (whScope.warehouseIds.length === 0) return [];
+
+    const allowedIds = new Set(whScope.warehouseIds.map(String));
+    // Prefer richer names from full list when available
+    const fromAll = allWarehouseOptions.filter((w) => allowedIds.has(String(w.id)));
+    if (fromAll.length > 0) return fromAll;
+
+    // Instant: data already on scope from /users/:id/warehouses
+    return (whScope.warehouses ?? []).filter((w) => !!w.id);
+  }, [whScope, allWarehouseOptions]);
+
+  const whBusy = whLoading || whFetching;
+
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<PoForm>(emptyForm);
   const [saving, setSaving] = useState(false);
@@ -572,47 +739,366 @@ function PurchaseOrders() {
   };
 
   const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => { setUserPermissions(list); setPermsLoaded(true); };
+    const finish = (list: string[]) => {
+      setUserPermissions(list);
+      setPermsLoaded(true);
+      try {
+        localStorage.setItem("permissions", JSON.stringify(list));
+      } catch {
+        /* ignore */
+      }
+    };
+
+    // Optimistic: use cached permissions from login immediately (same idea as Inventory)
     try {
-      for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
+      const raw = localStorage.getItem("permissions");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
+          setUserPermissions(parsed as string[]);
+          setPermsLoaded(true);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    let roleId: string | null = null;
+    let roleName = "";
+
+    try {
+      for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
         const raw = localStorage.getItem(key);
         if (!raw) continue;
         try {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
-            finish(parsed as string[]);
-            return;
-          }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) { finish(list); return; }
           const u = parsed?.data ?? parsed?.user ?? parsed;
-          const rid = u?.role_id || u?.role?.id;
-          if (rid) {
-            const { data: json } = await api.get(`/roles/${rid}/permissions`);
-            if (json) {
-              const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-              if (Array.isArray(perms)) {
-                finish(perms.map((p: { name?: string } | string) => typeof p === "string" ? p : p?.name).filter(Boolean) as string[]);
-                return;
-              }
-            }
-          }
-        } catch { /* */ }
+          roleId = u?.role_id || u?.role?.id || null;
+          roleName = u?.role?.name || u?.role_name || "";
+          if (roleId) break;
+        } catch {
+          /* next */
+        }
       }
-    } catch { /* */ }
+    } catch {
+      /* ignore */
+    }
+
     try {
       const { data: json } = await api.get("/me");
       if (json) {
+        if (isAdminPayload(json)) {
+          finish(["*"]);
+          return;
+        }
+        const u = (json as any)?.data ?? (json as any)?.user ?? json;
+        roleId = u?.role_id || u?.role?.id || (json as any)?.role_id || roleId;
+        roleName = u?.role?.name || u?.role_name || roleName;
+
         const list = extractPermissions(json);
-        if (list.length > 0) { finish(list); return; }
+        if (list.length > 0) {
+          finish(list);
+          return;
+        }
       }
-    } catch { /* */ }
-    finish(["*"]);
+    } catch {
+      /* fall through */
+    }
+
+    // Admin role → full access (Inventory pattern)
+    const normalizedRole = String(roleName)
+      .toLowerCase()
+      .replace(/[_-]+/g, " ")
+      .trim();
+    if (
+      [
+        "admin",
+        "administrator",
+        "super admin",
+        "superadmin",
+        "system admin",
+        "system administrator",
+        "root",
+      ].includes(normalizedRole)
+    ) {
+      finish(["*"]);
+      return;
+    }
+
+    // Normal role → load permissions from role endpoint (Inventory pattern)
+    if (roleId) {
+      try {
+        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
+        const names = namesFromRolePermsPayload(json);
+        finish(names);
+        return;
+      } catch {
+        /* fall through */
+      }
+    }
+
+    // localStorage fallback arrays / payloads
+    for (const key of [
+      "permissions",
+      "user_permissions",
+      "auth_permissions",
+      "user",
+      "auth_user",
+      "authUser",
+      "currentUser",
+      "sa-user",
+    ]) {
+      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (isAdminPayload(parsed)) {
+          finish(["*"]);
+          return;
+        }
+        if (
+          Array.isArray(parsed) &&
+          parsed.every((x: unknown) => typeof x === "string")
+        ) {
+          finish(parsed as string[]);
+          return;
+        }
+        const list = extractPermissions(parsed);
+        if (list.length > 0) {
+          finish(list);
+          return;
+        }
+      } catch {
+        /* next */
+      }
+    }
+
+    // No permissions → restricted (do NOT grant * by default)
+    finish([]);
   }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
-  const canView = can(userPermissions, "purchase_orders.view", "purchase-orders.view", "po.view");
-  const canCreate = can(userPermissions, "purchase_orders.create", "purchase-orders.create", "po.create");
-  const canUpdate = can(userPermissions, "purchase_orders.update", "purchase-orders.update", "po.update");
+
+  useEffect(() => {
+    fetchUserPermissions();
+  }, [fetchUserPermissions]);
+   // Module permissions (same pattern as Inventory: inventory.view → purchase_orders.view)
+  const canView = can(
+    userPermissions,
+    "purchase_orders.view",
+    "purchase-orders.view",
+    "purchaseorders.view",
+    "orders.view",
+    "po.view",
+    // legacy aliases if role still uses shipping names for this page
+    "shipping.view",
+    "shipments.view",
+    "shipment.view"
+  );
+  const canCreate = can(
+    userPermissions,
+    "purchase_orders.create",
+    "purchase-orders.create",
+    "purchaseorders.create",
+    "orders.create",
+    "po.create",
+    "shipping.create",
+    "shipments.create",
+    "shipment.create"
+  );
+  const canUpdate = can(
+    userPermissions,
+    "purchase_orders.update",
+    "purchase-orders.update",
+    "purchaseorders.update",
+    "orders.update",
+    "po.update",
+    "shipping.update",
+    "shipments.update",
+    "shipment.update"
+  );
+
+  /** Load assigned warehouses — fast: localStorage first, then parallel API */
+  const fetchUserWarehouseScope = useCallback(async () => {
+    setWhScopeLoading(true);
+
+    let userId: string | null = null;
+    let accessAll = false;
+    let warehousesList: Warehouse[] = [];
+    let roleName = "";
+
+    // —— Instant bootstrap from localStorage (no network) ——
+    try {
+      for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        const u = parsed?.data ?? parsed?.user ?? parsed;
+        if (!u) continue;
+        userId = u?.id ? String(u.id) : userId;
+        accessAll = Boolean(u?.access_all_warehouses) || accessAll;
+        roleName = String(u?.role?.name ?? u?.role_name ?? roleName);
+        if (isAdminPayload(parsed) || isAdminPayload(u)) accessAll = true;
+
+        const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
+        if (Array.isArray(fromMe) && fromMe.length > 0) {
+          warehousesList = fromMe.map((w: any) =>
+            typeof w === "string"
+              ? { id: String(w), code: "", name: undefined }
+              : { id: String(w.id), code: w.code ?? "", name: w.name }
+          );
+        } else if (u?.warehouse_id) {
+          warehousesList = [
+            {
+              id: String(u.warehouse_id),
+              code: u.warehouse?.code ?? "",
+              name: u.warehouse?.name,
+            },
+          ];
+        }
+        if (userId) break;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    const rn = roleName.toLowerCase().replace(/[_-]+/g, " ").trim();
+    if (
+      [
+        "admin",
+        "administrator",
+        "super admin",
+        "superadmin",
+        "system admin",
+        "system administrator",
+        "root",
+      ].includes(rn)
+    ) {
+      accessAll = true;
+    }
+
+    // Paint early if we already have something
+    if (accessAll || warehousesList.length > 0) {
+      setWhScope({
+        accessAll,
+        warehouseIds: Array.from(
+          new Set(warehousesList.map((w) => w.id).filter(Boolean))
+        ),
+        warehouses: warehousesList,
+      });
+      // Keep loading true until network confirms, but dropdown can show already
+    }
+
+    try {
+      // —— Parallel network: /me + /users/:id/warehouses ——
+      const mePromise = api.get("/me").then((r) => r.data).catch(() => null);
+      const whPromise = userId
+        ? api
+            .get(`/users/${userId}/warehouses`)
+            .then((r) => r.data)
+            .catch(() => null)
+        : Promise.resolve(null);
+
+      let [me, whJson] = await Promise.all([mePromise, whPromise]);
+
+      if (me) {
+        const u = (me as any)?.data ?? (me as any)?.user ?? me;
+        userId = u?.id ? String(u.id) : userId;
+        if (Boolean(u?.access_all_warehouses)) accessAll = true;
+        if (isAdminPayload(me) || isAdminPayload(u)) accessAll = true;
+        const r2 = String(u?.role?.name ?? u?.role_name ?? "")
+          .toLowerCase()
+          .replace(/[_-]+/g, " ")
+          .trim();
+        if (
+          [
+            "admin",
+            "administrator",
+            "super admin",
+            "superadmin",
+            "system admin",
+            "system administrator",
+            "root",
+          ].includes(r2)
+        ) {
+          accessAll = true;
+        }
+
+        const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
+        if (Array.isArray(fromMe) && fromMe.length > 0 && warehousesList.length === 0) {
+          warehousesList = fromMe.map((w: any) =>
+            typeof w === "string"
+              ? { id: String(w), code: "", name: undefined }
+              : { id: String(w.id), code: w.code ?? "", name: w.name }
+          );
+        }
+        if (!whJson && userId) {
+          // /me arrived first with userId we didn't have — fetch warehouses now
+          try {
+            const { data } = await api.get(`/users/${userId}/warehouses`);
+            whJson = data;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      if (whJson) {
+        const payload = (whJson as any)?.data ?? whJson;
+        if (Boolean(payload?.access_all_warehouses)) accessAll = true;
+
+        let list: any[] = [];
+        const raw = payload?.warehouses ?? payload?.data ?? payload;
+        if (Array.isArray(raw)) list = raw;
+        else if (Array.isArray(raw?.data)) list = raw.data;
+        else if (raw && typeof raw === "object") {
+          list = Object.values(raw).filter(
+            (v: any) => v && typeof v === "object" && v.id
+          );
+        }
+
+        if (list.length > 0) {
+          warehousesList = list.map((w: any) => ({
+            id: String(w.id),
+            code: w.code ?? "",
+            name: w.name ?? "",
+          }));
+        }
+      }
+
+      // Primary warehouse fallback
+      if (warehousesList.length === 0 && !accessAll && me) {
+        const u = (me as any)?.data ?? (me as any)?.user ?? me;
+        if (u?.warehouse_id) {
+          warehousesList = [
+            {
+              id: String(u.warehouse_id),
+              code: u.warehouse?.code ?? "",
+              name: u.warehouse?.name,
+            },
+          ];
+        }
+      }
+
+      setWhScope({
+        accessAll,
+        warehouseIds: Array.from(
+          new Set(warehousesList.map((w) => w.id).filter(Boolean))
+        ),
+        warehouses: warehousesList,
+      });
+    } catch (e) {
+      console.error("[PurchaseOrders] warehouse scope failed", e);
+      if (!warehousesList.length && !accessAll) {
+        setWhScope({ accessAll: false, warehouseIds: [], warehouses: [] });
+      }
+    } finally {
+      setWhScopeLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchUserWarehouseScope();
+  }, [fetchUserWarehouseScope]);
+
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -622,8 +1108,8 @@ function PurchaseOrders() {
     return () => clearTimeout(t);
   }, [search]);
 
-  /** Suppliers from SupplierController · Warehouses from LocationController */
-  const fetchMeta = useCallback(async (force = false) => {
+  /** Suppliers + warehouses + product catalog for the create form / filters */
+  const fetchMeta = useCallback(async (force = false): Promise<PoMetaSnap | null> => {
     const store = poStore();
     if (
       !force &&
@@ -634,7 +1120,7 @@ function PurchaseOrders() {
       setWarehouses(store.meta.warehouses);
       setSuppliers(store.meta.suppliers);
       setProducts(store.meta.products);
-      return;
+      return store.meta;
     }
     if (store.metaInflight && !force) {
       await store.metaInflight;
@@ -644,24 +1130,27 @@ function PurchaseOrders() {
         setSuppliers(m.suppliers);
         setProducts(m.products);
       }
-      return;
+      return m;
     }
 
     store.metaInflight = (async () => {
       try {
         const loadWarehouses = async (): Promise<Warehouse[]> => {
-          // Real route is GET /api/warehouses (WarehouseController) — not /locations/warehouses
+          // GET /api/warehouses (WarehouseController)
           try {
             const { data: json } = await api.get("/warehouses", {
               params: { per_page: 200, all: 1 },
             });
             const list = extractList<Warehouse>(json);
             return list
-              .map((w) => ({
-                id: String(w.id),
-                code: String(w.code ?? w.name ?? w.id),
-                name: w.name,
-              }))
+              .map((w) => {
+                const r = w as Warehouse & Record<string, unknown>;
+                return {
+                  id: String(r.id ?? ""),
+                  code: String(r.code ?? r.name ?? r.id ?? ""),
+                  name: r.name != null ? String(r.name) : undefined,
+                };
+              })
               .filter((w) => !!w.id)
               .sort((a, b) => a.code.localeCompare(b.code));
           } catch (e) {
@@ -710,15 +1199,17 @@ function PurchaseOrders() {
         setWarehouses(whList);
         setSuppliers(nextSuppliers);
         setProducts(nextProducts);
-        // Don't cache empty warehouse lists — forces retry next open
+
+        const snap: PoMetaSnap = {
+          at: Date.now(),
+          warehouses: whList,
+          suppliers: nextSuppliers,
+          products: nextProducts,
+        };
+        // Always update in-memory store so openAdd can read immediately
+        store.meta = snap;
+        // Persist only when we have something useful
         if (whList.length > 0 || nextSuppliers.length > 0) {
-          const snap: PoMetaSnap = {
-            at: Date.now(),
-            warehouses: whList,
-            suppliers: nextSuppliers,
-            products: nextProducts,
-          };
-          store.meta = snap;
           writeSS(SS_PO_META, snap);
         }
       } catch (e) {
@@ -729,145 +1220,68 @@ function PurchaseOrders() {
     })();
 
     await store.metaInflight;
+    return store.meta;
   }, []);
 
-  const fetchOrders = useCallback(async (opts?: { force?: boolean }) => {
-    const force = !!opts?.force;
-    const key = listCacheKey({
-      page,
-      search: debouncedSearch.trim(),
-      status,
-      wh,
-      supplier: filterSupplier,
-    });
-    const store = poStore();
-
-    // Soft cache hit → paint immediately, refresh in background
-    const cached =
-      (store.list && store.list.key === key && isFresh(store.list.at, PO_SOFT_TTL_MS)
-        ? store.list
-        : null) ||
-      ((): PoListSnap | null => {
-        const ss = readSS<PoListSnap>(SS_PO_LIST);
-        return ss && ss.key === key && isFresh(ss.at, PO_SOFT_TTL_MS) ? ss : null;
-      })();
-
-    if (cached && !force) {
-      setOrders(cached.rows);
-      setTotal(cached.total);
-      setLastPage(cached.lastPage);
-      setLoading(false);
-      if (store.stats && isFresh(store.stats.at, PO_SOFT_TTL_MS)) {
-        setStats(store.stats.data);
-      }
-      // background revalidate (single-flight per key)
-      if (!store.listInflight.has(key)) {
-        store.listInflight.set(
-          key,
-          (async () => {
-            try {
-              await fetchOrders({ force: true });
-            } finally {
-              store.listInflight.delete(key);
-            }
-          })()
-        );
-      }
-      return;
-    }
-
-    // Hard cache for spinner decision
-    const hard =
-      store.list?.key === key && isFresh(store.list.at, PO_HARD_TTL_MS)
-        ? store.list
-        : null;
-    if (!hard) setLoading(true);
-    setError(null);
-
-    const params: Record<string, string | number> = {
-      per_page: pageSize,
-      page,
-      sort: "order_date",
-      dir: "desc",
-    };
-    if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
-    if (status !== "all") params.status = status;
-    if (wh !== "all") params.warehouse_id = wh;
-    if (filterSupplier !== "all") params.supplier_id = filterSupplier;
-
-    try {
-      const [listSettled, statsSettled] = await Promise.allSettled([
-        api.get("/purchase-orders", { params }),
-        api.get("/purchase-orders/stats"),
-      ]);
-
-      if (listSettled.status === "rejected") {
-        const e: any = listSettled.reason;
-        throw new Error(
-          `Orders HTTP ${e?.response?.status ?? "?"}: ${String(e?.response?.data?.message || e?.message || "").slice(0, 200)}`
-        );
-      }
-
-      const listJson: Paginated<PurchaseOrder> | PurchaseOrder[] = listSettled.value.data;
-      const rawRows = Array.isArray(listJson) ? listJson : listJson.data ?? [];
-      const rows = rawRows.map((row) => {
-        const r = row as PurchaseOrder & Record<string, unknown>;
-        const lines = extractLines(r);
-        const cachedLines =
-          lines.length === 0 ? readCachedPoLines(String(r.po_number ?? "")) : [];
-        const resolved = lines.length ? lines : cachedLines;
-        return {
-          ...row,
-          lines: resolved.length ? resolved : row.lines,
-          order_items: resolved.length ? resolved : row.order_items,
-        };
-      });
-      const totalCount = Array.isArray(listJson)
-        ? rows.length
-        : listJson.total ?? rows.length;
-      const pages = Array.isArray(listJson) ? 1 : listJson.last_page ?? 1;
-
-      setOrders(rows);
-      setTotal(totalCount);
-      setLastPage(pages);
-
-      const listSnap: PoListSnap = {
-        at: Date.now(),
-        key,
-        rows,
-        total: totalCount,
-        lastPage: pages,
+  /* Phase 7: TanStack Query owns list + stats */
+  useEffect(() => {
+    if (!poRows) return;
+    const rows = (poRows as PurchaseOrder[]).map((row) => {
+      const r = row as PurchaseOrder & Record<string, unknown>;
+      const lines = extractLines(r);
+      const cachedLines =
+        lines.length === 0 ? readCachedPoLines(String(r.po_number ?? "")) : [];
+      const resolved = lines.length ? lines : cachedLines;
+      return {
+        ...row,
+        lines: resolved.length ? resolved : row.lines,
+        order_items: resolved.length ? resolved : row.order_items,
       };
-      store.list = listSnap;
-      writeSS(SS_PO_LIST, listSnap);
-
-      if (statsSettled.status === "fulfilled") {
-        const statsJson: Stats = statsSettled.value.data;
-        setStats(statsJson);
-        const st: PoStatsSnap = { at: Date.now(), data: statsJson };
-        store.stats = st;
-        writeSS(SS_PO_STATS, st);
-      }
-    } catch (e) {
-      console.error(e);
-      if (!hard) {
-        setError(e instanceof Error ? e.message : "Failed to load purchase orders");
-        setOrders([]);
-        setTotal(0);
-        setLastPage(1);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [page, debouncedSearch, status, wh, filterSupplier]);
+    });
+    setOrders(rows);
+    setTotal(poMeta.total);
+    setLastPage(poMeta.last_page);
+    setLoading(false);
+    setError(null);
+  }, [poRows, poMeta]);
 
   useEffect(() => {
-    void fetchOrders();
-  }, [fetchOrders]);
+    if (!poStats) return;
+    setStats(poStats as Stats);
+  }, [poStats]);
+
+  useEffect(() => {
+    if (poRows.length === 0 && poLoading) setLoading(true);
+    else if (!poLoading) setLoading(false);
+  }, [poLoading, poRows.length]);
 
   useEffect(() => {
     void fetchMeta();
   }, [fetchMeta]);
+
+  // Non-admin: never stay on "All warehouses" — lock to assigned id(s)
+  useEffect(() => {
+    if (!whScope || whScope.accessAll) return;
+    if (whScope.warehouseIds.length === 0) return;
+
+    const allowed = new Set(whScope.warehouseIds.map(String));
+    const needsFix = wh === "all" || !allowed.has(String(wh));
+    if (!needsFix) return;
+
+    setWh(whScope.warehouseIds[0]);
+    setPage(1);
+  }, [whScope, wh]);
+
+
+  // Auto-select first warehouse when useWarehouses data arrives while modal is open
+  useEffect(() => {
+    if (!showAdd) return;
+    if (warehouseOptions.length === 0) return;
+    setForm((f) => {
+      if (f.warehouse_id && warehouseOptions.some((w) => w.id === f.warehouse_id)) return f;
+      return { ...f, warehouse_id: warehouseOptions[0].id };
+    });
+  }, [showAdd, warehouseOptions]);
 
   useEffect(() => {
     document.body.classList.toggle("modal-open", showAdd || !!viewOrder || !!confirmAction);
@@ -894,6 +1308,25 @@ function PurchaseOrders() {
   }, [menuOpenId]);
 
   const statsView = stats ?? { all: 0, pending: 0, total_value: 0, done: 0 };
+
+  /**
+   * Orders visible under warehouse assignment (Inventory-style condition).
+   * - Scope still loading → show current orders (no empty flash)
+   * - accessAll (admin / access_all_warehouses) → all orders
+   * - Assigned warehouses → only those POs
+   * - No assignment → empty
+   */
+  const scopedOrders = useMemo(() => {
+    if (!whScope) return orders; // loading
+    if (whScope.accessAll) return orders;
+    if (whScope.warehouseIds.length === 0) return [];
+    const allowed = new Set(whScope.warehouseIds.map(String));
+    return orders.filter((o) => {
+      const wid = o.warehouse_id ?? o.warehouse?.id ?? null;
+      if (!wid) return false;
+      return allowed.has(String(wid));
+    });
+  }, [orders, whScope]);
 
   const selectedSupplier = suppliers.find((s) => s.id === form.supplier_id) ?? null;
 
@@ -922,35 +1355,74 @@ function PurchaseOrders() {
     return partial?.id ?? "";
   };
 
-  const openAdd = async (prefill?: Partial<PoForm>) => {
+  /** Open modal immediately — warehouses from useWarehouses (shared cache). */
+  const openAdd = (prefill?: Partial<PoForm>) => {
     if (!canCreate) {
       showToast("error", "Permission denied", "You cannot create purchase orders.");
       return;
     }
-    // Ensure warehouses are available for the create form
-    if (warehouses.length === 0) {
-      await fetchMeta(true);
-    }
-    const whs = poStore().meta?.warehouses?.length
-      ? poStore().meta!.warehouses
-      : warehouses;
-    const sups = poStore().meta?.suppliers?.length
-      ? poStore().meta!.suppliers
-      : suppliers;
+
+    setFormError(null);
+    setProductQuery("");
+
+    const cached = poStore().meta;
+    const whs = warehouseOptions;
+    const sups = suppliers.length
+      ? suppliers
+      : cached?.suppliers?.length
+        ? cached.suppliers
+        : [];
+
     const supplierId = prefill?.supplier_id ?? sups[0]?.id ?? "";
     const supplier = sups.find((s) => s.id === supplierId);
     const offers = parseProductOffers(supplier?.product_offers);
     const firstOffer = offers[0] ?? "";
+    const warehouseId = prefill?.warehouse_id ?? whs[0]?.id ?? "";
+
     setForm({
       ...emptyForm(),
-      supplier_id: supplierId,
-      warehouse_id: prefill?.warehouse_id ?? whs[0]?.id ?? "",
-      lines: [emptyLine(firstOffer)],
       ...prefill,
+      supplier_id: supplierId,
+      warehouse_id: warehouseId,
+      lines:
+        prefill?.lines && prefill.lines.length > 0
+          ? prefill.lines
+          : [emptyLine(firstOffer)],
     });
-    setProductQuery("");
-    setFormError(null);
     setShowAdd(true);
+
+    // Warehouses: shared React Query (fast). Suppliers/products: local meta if needed.
+    if (whs.length === 0) void refetchWarehouses();
+
+    const needMeta =
+      sups.length === 0 ||
+      products.length === 0 ||
+      !cached ||
+      !isFresh(cached.at, PO_SOFT_TTL_MS);
+
+    if (needMeta) {
+      void fetchMeta(sups.length === 0).then((meta) => {
+        if (!meta) return;
+        const nextSup = meta.suppliers?.length ? meta.suppliers : sups;
+        if (nextSup.length) setSuppliers(nextSup);
+        if (meta.products?.length) setProducts(meta.products);
+
+        setForm((f) => {
+          const sid = f.supplier_id || nextSup[0]?.id || "";
+          const sup = nextSup.find((s) => s.id === sid);
+          const offs = parseProductOffers(sup?.product_offers);
+          const needLines =
+            !f.lines.length ||
+            (f.lines.length === 1 && !f.lines[0].offer.trim());
+          return {
+            ...f,
+            supplier_id: sid,
+            warehouse_id: f.warehouse_id || warehouseOptions[0]?.id || "",
+            lines: needLines && offs[0] ? [emptyLine(offs[0])] : f.lines,
+          };
+        });
+      });
+    }
   };
 
   /** When supplier changes: reset lines to that supplier's product offers */
@@ -1051,6 +1523,11 @@ function PurchaseOrders() {
 
     if (!form.supplier_id) {
       setFormError("Supplier is required. Add suppliers first or check the Suppliers API.");
+      return;
+    }
+
+    if (warehouseOptions.length > 0 && !form.warehouse_id) {
+      setFormError("Select a warehouse for receiving.");
       return;
     }
 
@@ -1157,7 +1634,7 @@ function PurchaseOrders() {
             : null),
         warehouse:
           (data.warehouse as PurchaseOrder["warehouse"]) ??
-          warehouses.find((w) => w.id === form.warehouse_id) ??
+          warehouseOptions.find((w) => w.id === form.warehouse_id) ??
           null,
         lines: createdLines,
         order_items: createdLines,
@@ -1181,7 +1658,8 @@ function PurchaseOrders() {
         }, 500);
       }
       setPage(1);
-      await fetchOrders({ force: true });
+      await refetchPOs();
+      void invalidatePurchaseOrders();
       setViewOrder(created);
       setViewLoading(false);
     } catch (err) {
@@ -1326,8 +1804,9 @@ function PurchaseOrders() {
     try {
       const { data: body } = await api.put(`/purchase-orders/${order.id}`, {
         status: nextStatus,
+        
       });
-
+            void invalidatePurchaseOrders();
       // Merge server payload when present
       const serverOrder: PurchaseOrder | null =
         body?.data && typeof body.data === "object"
@@ -1554,14 +2033,18 @@ function PurchaseOrders() {
       <div className="main-wrapper">
         <Topbar />
         <main className="content">
-          {permsLoaded && !canView && (
-            <div className="card" style={{ padding: 40, textAlign: "center", marginBottom: 16 }}>
-              <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
-              <p className="text-muted" style={{ margin: 0 }}>
-                You do not have permission to view purchase orders. Ask an admin to grant <code>purchase_orders.view</code>.
-              </p>
+          {permsLoaded && !canView ? (
+            <div className="card" style={{ padding: 40, textAlign: "center" }}>
+              <div className="empty-state">
+                <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
+                <p className="text-muted">
+                  You do not have permission to view purchase orders. Ask an admin to grant{" "}
+                  <code>purchase_orders.view</code>.
+                </p>
+              </div>
             </div>
-          )}
+          ) : (
+          <>
           <div className="page-header">
             <div>
               <h1 className="page-title">Purchase Orders</h1>
@@ -1574,16 +2057,23 @@ function PurchaseOrders() {
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  void fetchOrders({ force: true });
-                  fetchMeta();
+                  void refetchPOs();
+                  void refetchWarehouses();
+                  void fetchMeta(true);
                   showToast("success", "Refreshed", "Orders and suppliers reloaded.");
                 }}
-                disabled={loading}
+                disabled={poFetching || loading}
               >
-                <IconRefresh /> Refresh
+                <IconRefresh /> {poFetching ? "Refreshing…" : "Refresh"}
               </button>
               {canCreate && (
-              <button type="button" className="btn btn-primary" onClick={() => openAdd()}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => openAdd()}
+                disabled={saving}
+                title="Create a new purchase order"
+              >
                 <IconPlus /> New Purchase Order
               </button>
               )}
@@ -1723,9 +2213,13 @@ function PurchaseOrders() {
                     setWh(e.target.value);
                     setPage(1);
                   }}
+                  disabled={whScopeLoading}
                 >
-                  <option value="all">All warehouses</option>
-                  {warehouses.map((w) => (
+                  {/* Only admin / access_all sees "All warehouses" (Inventory pattern) */}
+                  {whScope?.accessAll && (
+                    <option value="all">All warehouses</option>
+                  )}
+                  {warehouseOptions.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.name ? `${w.code} — ${w.name}` : w.code}
                     </option>
@@ -1784,7 +2278,7 @@ function PurchaseOrders() {
                         ))}
                       </tr>
                     ))
-                  ) : orders.length === 0 ? (
+                  ) : scopedOrders.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="empty-row">
                         <div
@@ -1802,7 +2296,12 @@ function PurchaseOrders() {
                             Create a PO from a supplier’s product offers to get started.
                           </p>
                           {canCreate && (
-                          <button type="button" className="btn btn-primary" onClick={() => openAdd()}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => openAdd()}
+                            disabled={saving}
+                          >
                             <IconPlus /> New Purchase Order
                           </button>
                           )}
@@ -1810,7 +2309,7 @@ function PurchaseOrders() {
                       </td>
                     </tr>
                   ) : (
-                    orders.map((o) => {
+                    scopedOrders.map((o) => {
                       const next = nextStepLabel(o.status);
                       const lines = o.lines ?? o.order_items ?? [];
                       const productLabel = poProductLabel(o);
@@ -1951,6 +2450,8 @@ function PurchaseOrders() {
               </div>
             </div>
           </div>
+          </>
+          )}
         </main>
       </div>
 
@@ -2083,22 +2584,46 @@ function PurchaseOrders() {
                 </div>
 
                 <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                  <label>Warehouse</label>
-                  <select
-                    value={form.warehouse_id}
-                    onChange={(e) => setForm((f) => ({ ...f, warehouse_id: e.target.value }))}
-                    disabled={saving}
-                  >
-                    <option value="">— None —</option>
-                    {warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name ? `${w.code} — ${w.name}` : w.code}
-                      </option>
-                    ))}
-                  </select>
-                  {warehouses.length === 0 && (
-                    <span style={{ fontSize: 12, color: "var(--sa-muted)" }}>
-                      No warehouses loaded — check Location API
+                  <label>Warehouse {warehouseOptions.length > 0 ? "*" : ""}</label>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <select
+                      value={form.warehouse_id}
+                      onChange={(e) => setForm((f) => ({ ...f, warehouse_id: e.target.value }))}
+                      disabled={saving || whBusy || whScopeLoading}
+                      style={{ flex: 1 }}
+                      required={warehouseOptions.length > 0}
+                    >
+                      {warehouseOptions.length === 0 ? (
+                        <option value="">
+                          {whBusy || whScopeLoading ? "Loading warehouses…" : "— No warehouses —"}
+                        </option>
+                      ) : (
+                        <>
+                          <option value="">— Select warehouse —</option>
+                          {warehouseOptions.map((w) => (
+                            <option key={w.id} value={w.id}>
+                              {w.name ? `${w.code} — ${w.name}` : w.code}
+                            </option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                    {warehouseOptions.length === 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        disabled={whBusy || whScopeLoading || saving}
+                        onClick={() => void refetchWarehouses()}
+                        title="Reload warehouses"
+                      >
+                        {whBusy ? "…" : "Retry"}
+                      </button>
+                    )}
+                  </div>
+                  {warehouseOptions.length === 0 && !whBusy && (
+                    <span className="po-field-hint" style={{ display: "block", marginTop: 6 }}>
+                      No warehouses loaded. Open Warehouses and create at least one site, then
+                      click Retry.
                     </span>
                   )}
                 </div>

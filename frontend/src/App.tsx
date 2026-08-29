@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useState } from "react";
-import api from "./api/axios"; // ← change path if needed
+import api from "./api/axios";
+import mainLogo from "./assets/main_logo.png";
 import "./index.css";
 
 function App() {
@@ -27,7 +28,6 @@ function App() {
 
       const { token, user } = response.data;
 
-      // Store authentication
       if (remember) {
         localStorage.setItem("token", token);
         localStorage.setItem("user", JSON.stringify(user));
@@ -36,6 +36,7 @@ function App() {
         sessionStorage.setItem("user", JSON.stringify(user));
       }
 
+      window.dispatchEvent(new Event("sa-auth-changed"));
       navigate("/dashboard");
     } catch (error: any) {
       if (error.response) {
@@ -77,41 +78,7 @@ function App() {
         <div className="brand-inner">
           <div className="brand-top">
             <div className="mark">
-              <svg viewBox="0 0 40 40" fill="none">
-                <path
-                  d="M6 16.5L20 6L34 16.5"
-                  stroke="currentColor"
-                  strokeWidth="2.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <rect
-                  x="9.5"
-                  y="16.5"
-                  width="21"
-                  height="14.5"
-                  rx="2"
-                  stroke="currentColor"
-                  strokeWidth="2.8"
-                />
-                <rect
-                  x="13.5"
-                  y="20.5"
-                  width="4.5"
-                  height="4.5"
-                  rx="0.8"
-                  fill="currentColor"
-                />
-                <rect
-                  x="22"
-                  y="20.5"
-                  width="4.5"
-                  height="4.5"
-                  rx="0.8"
-                  fill="currentColor"
-                />
-                <circle cx="20" cy="34" r="2.6" fill="#d9a653" />
-              </svg>
+              <img src={mainLogo} alt="SystemAnchor" className="mark-logo" />
             </div>
             <span className="mark-label">SystemAnchor</span>
           </div>
@@ -155,12 +122,12 @@ function App() {
         <div className="form-frame">
           <div className="form-card">
             <header className="form-header">
+              <img src={mainLogo} alt="SystemAnchor" className="form-logo" />
               <h2>Welcome back</h2>
               <p>Sign in to your workspace</p>
             </header>
 
             <form onSubmit={handleLogin} noValidate className="auth-form">
-              {/* Email */}
               <div className="field">
                 <label htmlFor="email">Email</label>
                 <input
@@ -177,7 +144,6 @@ function App() {
                 />
               </div>
 
-              {/* Password */}
               <div className="field">
                 <div className="field-head">
                   <label htmlFor="password">Password</label>
@@ -209,7 +175,6 @@ function App() {
                 </div>
               </div>
 
-              {/* Remember me */}
               <label className="remember">
                 <input
                   type="checkbox"
@@ -219,7 +184,6 @@ function App() {
                 <span>Remember this device</span>
               </label>
 
-              {/* Error */}
               {error && (
                 <div className="error-banner" role="alert">
                   <span className="error-icon">!</span>
@@ -227,7 +191,6 @@ function App() {
                 </div>
               )}
 
-              {/* Submit */}
               <button type="submit" className="cta" disabled={loading}>
                 {loading ? "Signing in..." : "Sign in"}
               </button>

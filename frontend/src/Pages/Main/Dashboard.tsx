@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+﻿import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ResponsiveContainer,
@@ -18,8 +18,9 @@ import {
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useDashboard } from "../../hooks/useDashboard";
+import { schedulePrefetch } from "../../lib/prefetch";
 import "../css/Main.css";
-
 
 /* ===================== ICONS ===================== */
 
@@ -94,16 +95,14 @@ const IconInbox = () => (
 );
 
 /* ===================== CHARTS (Recharts) ===================== */
-/* Colors work on both light & dark themes (warm earth palette). */
 
 const CHART = {
-  brown: "#C4A06A",       // brighter gold for dark bg readability
+  brown: "#C4A06A",
   brownDeep: "#8B6B45",
   brownSoft: "#D4B896",
   sage: "#6BBF82",
   sageDeep: "#4A9A62",
   clay: "#D4785C",
-  // Axis / grid use currentColor so they inherit theme text color
   tick: "currentColor",
   grid: "currentColor",
 };
@@ -118,13 +117,11 @@ const compactPeso = (v: number) => {
   return pesoTick(n);
 };
 
-/** Theme-aware tooltip — solid surfaces for light & dark (no washed-out white panel) */
 const chartTooltipStyle: CSSProperties = {
   borderRadius: 12,
   border: "1px solid rgba(196, 160, 106, 0.28)",
   boxShadow: "0 12px 32px rgba(0,0,0,0.45)",
   fontSize: 12,
-  // Prefer app tokens; fall back to warm dark panel so dark mode never flashes white
   background: "var(--sa-card, var(--card-bg, var(--surface, #2a241c)))",
   color: "var(--sa-text, var(--text, #f3ebe0))",
   padding: "10px 14px",
@@ -156,7 +153,6 @@ function ChartEmpty({ height = 160, label = "No data available" }: { height?: nu
   );
 }
 
-/** Soft custom tooltip shell — works in dark mode */
 function TipBox({
   active,
   label,
@@ -223,7 +219,6 @@ function TipBox({
   );
 }
 
-/** Inventory value area trend — Y domain padded so flat series still has shape */
 function InvTrendChart({
   data,
   height = 200,
@@ -313,7 +308,6 @@ function InvTrendChart({
   );
 }
 
-/** Stock in / out grouped bars — even scale for small monthly counts */
 function StockMoveChart({
   data,
   height = 200,
@@ -323,13 +317,11 @@ function StockMoveChart({
 }) {
   if (!data.length) return <ChartEmpty height={height} label="No movement data" />;
 
-  // Keep all periods so 7M / 1Y stay aligned with the value trend
   const chartData = data;
   const maxVal = Math.max(
     1,
     ...chartData.map((d) => Math.max(Number(d.in) || 0, Number(d.out) || 0))
   );
-  // Headroom so bars don't touch the top (nice for counts ~3–10)
   const yMax = Math.max(6, Math.ceil(maxVal * 1.25));
 
   return (
@@ -421,7 +413,6 @@ function StockMoveChart({
   );
 }
 
-/** Category mix — donut + custom legend list */
 function CategoryDonutChart({
   segments,
   centerValue,
@@ -510,7 +501,6 @@ function CategoryDonutChart({
             />
           </RPieChart>
         </ResponsiveContainer>
-        {/* Center label — below tooltip layer so hover stays readable */}
         <div
           aria-hidden="true"
           style={{
@@ -615,7 +605,6 @@ function CategoryDonutChart({
   );
 }
 
-/** Order pipeline — hide empty stages; muted style if all zero */
 function PipelineChart({
   stages,
   title = "Order pipeline",
@@ -623,7 +612,6 @@ function PipelineChart({
   stages: { label: string; count: number; color: string }[];
   title?: string;
 }) {
-  // Prefer stages with activity; if everything is zero, still show them muted
   const active = stages.filter((s) => s.count > 0);
   const rows = active.length > 0 ? active : stages;
   const max = Math.max(...rows.map((s) => s.count), 1);
@@ -746,12 +734,7 @@ function PipelineChart({
   );
 }
 
-/* ===================== HELPERS ===================== */
-
-
-
 /* ===================== ROLE PERMISSIONS ===================== */
-/* Aligned with Roles.tsx + RolePermissionController (forRole, ids_only, MODULE aliases) */
 
 type AuthPayload = {
   permissions?: string[];
@@ -778,7 +761,6 @@ function extractPermissions(json: unknown): string[] {
   }
   const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
   if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  // RolePermissionController forRole shape: { data: { permissions: [{id,name}] } }
   const nested = (j as { data?: { permissions?: unknown } }).data?.permissions;
   if (Array.isArray(nested)) {
     return nested
@@ -788,7 +770,6 @@ function extractPermissions(json: unknown): string[] {
   return [];
 }
 
-/** Normalize: lowercase, underscores/hyphens → dots (Roles matrix uses inventory.view style). */
 function normPerm(s: string): string {
   return String(s)
     .trim()
@@ -804,10 +785,6 @@ function can(perms: string[], ...needed: string[]): boolean {
   return needed.some((n) => set.has(normPerm(n)));
 }
 
-/**
- * Path → view permissions (aliases match Roles.tsx MODULE_CATALOG).
- * RolePermissionController serves names via GET /roles/{id}/permissions.
- */
 const PATH_VIEW: Record<string, string[]> = {
   "/dashboard": [
     "dashboard.view",
@@ -891,7 +868,6 @@ function canPath(perms: string[], path: string): boolean {
   return can(perms, ...needed);
 }
 
-
 type Warehouse = {
   id: string;
   code?: string;
@@ -918,12 +894,7 @@ type AlertItem = {
   sku?: string;
 };
 
-
-const CAT_COLORS = ["#9A6B45", "#C4A07A", "#6B9B7A", "#C49A5A", "#A89880", "#5A9A6E"];
-
-
-
-/* ===================== COMPONENT ===================== */
+//const CAT_COLORS = ["#9A6B45", "#C4A07A", "#6B9B7A", "#C49A5A", "#A89880", "#5A9A6E"];
 
 type MovementRow = {
   id: string;
@@ -964,9 +935,9 @@ type OpsStats = {
   items?: number;
 };
 
-/* ── Dashboard snapshot cache (same idea as Inventory.tsx) ───────── */
-const DASH_SOFT_TTL_MS = 60_000;   // serve instantly, revalidate in background
-const DASH_HARD_TTL_MS = 10 * 60_000; // bootstrap from sessionStorage up to 10 min
+/* ── Dashboard snapshot cache (instant paint while Query loads) ── */
+const DASH_SOFT_TTL_MS = 60_000;
+const DASH_HARD_TTL_MS = 10 * 60_000;
 const SS_DASH_KEY = "dash:lastSnapshot";
 
 type DashSnapshot = {
@@ -1041,9 +1012,6 @@ function bootstrapDash(): DashSnapshot | null {
   return readDashSS();
 }
 
-
-
-/** Normalize movement type aliases from seed/legacy data */
 function normMoveType(t: unknown): string {
   const s = String(t ?? "").trim().toLowerCase();
   if (s === "receipt" || s === "in") return "IN";
@@ -1053,10 +1021,6 @@ function normMoveType(t: unknown): string {
   return String(t ?? "").trim().toUpperCase();
 }
 
-/**
- * Build monthly inventory value (running) + in/out counts from movements.
- * Value uses product price map when available; qty alone is a fallback.
- */
 function buildSeriesFromMovements(
   moves: Record<string, unknown>[],
   priceByProduct: Map<string, number>,
@@ -1069,17 +1033,17 @@ function buildSeriesFromMovements(
   stockOut: number[];
 } {
   const now = new Date();
-  const monthsBack =
-    range === "3m" ? 3 : range === "1y" ? 12 : 7;
+  const monthsBack = range === "3m" ? 3 : range === "1y" ? 12 : 7;
 
-  // Ordered month keys oldest → newest
   const keys: string[] = [];
   const labels: string[] = [];
   for (let i = monthsBack - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
     keys.push(key);
-    labels.push(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]);
+    labels.push(
+      ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]
+    );
   }
 
   const netByMonth = new Map<string, number>();
@@ -1091,23 +1055,20 @@ function buildSeriesFromMovements(
     outByMonth.set(k, 0);
   });
 
-
   for (const m of moves) {
     const rawDate = String(m.movement_date ?? m.date ?? "");
     if (!rawDate) continue;
     const dt = new Date(rawDate);
     if (Number.isNaN(dt.getTime())) continue;
     const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
-    if (!netByMonth.has(key)) continue; // outside range
+    if (!netByMonth.has(key)) continue;
 
     const type = normMoveType(m.type);
     const qty = Number(m.qty ?? 0);
     const product = m.product as { id?: string; price?: number } | undefined;
     const pid = String(m.product_id ?? product?.id ?? "");
     const price =
-      Number(product?.price) ||
-      (pid ? priceByProduct.get(pid) : undefined) ||
-      0;
+      Number(product?.price) || (pid ? priceByProduct.get(pid) : undefined) || 0;
     const value = qty * (price || 0);
 
     if (type === "IN") {
@@ -1117,25 +1078,19 @@ function buildSeriesFromMovements(
       outByMonth.set(key, (outByMonth.get(key) || 0) + 1);
       netByMonth.set(key, (netByMonth.get(key) || 0) - (price ? value : Math.abs(qty)));
     } else if (type === "ADJUSTMENT") {
-      // signed qty
       netByMonth.set(key, (netByMonth.get(key) || 0) + (price ? qty * price : qty));
     }
   }
 
-  // Running total ending at current inventory value (walk backward from end)
   const nets = keys.map((k) => netByMonth.get(k) || 0);
   const trend: number[] = new Array(keys.length).fill(0);
   const totalNet = nets.reduce((a, b) => a + b, 0);
-  // Start so that final point ≈ current inv value when available
-  let running =
-    invValueFallback > 0
-      ? invValueFallback - totalNet
-      : 0;
+  let running = invValueFallback > 0 ? invValueFallback - totalNet : 0;
   for (let i = 0; i < keys.length; i++) {
     running += nets[i];
     trend[i] = Math.max(0, Math.round(running));
   }
-  // If everything was zero, mild synthetic only when no moves at all
+
   const hasMoves = moves.some((m) => {
     const rawDate = String(m.movement_date ?? m.date ?? "");
     if (!rawDate) return false;
@@ -1144,6 +1099,7 @@ function buildSeriesFromMovements(
     const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
     return netByMonth.has(key);
   });
+
   if (!hasMoves && invValueFallback > 0) {
     const factors =
       range === "3m"
@@ -1175,9 +1131,17 @@ function Dashboard() {
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
 
+  /* ── TanStack Query (Phase 4) ─────────────────────────────── */
+  const {
+    data: dash,
+    isLoading: dashLoading,
+    isFetching: dashFetching,
+    refetch: refetchDashboard,
+    dataUpdatedAt,
+  } = useDashboard({ range: trendRange, enabled: true });
+
   const boot = bootstrapDash();
   const [loading, setLoading] = useState(() => !boot);
-
 
   const [invValue, setInvValue] = useState(() => boot?.invValue ?? 0);
   const [lowStock, setLowStock] = useState(() => boot?.lowStock ?? 0);
@@ -1232,7 +1196,6 @@ function Dashboard() {
     () => (Array.isArray(boot?.activityFeed) ? boot!.activityFeed : [])
   );
 
-
   const fetchUserPermissions = useCallback(async () => {
     const finish = (list: string[]) => {
       setUserPermissions(list);
@@ -1244,11 +1207,6 @@ function Dashboard() {
       }
     };
 
-    /**
-     * RolePermissionController::forRole
-     * Returns string[] on success (may be empty = no perms).
-     * Returns null only on network/parse failure.
-     */
     const loadRolePerms = async (roleId: string): Promise<string[] | null> => {
       try {
         const { data: json } = await api.get(`/roles/${roleId}/permissions`);
@@ -1269,18 +1227,10 @@ function Dashboard() {
     };
 
     let roleId: string | null = null;
-    /** Once we know the role's permission list from API, never fall back to "*" */
     let rolePermsResolved = false;
 
-    // 1) role_id first — authoritative source for matrix grants
     try {
-      const rawKeys = [
-        "user",
-        "auth_user",
-        "authUser",
-        "currentUser",
-        "sa-user",
-      ];
+      const rawKeys = ["user", "auth_user", "authUser", "currentUser", "sa-user"];
       for (const key of rawKeys) {
         const raw = localStorage.getItem(key);
         if (!raw) continue;
@@ -1302,7 +1252,6 @@ function Dashboard() {
         null;
     }
 
-    // 2) Shared /me cache — only for role_id, not for granting "*"
     try {
       const g = globalThis as unknown as {
         __saMeCache?: { entry: { data: unknown; at: number } | null };
@@ -1322,17 +1271,15 @@ function Dashboard() {
       /* ignore */
     }
 
-    // 3) Authoritative: GET /roles/{id}/permissions (same as Roles matrix)
     if (roleId) {
       const names = await loadRolePerms(roleId);
       if (names !== null) {
         rolePermsResolved = true;
-        finish(names); // may be [] → no dashboard access
+        finish(names);
         return;
       }
     }
 
-    // 4) Auth /me — extract perms or role_id then forRole
     for (const path of ["/me", "/user"]) {
       try {
         const { data: json } = await api.get(path);
@@ -1369,7 +1316,6 @@ function Dashboard() {
       }
     }
 
-    // 5) localStorage permission arrays
     try {
       for (const key of ["permissions", "user_permissions", "auth_permissions"]) {
         const raw = localStorage.getItem(key);
@@ -1381,7 +1327,6 @@ function Dashboard() {
             parsed.every((x: unknown) => typeof x === "string") &&
             parsed.length > 0
           ) {
-            // Skip sole "*" only when role was already resolved empty
             if (rolePermsResolved && parsed.length === 1 && parsed[0] === "*") continue;
             finish(parsed as string[]);
             return;
@@ -1394,11 +1339,8 @@ function Dashboard() {
       /* ignore */
     }
 
-    // 6) If role resolved to a real list (even empty), keep it — already finished above.
-    //    Unknown session: allow UI so charts still work; Sidebar/route guards still apply.
-    //    Use a soft allow for dashboard-only so data is visible while RBAC is configured.
     if (!rolePermsResolved) {
-      finish(["dashboard.view"]); // minimal default until role matrix is wired
+      finish(["dashboard.view"]);
     } else {
       finish([]);
     }
@@ -1406,7 +1348,6 @@ function Dashboard() {
 
   useEffect(() => {
     fetchUserPermissions();
-    // Roles.tsx dispatches this after permission sync so nav + dashboard re-check access
     const onRefresh = () => {
       try {
         for (const key of ["permissions", "user_permissions", "auth_permissions"]) {
@@ -1423,6 +1364,9 @@ function Dashboard() {
       } catch {
         /* ignore */
       }
+      useEffect(() => {
+    schedulePrefetch(800);
+  }, []);
       setPermsLoaded(false);
       setUserPermissions([]);
       fetchUserPermissions();
@@ -1431,10 +1375,6 @@ function Dashboard() {
     return () => window.removeEventListener("sa-permissions-refresh", onRefresh);
   }, [fetchUserPermissions]);
 
-  /**
-   * Until permissions load, allow internal links (avoids flash of locked UI).
-   * After load, enforce PATH_VIEW — including Dashboard itself (dashboard.view).
-   */
   const canViewPath = useCallback(
     (path: string) => !permsLoaded || canPath(userPermissions, path),
     [userPermissions, permsLoaded]
@@ -1452,12 +1392,10 @@ function Dashboard() {
     [canViewPath, navigate]
   );
 
-  /** Movements only — reuses Phase 1 inventory stats (no second /stats or /inventories×200). */
   const enrichChartsFromMovements = useCallback(async (range: string, invValFallback = 0) => {
     try {
       const movRes = await api.get("/stock-movements", { params: { per_page: 60 } }).then((r) => r.data);
       const moves = (Array.isArray(movRes) ? movRes : movRes?.data ?? []) as Record<string, unknown>[];
-      // Prices optional: series still builds from qty + current inventory value
       const priceByProduct = new Map<string, number>();
       const series = buildSeriesFromMovements(moves, priceByProduct, range, invValFallback);
       setServerTrend(series.trend);
@@ -1523,264 +1461,122 @@ function Dashboard() {
     }
   }, []);
 
-  /**
-   * Phase 1: 3 KPI stats (fast paint).
-   * Phase 2: secondary lists/ops in small batches (no 14-way stampede).
-   */
-  const loadLegacy = useCallback(async (onKpisReady?: () => void) => {
-    // ── Phase 1: KPI strip ──────────────────────────────────────────
-    const kpi = await Promise.allSettled([
-      api.get("/inventories/stats").then((r) => r.data),
-      api.get("/sales-orders/stats").then((r) => r.data),
-      api.get("/purchase-orders/stats").then((r) => r.data),
-    ]);
+  /* Phase 4: TanStack Query → local UI state */
+  useEffect(() => {
+    if (!dash) return;
 
-    if (kpi[0].status === "fulfilled") {
-      const raw = kpi[0].value as Record<string, unknown>;
-      const j = (raw?.data && typeof raw.data === "object" && !Array.isArray(raw.data)
-        ? (raw.data as Record<string, number>)
-        : raw) as Record<string, number>;
-      setInvValue(Number(j.inventory_value ?? j.total_value ?? 0));
-      setLowStock(Number(j.low_stock ?? j.low ?? 0));
-      setOutStock(Number(j.out_of_stock ?? j.out ?? 0));
-      setSkuCount(Number(j.total_products ?? j.products ?? j.count ?? 0));
+    setInvValue(dash.invValue);
+    setLowStock(dash.lowStock);
+    setOutStock(dash.outStock);
+    setSkuCount(dash.skuCount);
+    setSoPending(dash.soPending);
+    setSoAll(dash.soAll);
+    setSoDone(dash.soDone);
+    setPoPending(dash.poPending);
+    setPoAll(dash.poAll);
+    setSoValue(dash.soValue);
+    setPoValue(dash.poValue);
+
+    setWarehouses(
+      (dash.warehouses ?? []).map((w) => ({
+        id: String(w.id),
+        code: w.code,
+        name: String(w.name ?? w.code ?? ""),
+        utilized: w.utilized,
+        capacity: w.capacity,
+        location: w.location,
+      }))
+    );
+
+    setRecentOrders(
+      (dash.recentOrders ?? []).map((o) => ({
+        id: o.id,
+        kind: o.kind,
+        party: o.party,
+        total: o.total,
+        status: o.status,
+        date: o.date,
+      }))
+    );
+
+    setAlerts(
+      (dash.alerts ?? []).map((a) => ({
+        type:
+          a.type === "danger"
+            ? ("danger" as const)
+            : a.type === "warning"
+              ? ("warning" as const)
+              : ("success" as const),
+        title: a.title,
+        msg: a.msg,
+        path: a.path || "/products",
+        sku: a.sku,
+      }))
+    );
+
+    setCategories(dash.categories ?? []);
+    setPipeline(dash.pipeline ?? []);
+    setMoveStats((dash.moveStats ?? {}) as OpsStats);
+    setCycleStats((dash.cycleStats ?? {}) as OpsStats);
+    setReceiptStats((dash.receiptStats ?? {}) as OpsStats);
+    setReturnStats((dash.returnStats ?? {}) as OpsStats);
+
+    if (dash.serverTrend?.length) setServerTrend(dash.serverTrend);
+    if (dash.serverTrendLabels?.length) setServerTrendLabels(dash.serverTrendLabels);
+    if (dash.serverStockIn?.length) setServerStockIn(dash.serverStockIn);
+    if (dash.serverStockOut?.length) setServerStockOut(dash.serverStockOut);
+
+    setUsingUnified(!!dash.usingUnified);
+    setLastUpdated(dataUpdatedAt ? new Date(dataUpdatedAt) : new Date());
+    setLoading(false);
+
+    if (!dash.serverTrend?.length || !dash.usingUnified) {
+      void enrichChartsFromMovements(trendRange, dash.invValue).catch(() => undefined);
     }
-    if (kpi[1].status === "fulfilled") {
-      const j = kpi[1].value as Record<string, number>;
-      setSoAll(Number(j.all ?? 0));
-      setSoPending(Number(j.pending ?? 0));
-      setSoDone(Number(j.done ?? 0));
-      setSoValue(Number(j.total_value ?? 0));
-    }
-    if (kpi[2].status === "fulfilled") {
-      const j = kpi[2].value as Record<string, number>;
-      setPoAll(Number(j.all ?? j.total ?? 0));
-      setPoPending(Number(j.pending ?? 0));
-      setPoValue(Number(j.total_value ?? 0));
-    }
-    setUsingUnified(false);
-    onKpisReady?.();
+  }, [dash, dataUpdatedAt, trendRange, enrichChartsFromMovements]);
 
-    // ── Phase 2a: warehouses + recent orders (2–3 calls) ────────────
-    const batchA = await Promise.allSettled([
-      api.get("/warehouses", { params: { per_page: 30, all: 1 } }).then((r) => r.data),
-      api.get("/sales-orders", { params: { per_page: 5, sort: "order_date", dir: "desc" } }).then((r) => r.data),
-      api.get("/purchase-orders", { params: { per_page: 3, sort: "order_date", dir: "desc" } }).then((r) => r.data),
-    ]);
-
-    if (batchA[0].status === "fulfilled") {
-      const j = batchA[0].value as unknown;
-      let list: Warehouse[] = [];
-      if (Array.isArray(j)) {
-        list = j as Warehouse[];
-      } else if (j && typeof j === "object") {
-        const d = (j as { data?: unknown }).data;
-        if (Array.isArray(d)) list = d as Warehouse[];
-        else if (d && typeof d === "object" && Array.isArray((d as { data?: unknown }).data)) {
-          list = (d as { data: Warehouse[] }).data;
-        }
-      }
-      setWarehouses(list);
-    }
-
-    const soList =
-      batchA[1].status === "fulfilled"
-        ? Array.isArray(batchA[1].value)
-          ? batchA[1].value
-          : (batchA[1].value as { data?: unknown[] }).data ?? []
-        : [];
-    const poList =
-      batchA[2].status === "fulfilled"
-        ? Array.isArray(batchA[2].value)
-          ? batchA[2].value
-          : (batchA[2].value as { data?: unknown[] }).data ?? []
-        : [];
-
-    setRecentOrders([
-      ...(soList as Record<string, unknown>[]).slice(0, 4).map((o) => ({
-        id: String(o.so_number ?? o.id ?? "SO"),
-        kind: "SO" as const,
-        party: String((o.customer as { name?: string })?.name ?? "—"),
-        total: Number(o.total ?? 0),
-        status: String(o.status ?? "pending"),
-        date: String(o.order_date ?? "").slice(0, 10),
-      })),
-      ...(poList as Record<string, unknown>[]).slice(0, 2).map((o) => ({
-        id: String(o.po_number ?? o.id ?? "PO"),
-        kind: "PO" as const,
-        party: String((o.supplier as { name?: string })?.name ?? "—"),
-        total: Number(o.total ?? 0),
-        status: String(o.status ?? "pending"),
-        date: String(o.order_date ?? "").slice(0, 10),
-      })),
-    ]);
-
-    // ── Phase 2b: alerts + categories + ops stats ───────────────────
-    const batchB = await Promise.allSettled([
-      api.get("/inventories", { params: { per_page: 8, status: "low-stock" } }).then((r) => r.data),
-      api.get("/inventories", { params: { per_page: 5, status: "out-of-stock" } }).then((r) => r.data),
-      api.get("/categories", { params: { per_page: 12 } }).then((r) => r.data),
-      api.get("/cycle-counts/stats").then((r) => r.data).catch(() => null),
-      api.get("/goods-receipts/stats").then((r) => r.data).catch(() => null),
-      api.get("/returns/stats").then((r) => r.data).catch(() => null),
-    ]);
-
-    const lowList =
-      batchB[0].status === "fulfilled"
-        ? Array.isArray(batchB[0].value)
-          ? batchB[0].value
-          : (batchB[0].value as { data?: unknown[] }).data ?? []
-        : [];
-    const oosList =
-      batchB[1].status === "fulfilled"
-        ? Array.isArray(batchB[1].value)
-          ? batchB[1].value
-          : (batchB[1].value as { data?: unknown[] }).data ?? []
-        : [];
-
-    const nextAlerts: AlertItem[] = [];
-    for (const p of oosList as Record<string, unknown>[]) {
-      nextAlerts.push({
-        type: "danger",
-        title: "Out of stock",
-        msg: `${String(p.name ?? p.sku ?? "SKU")} · 0 units`,
-        path: "/products",
-        sku: p.sku != null ? String(p.sku) : undefined,
-      });
-    }
-    for (const p of lowList as Record<string, unknown>[]) {
-      nextAlerts.push({
-        type: "warning",
-        title: "Low stock",
-        msg: `${String(p.name ?? p.sku ?? "SKU")} · ${p.qty ?? "?"} remaining`,
-        path: "/products",
-        sku: p.sku != null ? String(p.sku) : undefined,
-      });
-    }
-    setAlerts(nextAlerts);
-
-    if (batchB[2].status === "fulfilled") {
-      const catsRaw = batchB[2].value;
-      const catArr = Array.isArray(catsRaw)
-        ? catsRaw
-        : (catsRaw as { data?: unknown[] }).data ?? [];
-      setCategories(
-        (catArr as Record<string, unknown>[]).slice(0, 6).map((c, i) => ({
-          label: String(c.name ?? c.label ?? "—"),
-          value: Number(c.product_count ?? c.count ?? c.value ?? 1),
-          color: CAT_COLORS[i % CAT_COLORS.length],
-        }))
-      );
-    }
-
-    if (batchB[3].status === "fulfilled" && batchB[3].value) {
-      setCycleStats(batchB[3].value as OpsStats);
-    }
-    if (batchB[4].status === "fulfilled" && batchB[4].value) {
-      setReceiptStats(batchB[4].value as OpsStats);
-    }
-    if (batchB[5].status === "fulfilled" && batchB[5].value) {
-      setReturnStats(batchB[5].value as OpsStats);
-    }
-  }, []);
-
-  const saveSnapshot = useCallback(
-    (extra?: Partial<DashSnapshot>) => {
-      const snap: DashSnapshot = {
-        at: Date.now(),
-        invValue,
-        lowStock,
-        outStock,
-        skuCount,
-        soPending,
-        soAll,
-        soDone,
-        poPending,
-        poAll,
-        soValue,
-        poValue,
-        warehouses: Array.isArray(warehouses) ? warehouses : [],
-        recentOrders: Array.isArray(recentOrders) ? recentOrders : [],
-        alerts: Array.isArray(alerts) ? alerts : [],
-        categories: Array.isArray(categories) ? categories : [],
-        moveStats,
-        cycleStats,
-        receiptStats,
-        returnStats,
-        recentMoves: Array.isArray(recentMoves) ? recentMoves : [],
-        activityFeed: Array.isArray(activityFeed) ? activityFeed : [],
-        serverTrend,
-        serverTrendLabels,
-        serverStockIn,
-        serverStockOut,
-        trendRange,
-        ...extra,
-      };
-      dashStore().entry = snap;
-      writeDashSS(snap);
-    },
-    [
-      invValue, lowStock, outStock, skuCount,
-      soPending, soAll, soDone, poPending, poAll, soValue, poValue,
-      warehouses, recentOrders, alerts, categories,
-      moveStats, cycleStats, receiptStats, returnStats,
-      recentMoves, activityFeed,
-      serverTrend, serverTrendLabels, serverStockIn, serverStockOut,
-      trendRange,
-    ]
-  );
-
-  const load = useCallback(async (opts?: { force?: boolean }) => {
-    const force = !!opts?.force;
-    const store = dashStore();
-    const cached = store.entry ?? readDashSS();
-
-    // Navigate back within soft TTL → show cache, soft-revalidate in background
-    if (!force && isDashFresh(cached, DASH_SOFT_TTL_MS) && cached.trendRange === trendRange) {
+  useEffect(() => {
+    if (dash) {
       setLoading(false);
-      setLastUpdated(new Date(cached.at));
-      // background refresh (single-flight)
-      if (!store.inflight) {
-        store.inflight = (async () => {
-          try {
-            await loadLegacy();
-            await enrichChartsFromMovements(trendRange, cached.invValue).catch(() => undefined);
-          } finally {
-            store.inflight = null;
-          }
-        })();
-      }
       return;
     }
+    if (dashLoading) setLoading(true);
+  }, [dash, dashLoading]);
 
-    if (store.inflight && !force) {
-      await store.inflight;
-      return;
-    }
-
-    setLoading(!(cached && isDashFresh(cached, DASH_HARD_TTL_MS)));
-    store.inflight = (async () => {
-      try {
-        await loadLegacy(() => {
-          setLoading(false);
-          setLastUpdated(new Date());
-        });
-        setLastUpdated(new Date());
-        await enrichChartsFromMovements(trendRange, invValue).catch(() => undefined);
-      } catch {
-        /* partial ok */
-      } finally {
-        setLoading(false);
-        store.inflight = null;
-      }
-    })();
-    await store.inflight;
-  }, [loadLegacy, trendRange, enrichChartsFromMovements, invValue]);
-
-  // Persist snapshot whenever KPI / list state settles
+  /* Persist snapshot for instant re-entry paint */
   useEffect(() => {
     if (invValue === 0 && skuCount === 0 && soAll === 0 && !warehouses.length) return;
-    saveSnapshot();
+    const snap: DashSnapshot = {
+      at: Date.now(),
+      invValue,
+      lowStock,
+      outStock,
+      skuCount,
+      soPending,
+      soAll,
+      soDone,
+      poPending,
+      poAll,
+      soValue,
+      poValue,
+      warehouses: Array.isArray(warehouses) ? warehouses : [],
+      recentOrders: Array.isArray(recentOrders) ? recentOrders : [],
+      alerts: Array.isArray(alerts) ? alerts : [],
+      categories: Array.isArray(categories) ? categories : [],
+      moveStats,
+      cycleStats,
+      receiptStats,
+      returnStats,
+      recentMoves: Array.isArray(recentMoves) ? recentMoves : [],
+      activityFeed: Array.isArray(activityFeed) ? activityFeed : [],
+      serverTrend,
+      serverTrendLabels,
+      serverStockIn,
+      serverStockOut,
+      trendRange,
+    };
+    dashStore().entry = snap;
+    writeDashSS(snap);
   }, [
     invValue, lowStock, outStock, skuCount,
     soPending, soAll, soDone, poPending, poAll, soValue, poValue,
@@ -1788,14 +1584,8 @@ function Dashboard() {
     moveStats, cycleStats, receiptStats, returnStats,
     recentMoves, activityFeed,
     serverTrend, serverTrendLabels, serverStockIn, serverStockOut,
-    trendRange, saveSnapshot,
+    trendRange,
   ]);
-
-  useEffect(() => {
-    if (permsLoaded && !canPath(userPermissions, "/dashboard")) return;
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trendRange, permsLoaded]);
 
   useEffect(() => {
     if (usingUnified && pipeline.length) return;
@@ -1825,10 +1615,8 @@ function Dashboard() {
 
   const invTrend = useMemo(() => {
     if (serverTrend && serverTrend.length) return serverTrend;
-    // Placeholder only — rolling window, never pads months after "now"
     const base = invValue || 1000;
     const len = trendRange === "3m" ? 3 : trendRange === "1y" ? 12 : 7;
-    // Gentle rise with small waves (demo only when no movement data)
     return Array.from({ length: len }, (_, i) => {
       const t = (i + 1) / len;
       const wave = Math.sin(i * 0.9) * 0.03;
@@ -1837,9 +1625,7 @@ function Dashboard() {
   }, [invValue, trendRange, serverTrend]);
 
   const trendLabels = useMemo(() => {
-    // Prefer labels built from real movement months (no future months)
     if (serverTrendLabels && serverTrendLabels.length) return serverTrendLabels;
-    // Fallback: rolling window ending this month (not calendar Jan–Dec)
     const now = new Date();
     const n = trendRange === "3m" ? 3 : trendRange === "1y" ? 12 : 7;
     const labels: string[] = [];
@@ -1856,7 +1642,6 @@ function Dashboard() {
 
   const stockIn = useMemo(() => {
     if (serverStockIn && serverStockIn.length) return serverStockIn;
-    // Placeholder only when no movement series — small counts, NOT scaled from ₱ value
     return invTrend.map((_, i) => 4 + (i % 3));
   }, [invTrend, serverStockIn]);
 
@@ -1865,7 +1650,6 @@ function Dashboard() {
     return invTrend.map((_, i) => 3 + (i % 2));
   }, [invTrend, serverStockOut]);
 
-  /** Recharts row series */
   const invTrendSeries = useMemo(
     () =>
       trendLabels.map((period, i) => ({
@@ -1885,7 +1669,6 @@ function Dashboard() {
     [trendLabels, stockIn, stockOut]
   );
 
-  /** Trend period delta (last vs first) for chart header */
   const trendDelta = useMemo(() => {
     if (invTrend.length < 2) return null;
     const first = invTrend[0] || 0;
@@ -1901,9 +1684,7 @@ function Dashboard() {
     return { inSum, outSum, net: inSum - outSum };
   }, [stockIn, stockOut]);
 
-  /** True while first load has not produced any KPI payload yet */
   const kpiPending = loading && invValue === 0 && skuCount === 0 && soPending === 0 && poPending === 0;
-
 
   const greeting = useMemo(() => {
     const h = new Date().getHours();
@@ -1933,7 +1714,6 @@ function Dashboard() {
     return Math.max(0, Math.round(s));
   }, [skuCount, outStock, lowStock, avgUtil]);
 
-  // Closed page — no redirect; stay on /dashboard with locked UI
   if (permsLoaded && !canAccessDashboard) {
     return (
       <div className="dashboard">
@@ -1983,7 +1763,6 @@ function Dashboard() {
     );
   }
 
-  // Full-page loader — do not paint KPI/chart shell until first fetch finishes
   if (loading && invValue === 0 && skuCount === 0 && !lastUpdated) {
     return (
       <div className="dashboard">
@@ -2070,8 +1849,15 @@ function Dashboard() {
                   <IconFileText /> Reports
                 </button>
               )}
-              <button className="btn btn-secondary" type="button" onClick={() => void load({ force: true })}>
-                Refresh
+              <button
+                className="btn btn-secondary"
+                type="button"
+                disabled={dashFetching}
+                onClick={() => {
+                  void refetchDashboard();
+                }}
+              >
+                {dashFetching ? "Refreshing…" : "Refresh"}
               </button>
             </div>
           </div>
@@ -2183,7 +1969,6 @@ function Dashboard() {
             </div>
           </div>
 
-          {/* Ops strip — gated by the same view perms as Inventory / StockMovements */}
           <div className="dash-ops-strip">
             {canViewPath("/stock-movements") && (
               <div className="dash-ops-card" onClick={() => go("/stock-movements")}>
@@ -2442,7 +2227,6 @@ function Dashboard() {
             )}
           </div>
 
-          {/* Bottom row: Recent orders | Stock alerts | Live activity — equal height */}
           <div
             className="dash-bottom"
             style={{
@@ -2452,7 +2236,6 @@ function Dashboard() {
               alignItems: "stretch",
             }}
           >
-            {/* Recent orders */}
             <div
               className="card dash-orders-card"
               style={{
@@ -2522,7 +2305,6 @@ function Dashboard() {
               </div>
             </div>
 
-            {/* Stock alerts */}
             <div
               className="card"
               style={{
@@ -2583,7 +2365,6 @@ function Dashboard() {
               </div>
             </div>
 
-            {/* Live activity — same row & height as orders + alerts */}
             <div
               className="card"
               style={{

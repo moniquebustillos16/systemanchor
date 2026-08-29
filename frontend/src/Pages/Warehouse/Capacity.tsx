@@ -2,12 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useWarehouses } from "../../hooks/useWarehouses";
+import { invalidateWarehouses } from "../../lib/invalidate";
 import "../css/Warehouse.css";
 
-
-
-
-/* ── Role permissions ─────────────────────────────────────── */
+/* ── Types ─────────────────────────────────────────────────── */
 type AuthPayload = {
   permissions?: string[];
   data?: { permissions?: string[]; user?: { permissions?: string[] } };
@@ -18,48 +17,6 @@ type AuthPayload = {
   };
   role_id?: string;
 };
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
-  return needed.some((n) => perms.includes(n));
-}
-
-const svg = {
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
-
-const IconRefresh = () => (
-  <svg {...svg} width="16" height="16">
-    <polyline points="23 4 23 10 17 10" />
-    <polyline points="1 20 1 14 7 14" />
-    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-  </svg>
-);
-const IconWarehouse = () => (
-  <svg {...svg} width="16" height="16">
-    <path d="M3 21h18" />
-    <path d="M5 21V7l7-4 7 4v14" />
-    <path d="M9 21v-6h6v6" />
-  </svg>
-);
 
 type Warehouse = {
   id: string | number;
@@ -86,6 +43,42 @@ type CapRow = {
   pct: number;
 };
 
+type ToastState = {
+  type: "success" | "error" | "info";
+  title: string;
+  msg: string;
+};
+
+/* ── Permission helpers ────────────────────────────────────── */
+function extractPermissions(json: unknown): string[] {
+  if (!json || typeof json !== "object") return [];
+  const j = json as AuthPayload;
+
+  if (Array.isArray(j.permissions)) return j.permissions.map(String);
+  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
+  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
+
+  const rolePerms = j.user?.role?.permissions;
+  if (Array.isArray(rolePerms)) {
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
+  }
+
+  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
+  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
+
+  return [];
+}
+
+function can(perms: string[], ...needed: string[]): boolean {
+  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) {
+    return true;
+  }
+  return needed.some((n) => perms.includes(n));
+}
+
+/* ── Domain helpers ────────────────────────────────────────── */
 function toNumber(value: number | string | undefined | null): number {
   if (typeof value === "number" && !Number.isNaN(value)) return value;
   if (typeof value === "string") {
@@ -121,29 +114,65 @@ function fillClass(pct: number): "high" | "mid" | "ok" {
   return "ok";
 }
 
-function getItems(json: unknown): any[] {
-  if (Array.isArray(json)) return json;
-  const o = json as Record<string, unknown>;
-  if (Array.isArray(o?.data)) return o.data as any[];
-  return [];
-}
+/* ── Icons ─────────────────────────────────────────────────── */
+const svg = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.8,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
 
+const IconRefresh = () => (
+  <svg {...svg} width="16" height="16">
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </svg>
+);
+
+const IconWarehouse = () => (
+  <svg {...svg} width="16" height="16">
+    <path d="M3 21h18" />
+    <path d="M5 21V7l7-4 7 4v14" />
+    <path d="M9 21v-6h6v6" />
+  </svg>
+);
+
+/* ── Component ─────────────────────────────────────────────── */
 function Capacity() {
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<"pct" | "code" | "capacity">("pct");
-  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
 
-  const showToast = (type: string, title: string, msg: string) => {
-    setToast({ type, title, msg });
-    setTimeout(() => setToast(null), 2800);
-  };
+  const {
+    rows: whRows,
+    isLoading: whLoading,
+    isError: whIsError,
+    error: whError,
+    refetch: refetchWarehouses,
+  } = useWarehouses({ enabled: true });
 
+  const warehouses = (whRows ?? []) as Warehouse[];
+  const loading = whLoading && warehouses.length === 0;
+
+  const showToast = useCallback(
+    (type: ToastState["type"], title: string, msg: string) => {
+      setToast({ type, title, msg });
+      window.setTimeout(() => setToast(null), 2800);
+    },
+    []
+  );
+
+  /* ── Permissions ─────────────────────────────────────────── */
   const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => { setUserPermissions(list); setPermsLoaded(true); };
+    const finish = (list: string[]) => {
+      setUserPermissions(list);
+      setPermsLoaded(true);
+    };
+
     try {
       for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
         const raw = localStorage.getItem(key);
@@ -155,7 +184,10 @@ function Capacity() {
             return;
           }
           const list = extractPermissions(parsed);
-          if (list.length > 0) { finish(list); return; }
+          if (list.length > 0) {
+            finish(list);
+            return;
+          }
           const u = parsed?.data ?? parsed?.user ?? parsed;
           const rid = u?.role_id || u?.role?.id;
           if (rid) {
@@ -163,48 +195,48 @@ function Capacity() {
               const { data: json } = await api.get(`/roles/${rid}/permissions`);
               const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
               if (Array.isArray(perms)) {
-                finish(perms.map((p: { name?: string } | string) => typeof p === "string" ? p : p?.name).filter(Boolean) as string[]);
+                finish(
+                  perms
+                    .map((p: { name?: string } | string) =>
+                      typeof p === "string" ? p : p?.name
+                    )
+                    .filter(Boolean) as string[]
+                );
                 return;
               }
-            } catch { /* */ }
+            } catch {
+              /* ignore */
+            }
           }
-        } catch { /* */ }
+        } catch {
+          /* ignore */
+        }
       }
-    } catch { /* */ }
+    } catch {
+      /* ignore */
+    }
+
     try {
       const { data: json } = await api.get("/me");
       const list = extractPermissions(json);
-      if (list.length > 0) { finish(list); return; }
-    } catch { /* */ }
-    finish(["*"]);
-  }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
-  const canView = can(userPermissions, "capacity.view", "warehouses.view");
-  const canCreate = can(userPermissions, "capacity.create", "warehouses.create");
-  const canUpdate = can(userPermissions, "capacity.update", "warehouses.update");
-
-  const loadWarehouses = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const { data: json } = await api.get("/warehouses", { params: { per_page: 200 } });
-      setWarehouses(getItems(json));
-    } catch (e: any) {
-      setError(
-        e?.response?.data?.message ||
-        e?.message ||
-        "Failed to load warehouses"
-      );
-      setWarehouses([]);
-    } finally {
-      setLoading(false);
+      if (list.length > 0) {
+        finish(list);
+        return;
+      }
+    } catch {
+      /* ignore */
     }
+
+    finish(["*"]);
   }, []);
 
   useEffect(() => {
-    loadWarehouses();
-  }, [loadWarehouses]);
+    void fetchUserPermissions();
+  }, [fetchUserPermissions]);
 
+  const canView = can(userPermissions, "capacity.view", "warehouses.view");
+
+  /* ── Derived rows & stats ────────────────────────────────── */
   const list: CapRow[] = useMemo(() => {
     return warehouses.map((w) => {
       const capacity = toNumber(w.capacity);
@@ -226,7 +258,10 @@ function Capacity() {
     const rows = [...list];
     if (sortBy === "pct") rows.sort((a, b) => b.pct - a.pct);
     else if (sortBy === "capacity") rows.sort((a, b) => b.capacity - a.capacity);
-    else rows.sort((a, b) => a.code.localeCompare(b.code));
+    else
+      rows.sort((a, b) =>
+        a.code.localeCompare(b.code, undefined, { numeric: true, sensitivity: "base" })
+      );
     return rows;
   }, [list, sortBy]);
 
@@ -237,9 +272,7 @@ function Capacity() {
     }
     const totalCap = list.reduce((s, w) => s + w.capacity, 0);
     const totalUsed = list.reduce((s, w) => s + w.used, 0);
-    // Capacity-weighted average utilization
-    const avg =
-      totalCap > 0 ? Math.round((totalUsed / totalCap) * 1000) / 10 : 0;
+    const avg = totalCap > 0 ? Math.round((totalUsed / totalCap) * 1000) / 10 : 0;
     const high = list.filter((w) => w.pct >= 70).length;
     return {
       sites: count,
@@ -255,6 +288,13 @@ function Capacity() {
     [list]
   );
 
+  const handleRefresh = () => {
+    void invalidateWarehouses();
+    void refetchWarehouses();
+    showToast("success", "Refreshed", "Capacity data reloaded.");
+  };
+
+  /* ── Render ──────────────────────────────────────────────── */
   return (
     <div className="warehouse-page">
       <Sidebar />
@@ -262,13 +302,18 @@ function Capacity() {
         <Topbar />
         <main className="content">
           {permsLoaded && !canView && (
-            <div className="card" style={{ padding: 40, textAlign: "center", marginBottom: 16 }}>
+            <div
+              className="card"
+              style={{ padding: 40, textAlign: "center", marginBottom: 16 }}
+            >
               <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
               <p className="text-muted" style={{ margin: 0 }}>
-                You do not have permission to view this page. Ask an admin to grant <code>capacity.view</code>.
+                You do not have permission to view this page. Ask an admin to grant{" "}
+                <code>capacity.view</code>.
               </p>
             </div>
           )}
+
           <div className="page-header">
             <div>
               <h1 className="page-title">Warehouse Capacity</h1>
@@ -280,18 +325,15 @@ function Capacity() {
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => {
-                  loadWarehouses();
-                  showToast("success", "Refreshed", "Capacity data reloaded.");
-                }}
-                disabled={loading}
+                onClick={handleRefresh}
+                disabled={loading || whLoading}
               >
                 <IconRefresh /> Refresh
               </button>
             </div>
           </div>
 
-          {error && (
+          {whIsError && (
             <div
               className="card"
               style={{
@@ -302,7 +344,9 @@ function Capacity() {
               }}
             >
               <strong style={{ color: "var(--sa-clay)" }}>API error:</strong>{" "}
-              <span>{error}</span>
+              <span>
+                {(whError as Error)?.message || "Failed to load warehouses"}
+              </span>
             </div>
           )}
 
@@ -318,11 +362,7 @@ function Capacity() {
               <div className="stat-label">Avg Utilization</div>
               <div
                 className={`stat-value${
-                  stats.avg >= 70
-                    ? " danger"
-                    : stats.avg >= 50
-                      ? " warning"
-                      : ""
+                  stats.avg >= 70 ? " danger" : stats.avg >= 50 ? " warning" : ""
                 }`}
               >
                 {loading ? "…" : `${stats.avg}%`}
@@ -389,10 +429,7 @@ function Capacity() {
                               <div
                                 className={`bar bar-${fillClass(w.pct)}`}
                                 style={{
-                                  height: `${Math.max(
-                                    4,
-                                    (w.pct / maxPct) * 100
-                                  )}%`,
+                                  height: `${Math.max(4, (w.pct / maxPct) * 100)}%`,
                                 }}
                               />
                             </div>

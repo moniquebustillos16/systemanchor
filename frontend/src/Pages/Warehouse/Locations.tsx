@@ -2,12 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useWarehouses } from "../../hooks/useWarehouses";
+import { invalidateWarehouses } from "../../lib/invalidate";
 import "../css/Warehouse.css";
 
-
-
-
-/* ── Role permissions ─────────────────────────────────────── */
+/* ── Types ─────────────────────────────────────────────────── */
 type AuthPayload = {
   permissions?: string[];
   data?: { permissions?: string[]; user?: { permissions?: string[] } };
@@ -18,80 +17,6 @@ type AuthPayload = {
   };
   role_id?: string;
 };
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms.map((p) => (typeof p === "string" ? p : p?.name)).filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) return true;
-  return needed.some((n) => perms.includes(n));
-}
-
-const svg = {
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
-
-const IconSearch = () => (
-  <svg {...svg} width="16" height="16">
-    <circle cx="11" cy="11" r="8" />
-    <path d="M21 21l-4.35-4.35" />
-  </svg>
-);
-const IconPlus = () => (
-  <svg {...svg} width="16" height="16">
-    <path d="M12 5v14M5 12h14" />
-  </svg>
-);
-const IconEdit = () => (
-  <svg {...svg} width="15" height="15">
-    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 3z" />
-  </svg>
-);
-const IconTrash = () => (
-  <svg {...svg} width="15" height="15">
-    <polyline points="3 6 5 6 21 6" />
-    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-    <line x1="10" y1="11" x2="10" y2="17" />
-    <line x1="14" y1="11" x2="14" y2="17" />
-  </svg>
-);
-const IconRefresh = () => (
-  <svg {...svg} width="16" height="16">
-    <polyline points="23 4 23 10 17 10" />
-    <polyline points="1 20 1 14 7 14" />
-    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-  </svg>
-);
-const IconX = () => (
-  <svg {...svg} width="18" height="18">
-    <line x1="18" y1="6" x2="6" y2="18" />
-    <line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-/** Warehouse building */
-const IconWarehouse = () => (
-  <svg {...svg} width="16" height="16">
-    <path d="M3 21h18" />
-    <path d="M5 21V7l7-4 7 4v14" />
-    <path d="M9 21v-6h6v6" />
-    <path d="M9 9h.01M15 9h.01" />
-  </svg>
-);
 
 type Warehouse = {
   id: string | number;
@@ -119,9 +44,44 @@ type FormData = {
   status: boolean;
 };
 
+type ToastState = {
+  type: "success" | "error" | "info";
+  title: string;
+  msg: string;
+};
+
+/* ── Permission helpers ────────────────────────────────────── */
+function extractPermissions(json: unknown): string[] {
+  if (!json || typeof json !== "object") return [];
+  const j = json as AuthPayload;
+
+  if (Array.isArray(j.permissions)) return j.permissions.map(String);
+  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
+  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
+
+  const rolePerms = j.user?.role?.permissions;
+  if (Array.isArray(rolePerms)) {
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
+  }
+
+  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
+  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
+
+  return [];
+}
+
+function can(perms: string[], ...needed: string[]): boolean {
+  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) {
+    return true;
+  }
+  return needed.some((n) => perms.includes(n));
+}
+
+/* ── Domain helpers ────────────────────────────────────────── */
 function isActive(status: boolean | string | undefined | null): boolean {
-  if (status === true || status === "active" || status === "Active") return true;
-  return false;
+  return status === true || status === "active" || status === "Active";
 }
 
 function toNumber(value: number | string | undefined | null): number {
@@ -133,13 +93,7 @@ function toNumber(value: number | string | undefined | null): number {
   return 0;
 }
 
-function getItems(json: unknown): any[] {
-  if (Array.isArray(json)) return json;
-  const o = json as Record<string, unknown>;
-  if (Array.isArray(o?.data)) return o.data as any[];
-  return [];
-}
-
+/** Treats `utilized` as absolute units used (matches current UI & stats). */
 function utilizationPct(w: Warehouse): number | null {
   const cap = toNumber(w.capacity);
   if (cap <= 0) return null;
@@ -147,35 +101,114 @@ function utilizationPct(w: Warehouse): number | null {
   return Math.min(100, Math.round((used / cap) * 100));
 }
 
+const EMPTY_FORM: FormData = {
+  name: "",
+  code: "",
+  address: "",
+  manager: "",
+  capacity: "0",
+  status: true,
+};
+
+/* ── Icons ─────────────────────────────────────────────────── */
+const svg = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.8,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+const IconSearch = () => (
+  <svg {...svg} width="16" height="16">
+    <circle cx="11" cy="11" r="8" />
+    <path d="M21 21l-4.35-4.35" />
+  </svg>
+);
+
+const IconPlus = () => (
+  <svg {...svg} width="16" height="16">
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
+const IconEdit = () => (
+  <svg {...svg} width="15" height="15">
+    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 3z" />
+  </svg>
+);
+
+const IconTrash = () => (
+  <svg {...svg} width="15" height="15">
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <line x1="10" y1="11" x2="10" y2="17" />
+    <line x1="14" y1="11" x2="14" y2="17" />
+  </svg>
+);
+
+const IconRefresh = () => (
+  <svg {...svg} width="16" height="16">
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </svg>
+);
+
+const IconX = () => (
+  <svg {...svg} width="18" height="18">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
+
+const IconWarehouse = () => (
+  <svg {...svg} width="16" height="16">
+    <path d="M3 21h18" />
+    <path d="M5 21V7l7-4 7 4v14" />
+    <path d="M9 21v-6h6v6" />
+    <path d="M9 9h.01M15 9h.01" />
+  </svg>
+);
+
+/* ── Component ─────────────────────────────────────────────── */
 function Locations() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | number | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
-  const [formData, setFormData] = useState<FormData>({
-    name: "",
-    code: "",
-    address: "",
-    manager: "",
-    capacity: "0",
-    status: true,
-  });
+  const [formData, setFormData] = useState<FormData>(EMPTY_FORM);
 
-  const showToast = (type: string, title: string, msg: string) => {
+  const {
+    rows: whRows,
+    isLoading: whLoading,
+    isError: whIsError,
+    error: whError,
+    refetch: refetchWarehouses,
+  } = useWarehouses({ enabled: true });
+
+  const warehouses = (whRows ?? []) as Warehouse[];
+  const loading = whLoading && warehouses.length === 0;
+
+  /* ── Toast ───────────────────────────────────────────────── */
+  const showToast = useCallback((type: ToastState["type"], title: string, msg: string) => {
     setToast({ type, title, msg });
-    setTimeout(() => setToast(null), 3200);
-  };
+    window.setTimeout(() => setToast(null), 3200);
+  }, []);
 
+  /* ── Permissions ─────────────────────────────────────────── */
   const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => { setUserPermissions(list); setPermsLoaded(true); };
+    const finish = (list: string[]) => {
+      setUserPermissions(list);
+      setPermsLoaded(true);
+    };
+
     try {
       for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
         const raw = localStorage.getItem(key);
@@ -187,7 +220,10 @@ function Locations() {
             return;
           }
           const list = extractPermissions(parsed);
-          if (list.length > 0) { finish(list); return; }
+          if (list.length > 0) {
+            finish(list);
+            return;
+          }
           const u = parsed?.data ?? parsed?.user ?? parsed;
           const rid = u?.role_id || u?.role?.id;
           if (rid) {
@@ -195,119 +231,128 @@ function Locations() {
               const { data: json } = await api.get(`/roles/${rid}/permissions`);
               const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
               if (Array.isArray(perms)) {
-                finish(perms.map((p: { name?: string } | string) => typeof p === "string" ? p : p?.name).filter(Boolean) as string[]);
+                finish(
+                  perms
+                    .map((p: { name?: string } | string) =>
+                      typeof p === "string" ? p : p?.name
+                    )
+                    .filter(Boolean) as string[]
+                );
                 return;
               }
-            } catch { /* */ }
+            } catch {
+              /* ignore role lookup failure */
+            }
           }
-        } catch { /* */ }
+        } catch {
+          /* ignore bad localStorage JSON */
+        }
       }
-    } catch { /* */ }
+    } catch {
+      /* ignore */
+    }
+
     try {
       const { data: json } = await api.get("/me");
       const list = extractPermissions(json);
-      if (list.length > 0) { finish(list); return; }
-    } catch { /* */ }
-    finish(["*"]);
-  }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
-  const canView = can(userPermissions, "warehouses.view", "locations.view");
-  const canCreate = can(userPermissions, "warehouses.create", "locations.create");
-  const canUpdate = can(userPermissions, "warehouses.update", "locations.update");
-
-  const loadWarehouses = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const { data: json } = await api.get("/warehouses", { params: { per_page: 200 } });
-      const data = getItems(json);
-      setWarehouses(Array.isArray(data) ? data : []);
-    } catch (e: any) {
-      const message =
-        e?.response?.data?.message ||
-        e?.message ||
-        "Failed to load warehouses";
-      setError(String(message));
-      setWarehouses([]);
-    } finally {
-      setLoading(false);
+      if (list.length > 0) {
+        finish(list);
+        return;
+      }
+    } catch {
+      /* ignore */
     }
+
+    finish(["*"]);
   }, []);
 
   useEffect(() => {
-    loadWarehouses();
-  }, [loadWarehouses]);
+    void fetchUserPermissions();
+  }, [fetchUserPermissions]);
 
+  const canView = can(userPermissions, "warehouses.view", "locations.view");
+  const canCreate = can(userPermissions, "warehouses.create", "locations.create");
+  const canUpdate = can(userPermissions, "warehouses.update", "locations.update");
+  const canDelete = canUpdate; // same gate as backend soft-delete path
+
+  /* ── Stats & filtered list (client-side over full list) ──── */
   const stats = useMemo(() => {
     const list = Array.isArray(warehouses) ? warehouses : [];
     const totalCount = list.length;
     const activeCount = list.filter((w) => isActive(w.status)).length;
     const totalCapacity = list.reduce((sum, w) => sum + toNumber(w.capacity), 0);
     const totalUsed = list.reduce((sum, w) => sum + toNumber(w.utilized), 0);
-    const avgUtil =
-      totalCapacity > 0 ? Math.round((totalUsed / totalCapacity) * 100) : 0;
+    const avgUtil = totalCapacity > 0 ? Math.round((totalUsed / totalCapacity) * 100) : 0;
     return { totalCount, activeCount, totalCapacity, totalUsed, avgUtil };
   }, [warehouses]);
 
   const filtered = useMemo(() => {
     let list = [...warehouses];
+
     if (statusFilter === "active") list = list.filter((w) => isActive(w.status));
     if (statusFilter === "inactive") list = list.filter((w) => !isActive(w.status));
+
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((w) => {
-        const hay = [
-          w.name,
-          w.code,
-          w.location,
-          w.address,
-          w.manager,
-        ]
+        const hay = [w.name, w.code, w.location, w.address, w.manager]
           .filter(Boolean)
           .join(" ")
           .toLowerCase();
         return hay.includes(q);
       });
     }
+
     return list.sort((a, b) =>
-      String(a.code || "").localeCompare(String(b.code || ""))
+      String(a.code || "").localeCompare(String(b.code || ""), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      })
     );
   }, [warehouses, search, statusFilter]);
 
-  const openForm = (warehouse?: Warehouse) => {
-    if (warehouse ? !canUpdate : !canCreate) { showToast("error", "Permission denied", warehouse ? "You cannot update warehouses." : "You cannot create warehouses."); return; }
-    setFormError(null);
-    if (warehouse) {
-      setEditingId(warehouse.id);
-      setFormData({
-        name: warehouse.name || "",
-        code: warehouse.code || "",
-        address: warehouse.location || warehouse.address || "",
-        manager: warehouse.manager || "",
-        capacity: String(toNumber(warehouse.capacity)),
-        status: isActive(warehouse.status),
-      });
-    } else {
-      setEditingId(null);
-      setFormData({
-        name: "",
-        code: "",
-        address: "",
-        manager: "",
-        capacity: "0",
-        status: true,
-      });
-    }
-    setShowForm(true);
-  };
+  /* ── Form open / close ───────────────────────────────────── */
+  const openForm = useCallback(
+    (warehouse?: Warehouse) => {
+      if (warehouse ? !canUpdate : !canCreate) {
+        showToast(
+          "error",
+          "Permission denied",
+          warehouse ? "You cannot update warehouses." : "You cannot create warehouses."
+        );
+        return;
+      }
 
-  const closeForm = () => {
+      setFormError(null);
+
+      if (warehouse) {
+        setEditingId(warehouse.id);
+        setFormData({
+          name: warehouse.name || "",
+          code: warehouse.code || "",
+          address: warehouse.location || warehouse.address || "",
+          manager: warehouse.manager || "",
+          capacity: String(toNumber(warehouse.capacity)),
+          status: isActive(warehouse.status),
+        });
+      } else {
+        setEditingId(null);
+        setFormData(EMPTY_FORM);
+      }
+
+      setShowForm(true);
+    },
+    [canCreate, canUpdate, showToast]
+  );
+
+  const closeForm = useCallback(() => {
     if (saving) return;
     setShowForm(false);
     setEditingId(null);
     setFormError(null);
-  };
+  }, [saving]);
 
+  /* ── CRUD handlers ───────────────────────────────────────── */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
@@ -342,13 +387,14 @@ function Locations() {
         `${payload.code} · ${payload.name}`
       );
       closeForm();
-      await loadWarehouses();
-    } catch (err: any) {
-      const body = err?.response?.data;
+      void invalidateWarehouses();
+      void refetchWarehouses();
+    } catch (err: unknown) {
+      const body = (err as { response?: { data?: any } })?.response?.data;
       const msg =
         body?.message ||
         (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        err?.message ||
+        (err as Error)?.message ||
         "Failed to save warehouse";
       setFormError(String(msg));
     } finally {
@@ -357,23 +403,34 @@ function Locations() {
   };
 
   const handleDelete = async (w: Warehouse) => {
-    if (!canUpdate) { showToast("error", "Permission denied", "You cannot delete warehouses."); return; }
+    if (!canDelete) {
+      showToast("error", "Permission denied", "You cannot delete warehouses.");
+      return;
+    }
     if (!window.confirm(`Delete warehouse ${w.code}? This cannot be undone.`)) {
       return;
     }
+
     try {
       await api.delete(`/warehouses/${w.id}`);
-      setWarehouses((prev) => prev.filter((x) => x.id !== w.id));
       showToast("success", "Deleted", `${w.code} removed`);
-    } catch (err: any) {
-      showToast(
-        "error",
-        "Delete failed",
-        err?.response?.data?.message || err?.message || "Could not delete"
-      );
+      void invalidateWarehouses();
+      void refetchWarehouses();
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        (err as Error)?.message ||
+        "Could not delete";
+      showToast("error", "Delete failed", msg);
     }
   };
 
+  const handleRefresh = () => {
+    void refetchWarehouses();
+    showToast("success", "Refreshed", "Warehouses reloaded.");
+  };
+
+  /* ── Render ──────────────────────────────────────────────── */
   return (
     <div className="warehouse-page">
       <Sidebar />
@@ -381,13 +438,18 @@ function Locations() {
         <Topbar />
         <main className="content">
           {permsLoaded && !canView && (
-            <div className="card" style={{ padding: 40, textAlign: "center", marginBottom: 16 }}>
+            <div
+              className="card"
+              style={{ padding: 40, textAlign: "center", marginBottom: 16 }}
+            >
               <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
               <p className="text-muted" style={{ margin: 0 }}>
-                You do not have permission to view this page. Ask an admin to grant <code>warehouses.view</code>.
+                You do not have permission to view this page. Ask an admin to grant{" "}
+                <code>warehouses.view</code>.
               </p>
             </div>
           )}
+
           <div className="page-header">
             <div>
               <h1 className="page-title">Warehouses</h1>
@@ -399,22 +461,19 @@ function Locations() {
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => {
-                  loadWarehouses();
-                  showToast("success", "Refreshed", "Warehouses reloaded.");
-                }}
-                disabled={loading}
+                onClick={handleRefresh}
+                disabled={loading || whLoading}
               >
                 <IconRefresh /> Refresh
               </button>
               {canCreate && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => openForm()}
-              >
-                <IconPlus /> New Warehouse
-              </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => openForm()}
+                >
+                  <IconPlus /> New Warehouse
+                </button>
               )}
             </div>
           </div>
@@ -432,6 +491,7 @@ function Locations() {
               </div>
               <div className="stat-hint">All warehouses</div>
             </button>
+
             <button
               type="button"
               className={`stat-card${statusFilter === "active" ? " is-active" : ""}`}
@@ -446,6 +506,7 @@ function Locations() {
               </div>
               <div className="stat-hint">Operational sites</div>
             </button>
+
             <div className="stat-card">
               <div className="stat-label">Total Capacity</div>
               <div className="stat-value">
@@ -453,6 +514,7 @@ function Locations() {
               </div>
               <div className="stat-hint">Units across sites</div>
             </div>
+
             <div className="stat-card">
               <div className="stat-label">Utilization</div>
               <div
@@ -473,7 +535,7 @@ function Locations() {
             </div>
           </div>
 
-          {error && (
+          {whIsError && (
             <div
               className="card"
               style={{
@@ -484,7 +546,9 @@ function Locations() {
               }}
             >
               <strong style={{ color: "var(--sa-clay)" }}>API error:</strong>{" "}
-              <span>{error}</span>
+              <span>
+                {(whError as Error)?.message || "Failed to load warehouses"}
+              </span>
             </div>
           )}
 
@@ -497,6 +561,7 @@ function Locations() {
                   placeholder="Search code, name, address, manager…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
+                  aria-label="Search warehouses"
                 />
               </div>
               <div className="table-filters">
@@ -505,6 +570,7 @@ function Locations() {
                   onChange={(e) =>
                     setStatusFilter(e.target.value as "all" | "active" | "inactive")
                   }
+                  aria-label="Filter by status"
                 >
                   <option value="all">All status</option>
                   <option value="active">Active</option>
@@ -563,7 +629,7 @@ function Locations() {
                         ? "No warehouses match your filters"
                         : "No warehouses yet"}
                     </p>
-                    {!search && statusFilter === "all" && (
+                    {!search && statusFilter === "all" && canCreate && (
                       <button
                         type="button"
                         className="btn btn-primary"
@@ -590,13 +656,8 @@ function Locations() {
                     {filtered.map((w) => {
                       const pct = utilizationPct(w);
                       const fillClass =
-                        pct == null
-                          ? "ok"
-                          : pct >= 90
-                            ? "high"
-                            : pct >= 70
-                              ? "mid"
-                              : "ok";
+                        pct == null ? "ok" : pct >= 90 ? "high" : pct >= 70 ? "mid" : "ok";
+
                       return (
                         <tr key={w.id}>
                           <td>
@@ -679,29 +740,29 @@ function Locations() {
                           </td>
                           <td style={{ textAlign: "center" }}>
                             {canUpdate && (
-                              <>
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-secondary"
-                              onClick={() => openForm(w)}
-                              title="Edit"
-                              style={{ marginRight: 6, padding: "6px 8px" }}
-                            >
-                              <IconEdit />
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-secondary"
-                              onClick={() => handleDelete(w)}
-                              title="Delete"
-                              style={{
-                                padding: "6px 8px",
-                                color: "var(--sa-clay)",
-                              }}
-                            >
-                              <IconTrash />
-                            </button>
-                              </>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => openForm(w)}
+                                title="Edit"
+                                style={{ marginRight: 6, padding: "6px 8px" }}
+                              >
+                                <IconEdit />
+                              </button>
+                            )}
+                            {canDelete && (
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => void handleDelete(w)}
+                                title="Delete"
+                                style={{
+                                  padding: "6px 8px",
+                                  color: "var(--sa-clay)",
+                                }}
+                              >
+                                <IconTrash />
+                              </button>
                             )}
                           </td>
                         </tr>
@@ -724,6 +785,7 @@ function Locations() {
         </main>
       </div>
 
+      {/* ── Modal form ──────────────────────────────────────── */}
       {showForm && (
         <div className="modal-overlay" onClick={closeForm}>
           <div
@@ -738,6 +800,7 @@ function Locations() {
             }}
             role="dialog"
             aria-labelledby="wh-form-title"
+            aria-modal="true"
           >
             <div
               style={{
@@ -769,6 +832,7 @@ function Locations() {
                 className="btn btn-secondary"
                 onClick={closeForm}
                 disabled={saving}
+                aria-label="Close"
               >
                 <IconX />
               </button>
@@ -793,8 +857,9 @@ function Locations() {
             <form onSubmit={handleSubmit}>
               <div className="form-grid-2">
                 <div className="form-field">
-                  <label>Code *</label>
+                  <label htmlFor="wh-code">Code *</label>
                   <input
+                    id="wh-code"
                     type="text"
                     placeholder="e.g. WH-NAGA"
                     value={formData.code}
@@ -803,11 +868,13 @@ function Locations() {
                     }
                     required
                     disabled={saving}
+                    autoComplete="off"
                   />
                 </div>
                 <div className="form-field">
-                  <label>Capacity (units) *</label>
+                  <label htmlFor="wh-capacity">Capacity (units) *</label>
                   <input
+                    id="wh-capacity"
                     type="number"
                     min={0}
                     step="1"
@@ -820,8 +887,9 @@ function Locations() {
                   />
                 </div>
                 <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                  <label>Name *</label>
+                  <label htmlFor="wh-name">Name *</label>
                   <input
+                    id="wh-name"
                     type="text"
                     placeholder="e.g. Naga Main Hub"
                     value={formData.name}
@@ -833,8 +901,9 @@ function Locations() {
                   />
                 </div>
                 <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                  <label>Address / Location</label>
+                  <label htmlFor="wh-address">Address / Location</label>
                   <input
+                    id="wh-address"
                     type="text"
                     placeholder="Street, city, province"
                     value={formData.address}
@@ -845,8 +914,9 @@ function Locations() {
                   />
                 </div>
                 <div className="form-field">
-                  <label>Manager</label>
+                  <label htmlFor="wh-manager">Manager</label>
                   <input
+                    id="wh-manager"
                     type="text"
                     placeholder="Site manager name"
                     value={formData.manager}
@@ -857,8 +927,9 @@ function Locations() {
                   />
                 </div>
                 <div className="form-field">
-                  <label>Status</label>
+                  <label htmlFor="wh-status">Status</label>
                   <select
+                    id="wh-status"
                     value={formData.status ? "active" : "inactive"}
                     onChange={(e) =>
                       setFormData((f) => ({

@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useWarehouses } from "../../hooks/useWarehouses";
+import { useGoodsReceipts } from "../../hooks/useOrders";
+import { invalidateGoodsReceipts } from "../../lib/invalidate";
 import "../css/Orders.css";
 
-
-
-/* ── Role permissions ─────────────────────────────────────── */
-
+/* ── Types ─────────────────────────────────────────────────── */
 type AuthPayload = {
   permissions?: string[];
   data?: { permissions?: string[]; user?: { permissions?: string[] } };
@@ -19,83 +19,10 @@ type AuthPayload = {
   role_id?: string;
 };
 
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) {
-    return true;
-  }
-  return needed.some((n) => perms.includes(n));
-}
-
-
-
-const svg = {
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
-
-const IconPlus = () => (
-  <svg {...svg} width="16" height="16">
-    <circle cx="12" cy="12" r="10" />
-    <line x1="12" y1="8" x2="12" y2="16" />
-    <line x1="8" y1="12" x2="16" y2="12" />
-  </svg>
-);
-const IconRefresh = () => (
-  <svg {...svg} width="16" height="16">
-    <polyline points="23 4 23 10 17 10" />
-    <polyline points="1 20 1 14 7 14" />
-    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-  </svg>
-);
-const IconSearch = () => (
-  <svg {...svg} width="16" height="16">
-    <circle cx="11" cy="11" r="8" />
-    <path d="M21 21l-4.35-4.35" />
-  </svg>
-);
-const IconX = () => (
-  <svg {...svg} width="18" height="18">
-    <line x1="18" y1="6" x2="6" y2="18" />
-    <line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-const IconBox = () => (
-  <svg {...svg} width="16" height="16">
-    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-    <line x1="12" y1="22.08" x2="12" y2="12" />
-  </svg>
-);
-const IconCheck = () => (
-  <svg {...svg} width="15" height="15">
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
 type Supplier = { id: string; name: string };
 type Warehouse = { id: string; code: string; name?: string };
 type User = { id: string; name: string };
+
 type PoLine = {
   product_id?: string;
   product_name?: string | null;
@@ -134,16 +61,6 @@ type GoodsReceipt = {
   receiver?: User | null;
 };
 
-type Stats = {
-  all: number;
-  open?: number;
-  pending?: number;
-  done?: number;
-  completed?: number;
-  lines?: number;
-  lines_received?: number;
-};
-
 type GrLine = {
   key: string;
   product_id: string;
@@ -163,8 +80,18 @@ type GrForm = {
   lines: GrLine[];
 };
 
+type ToastState = {
+  type: "success" | "error" | "info";
+  title: string;
+  msg: string;
+};
+
+/* ── Constants ─────────────────────────────────────────────── */
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const OPEN_STATUSES = ["pending", "processing", "partial"];
+const PAGE_SIZE = 15;
 
 let lineKeySeq = 0;
 const newLineKey = () => `gr-line-${Date.now()}-${++lineKeySeq}`;
@@ -188,18 +115,98 @@ const emptyForm = (): GrForm => ({
   lines: [emptyLine()],
 });
 
-function getItems(json: unknown): any[] {
-  if (Array.isArray(json)) return json;
-  const o = json as Record<string, unknown>;
-  if (Array.isArray(o?.data)) return o.data as any[];
-  if (o?.data && typeof o.data === "object" && Array.isArray((o.data as any).data)) {
-    return (o.data as any).data;
+/* ── Permission helpers ────────────────────────────────────── */
+function norm(s: string): string {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
+
+function extractPermissions(json: unknown): string[] {
+  if (!json || typeof json !== "object") return [];
+  const j = json as AuthPayload;
+
+  if (Array.isArray(j.permissions)) return j.permissions.map(String);
+  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
+  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
+
+  const rolePerms = j.user?.role?.permissions;
+  if (Array.isArray(rolePerms)) {
+    return rolePerms
+      .map((p) => (typeof p === "string" ? p : p?.name))
+      .filter(Boolean) as string[];
   }
+
+  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
+  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
+
   return [];
 }
 
-function formatDate(d: string) {
-  return d ? d.slice(0, 10) : "—";
+function isAdminPayload(json: unknown): boolean {
+  if (!json || typeof json !== "object") return false;
+  const j = json as Record<string, unknown>;
+  const data = j.data as Record<string, unknown> | undefined;
+  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
+  if (user?.is_admin === true || user?.isAdmin === true) return true;
+  const roleName = String(
+    (user?.role as { name?: string } | undefined)?.name ||
+      user?.role_name ||
+      (data?.role as { name?: string } | undefined)?.name ||
+      ""
+  ).toLowerCase();
+  return (
+    roleName === "admin" ||
+    roleName === "administrator" ||
+    roleName === "system admin" ||
+    roleName === "system administrator" ||
+    roleName === "super admin" ||
+    roleName === "superadmin"
+  );
+}
+
+function can(perms: string[], ...needed: string[]): boolean {
+  const normalized = perms.map(norm);
+  if (
+    normalized.includes("*") ||
+    normalized.includes("admin") ||
+    normalized.includes("super_admin") ||
+    normalized.includes("superadmin")
+  ) {
+    return true;
+  }
+  return needed.map(norm).some((n) => normalized.includes(n));
+}
+
+/* ── Domain helpers ────────────────────────────────────────── */
+function getItems(json: unknown): unknown[] {
+  if (!json) return [];
+  if (Array.isArray(json)) return json;
+
+  const o = json as Record<string, unknown>;
+
+  if (Array.isArray(o.data)) return o.data as unknown[];
+  if (Array.isArray(o.items)) return o.items as unknown[];
+  if (Array.isArray(o.results)) return o.results as unknown[];
+  if (Array.isArray(o.rows)) return o.rows as unknown[];
+
+  const nested = o.data;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const n = nested as Record<string, unknown>;
+    if (Array.isArray(n.data)) return n.data as unknown[];
+    if (Array.isArray(n.items)) return n.items as unknown[];
+    if (Array.isArray(n.results)) return n.results as unknown[];
+    if (Array.isArray(n.rows)) return n.rows as unknown[];
+  }
+
+  return [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function formatDateLong(d: string) {
@@ -211,7 +218,7 @@ function formatDateLong(d: string) {
       day: "numeric",
     });
   } catch {
-    return formatDate(d);
+    return d.slice(0, 10);
   }
 }
 
@@ -232,24 +239,94 @@ function lineTotals(lines: GrLine[]) {
   return { expected, received };
 }
 
-const OPEN_STATUSES = ["pending", "processing", "partial"];
+function linesFromPo(po: PurchaseOrder | undefined): GrLine[] {
+  if (!po) return [emptyLine()];
+  if (po.lines && po.lines.length > 0) {
+    return po.lines.map((ln) => {
+      const name = ln.product_name || ln.name || "Product";
+      const qty = String(Math.max(0, Number(ln.qty) || 0));
+      return {
+        key: newLineKey(),
+        product_id: ln.product_id ? String(ln.product_id) : "",
+        product_name: name,
+        expected: qty || String(po.items ?? 1),
+        received: qty || String(po.items ?? 1),
+        unit_price: String(Number(ln.unit_price) || 0),
+      };
+    });
+  }
+  return [
+    {
+      ...emptyLine(),
+      product_name: `PO ${po.po_number}`,
+      expected: String(po.items ?? 1),
+      received: String(po.items ?? 1),
+    },
+  ];
+}
 
+/* ── Icons ─────────────────────────────────────────────────── */
+const svg = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.8,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+const IconPlus = () => (
+  <svg {...svg} width="16" height="16">
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="8" x2="12" y2="16" />
+    <line x1="8" y1="12" x2="16" y2="12" />
+  </svg>
+);
+
+const IconRefresh = () => (
+  <svg {...svg} width="16" height="16">
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </svg>
+);
+
+const IconSearch = () => (
+  <svg {...svg} width="16" height="16">
+    <circle cx="11" cy="11" r="8" />
+    <path d="M21 21l-4.35-4.35" />
+  </svg>
+);
+
+const IconX = () => (
+  <svg {...svg} width="18" height="18">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
+
+const IconBox = () => (
+  <svg {...svg} width="16" height="16">
+    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+    <line x1="12" y1="22.08" x2="12" y2="12" />
+  </svg>
+);
+
+const IconCheck = () => (
+  <svg {...svg} width="15" height="15">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+/* ── Component ─────────────────────────────────────────────── */
 function Receiving() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [wh, setWh] = useState("all");
   const [page, setPage] = useState(1);
-  const pageSize = 15;
 
-  const [receipts, setReceipts] = useState<GoodsReceipt[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [total, setTotal] = useState(0);
-  const [lastPage, setLastPage] = useState(1);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [receivers, setReceivers] = useState<User[]>([]);
@@ -259,351 +336,347 @@ function Receiving() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [completingId, setCompletingId] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [permsLoaded, setPermsLoaded] = useState(false);
 
-  const showToast = (type: string, title: string, msg: string) => {
-    setToast({ type, title, msg });
-    setTimeout(() => setToast(null), 3200);
+  const {
+    rows: whRows,
+    isLoading: warehousesLoading,
+    isFetching: warehousesFetching,
+    refetch: refetchWarehouses,
+  } = useWarehouses({
+    enabled: true,
+    perPage: 200,
+  });
+
+  /** Shared React Query cache (same as Dashboard prefetch). */
+  const warehouses: Warehouse[] = useMemo(
+    () =>
+      (whRows ?? [])
+        .map((w) => {
+          const row = asRecord(w);
+          return {
+            id: String(row.id ?? ""),
+            code: String(row.code ?? row.name ?? row.id ?? ""),
+            name: row.name != null ? String(row.name) : undefined,
+          };
+        })
+        .filter((w) => w.id)
+        .sort((a, b) => (a.code || "").localeCompare(b.code || "")),
+    [whRows]
+  );
+
+  const warehouseOptions = warehouses;
+  const whBusy = warehousesLoading || warehousesFetching;
+
+  const {
+    rows: receiptRows,
+    meta,
+    stats,
+    isLoading: loading,
+    isFetching,
+    isError,
+    error: queryError,
+    refetchAll,
+  } = useGoodsReceipts({
+    page,
+    perPage: PAGE_SIZE,
+    search: debouncedSearch,
+    status,
+    warehouseId: wh === "all" ? null : wh,
+    enabled: true,
+  });
+
+  const receipts = receiptRows as unknown as GoodsReceipt[];
+  const total = meta.total;
+  const lastPage = meta.last_page;
+  const error = isError
+    ? (queryError as Error)?.message ?? "Failed to load goods receipts"
+    : null;
+
+  const statsView = {
+    all: stats.all,
+    open: stats.open,
+    done: stats.done,
+    lines: stats.lines,
   };
 
+  const showToast = useCallback(
+    (type: ToastState["type"], title: string, msg: string) => {
+      setToast({ type, title, msg });
+      window.setTimeout(() => setToast(null), 3200);
+    },
+    []
+  );
 
-  const fetchUserPermissions = useCallback(async () => {
+  /* ── Permissions ─────────────────────────────────────────── */
+   const fetchUserPermissions = useCallback(async () => {
     const finish = (list: string[]) => {
       setUserPermissions(list);
       setPermsLoaded(true);
     };
 
-    const loadRolePerms = async (roleId: string): Promise<string[] | null> => {
-      try {
-        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-        const perms =
-          json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-        if (!Array.isArray(perms)) return null;
-        return perms
-          .map((p: { name?: string } | string) =>
-            typeof p === "string" ? p : p?.name
-          )
-          .filter(Boolean) as string[];
-      } catch {
-        return null;
-      }
-    };
-
-    let roleId: string | null = null;
-    try {
-      for (const key of [
-        "permissions",
-        "user_permissions",
-        "auth_permissions",
-        "user",
-        "auth_user",
-        "authUser",
-        "currentUser",
-        "sa-user",
-      ]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
-            finish(parsed);
-            return;
-          }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) {
-            finish(list);
-            return;
-          }
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          roleId = u?.role_id || u?.role?.id || parsed?.role_id || roleId;
-        } catch {
-          /* not JSON */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    if (!roleId) {
-      roleId =
-        localStorage.getItem("role_id") ||
-        localStorage.getItem("auth_role_id") ||
-        null;
-    }
-
-    if (roleId) {
-      const names = await loadRolePerms(roleId);
-      if (names) {
-        finish(names);
-        return;
-      }
-    }
-
+    // 1) /me first
     try {
       const { data: json } = await api.get("/me");
       if (json) {
+        if (isAdminPayload(json)) {
+          finish(["*"]);
+          return;
+        }
         const list = extractPermissions(json);
         if (list.length > 0) {
           finish(list);
           return;
         }
-        const u = json?.data ?? json?.user ?? json;
-        const rid = u?.role_id || u?.role?.id;
-        if (rid) {
-          const names = await loadRolePerms(String(rid));
-          if (names) {
-            finish(names);
-            return;
-          }
-        }
       }
     } catch {
-      /* ignore */
+      /* fall through */
+    }
+
+    // 2) localStorage fallback
+    for (const key of [
+      "permissions",
+      "user_permissions",
+      "auth_permissions",
+      "user",
+      "auth_user",
+      "authUser",
+      "currentUser",
+      "sa-user",
+    ]) {
+      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (isAdminPayload(parsed)) {
+          finish(["*"]);
+          return;
+        }
+        if (
+          Array.isArray(parsed) &&
+          parsed.every((x: unknown) => typeof x === "string")
+        ) {
+          finish(parsed as string[]);
+          return;
+        }
+        const list = extractPermissions(parsed);
+        if (list.length > 0) {
+          finish(list);
+          return;
+        }
+      } catch {
+        /* next */
+      }
     }
 
     finish(["*"]);
-  }, []);
+  }, []);   
 
   useEffect(() => {
-    fetchUserPermissions();
+    void fetchUserPermissions();
   }, [fetchUserPermissions]);
 
-  const canView = can(userPermissions, "receiving.view", "goods_receipts.view", "goods-receipts.view");
-  const canCreate = can(userPermissions, "receiving.create", "goods_receipts.create", "goods-receipts.create");
-  const canUpdate = can(userPermissions, "receiving.update", "goods_receipts.update", "goods-receipts.update");
+  const canView = can(
+    userPermissions,
+    "receiving.view",
+    "goods_receipts.view",
+    "goods-receipts.view"
+  );
+  const canCreate = can(
+    userPermissions,
+    "receiving.create",
+    "goods_receipts.create",
+    "goods-receipts.create"
+  );
+  const canUpdate = can(
+    userPermissions,
+    "receiving.update",
+    "goods_receipts.update",
+    "goods-receipts.update"
+  );
 
-
+  /* ── Debounced search ────────────────────────────────────── */
   useEffect(() => {
-    const t = setTimeout(() => {
+    const t = window.setTimeout(() => {
       setDebouncedSearch(search);
       setPage(1);
     }, 320);
-    return () => clearTimeout(t);
+    return () => window.clearTimeout(t);
   }, [search]);
 
-  const fetchReceipts = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    const params = new URLSearchParams();
-    params.set("per_page", String(pageSize));
-    params.set("page", String(page));
-    params.set("sort", "date");
-    params.set("dir", "desc");
-    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
-    if (status !== "all") params.set("status", status);
-    if (wh !== "all") params.set("warehouse_id", wh);
-
+  /* ── Form option loaders (PO + supplier + user). Warehouses = useWarehouses. ─ */
+  const loadFormOptions = useCallback(async () => {
     try {
-      const [listSettled, statsSettled] = await Promise.allSettled([
-        api.get("/goods-receipts", { params: Object.fromEntries(params) }),
-        api.get("/goods-receipts/stats"),
+      const [poRes, supRes, userRes] = await Promise.all([
+        api.get("/purchase-orders", { params: { per_page: 200, all: 1 } }),
+        api.get("/suppliers", { params: { per_page: 200 } }),
+        api.get("/users", { params: { per_page: 100 } }),
       ]);
 
-      if (listSettled.status === "rejected") {
-        const e: any = listSettled.reason;
-        throw new Error(
-          `Receipts HTTP ${e?.response?.status ?? "?"}: ${String(e?.response?.data?.message || e?.message || "").slice(0, 200)}`
-        );
-      }
-      if (statsSettled.status === "rejected") {
-        const e: any = statsSettled.reason;
-        throw new Error(`Stats HTTP ${e?.response?.status ?? "?"}`);
-      }
+      const pos: PurchaseOrder[] = getItems(poRes.data).map((item) => {
+        const row = asRecord(item);
+        const poNumber = String(row.po_number ?? row.number ?? row.id);
+        const cached = readCachedPoLines(poNumber);
+        const supplier = asRecord(row.supplier);
+        const warehouse = asRecord(row.warehouse);
 
-      const listJson = listSettled.value.data;
-      const statsJson: Stats = statsSettled.value.data;
-      const rows: GoodsReceipt[] = getItems(listJson);
+        return {
+          id: String(row.id),
+          po_number: poNumber,
+          supplier_id:
+            row.supplier_id != null
+              ? String(row.supplier_id)
+              : supplier.id != null
+                ? String(supplier.id)
+                : null,
+          warehouse_id:
+            row.warehouse_id != null
+              ? String(row.warehouse_id)
+              : warehouse.id != null
+                ? String(warehouse.id)
+                : null,
+          items: row.items as number | undefined,
+          total: row.total as number | string | undefined,
+          status: row.status != null ? String(row.status) : undefined,
+          supplier:
+            supplier.id != null
+              ? {
+                  id: String(supplier.id),
+                  name: String(supplier.name ?? ""),
+                }
+              : null,
+          warehouse:
+            warehouse.id != null
+              ? {
+                  id: String(warehouse.id),
+                  code: String(
+                    warehouse.code ?? warehouse.name ?? warehouse.id
+                  ),
+                  name:
+                    warehouse.name != null
+                      ? String(warehouse.name)
+                      : undefined,
+                }
+              : null,
+          lines:
+            Array.isArray(row.lines) && (row.lines as PoLine[]).length > 0
+              ? (row.lines as PoLine[])
+              : cached.length
+                ? cached
+                : [],
+        };
+      });
 
-      setReceipts(rows);
-      setTotal(Array.isArray(listJson) ? rows.length : listJson.total ?? rows.length);
-      setLastPage(Array.isArray(listJson) ? 1 : listJson.last_page ?? 1);
-      setStats(statsJson);
+      const sups: Supplier[] = getItems(supRes.data).map((i) => {
+        const row = asRecord(i);
+        return {
+          id: String(row.id),
+          name: String(row.name ?? row.id),
+        };
+      });
+
+      pos.forEach((p) => {
+        if (p.supplier && !sups.find((s) => s.id === p.supplier!.id)) {
+          sups.push(p.supplier);
+        }
+      });
+
+      const users: User[] = getItems(userRes.data).map((i) => {
+        const row = asRecord(i);
+        return {
+          id: String(row.id),
+          name: String(row.name ?? row.email ?? row.id),
+        };
+      });
+
+      setPurchaseOrders(pos);
+      setSuppliers(sups.sort((a, b) => a.name.localeCompare(b.name)));
+      setReceivers(users.sort((a, b) => a.name.localeCompare(b.name)));
+
+      return { pos, sups, users };
     } catch (e) {
-      console.error(e);
-      setError(e instanceof Error ? e.message : "Failed to load goods receipts");
-      setReceipts([]);
-      setTotal(0);
-      setLastPage(1);
-    } finally {
-      setLoading(false);
-    }
-  }, [page, debouncedSearch, status, wh]);
-
-  useEffect(() => {
-    fetchReceipts();
-  }, [fetchReceipts]);
-
-  const statsView = {
-    all: stats?.all ?? 0,
-    open: stats?.open ?? stats?.pending ?? 0,
-    done: stats?.done ?? stats?.completed ?? 0,
-    lines: stats?.lines ?? stats?.lines_received ?? 0,
-  };
-
-  const loadFormOptions = async () => {
-    const soft = async (path: string, params?: Record<string, string | number>) => {
-      try {
-        const { data } = await api.get(path, params ? { params } : undefined);
-        return getItems(data);
-      } catch {
-        return [];
-      }
-    };
-
-    const [poItems, supItems, whItems, userItems] = await Promise.all([
-      soft("/purchase-orders", { per_page: 200 }),
-      soft("/suppliers", { per_page: 200 }),
-      soft("/warehouses", { per_page: 100 }),
-      soft("/users", { per_page: 100 }),
-    ]);
-
-    const pos: PurchaseOrder[] = poItems.map((item: any) => {
-      const poNumber = item.po_number ?? item.number ?? item.id;
-      const cached = readCachedPoLines(String(poNumber));
+      console.error("[Receiving] form options failed:", e);
+      showToast("error", "Lookups failed", "Could not load form options.");
       return {
-        id: String(item.id),
-        po_number: String(poNumber),
-        supplier_id: item.supplier_id ?? item.supplier?.id ?? null,
-        warehouse_id: item.warehouse_id ?? item.warehouse?.id ?? null,
-        items: item.items,
-        total: item.total,
-        status: item.status,
-        supplier: item.supplier
-          ? { id: String(item.supplier.id), name: item.supplier.name }
-          : null,
-        warehouse: item.warehouse
-          ? {
-              id: String(item.warehouse.id),
-              code: item.warehouse.code ?? item.warehouse.name,
-              name: item.warehouse.name,
-            }
-          : null,
-        lines: item.lines?.length ? item.lines : cached.length ? cached : [],
+        pos: [] as PurchaseOrder[],
+        sups: [] as Supplier[],
+        users: [] as User[],
       };
-    });
+    }
+  }, [showToast]);
 
-    const sups: Supplier[] = supItems.map((i: any) => ({
-      id: String(i.id),
-      name: i.name ?? i.id,
-    }));
-    const whs: Warehouse[] = whItems.map((i: any) => ({
-      id: String(i.id),
-      code: i.code ?? i.name ?? i.id,
-      name: i.name,
-    }));
-    const users: User[] = userItems.map((i: any) => ({
-      id: String(i.id),
-      name: i.name ?? i.email ?? i.id,
-    }));
-
-    // Enrich suppliers/warehouses from POs
-    pos.forEach((p) => {
-      if (p.supplier && !sups.find((s) => s.id === p.supplier!.id)) {
-        sups.push(p.supplier);
-      }
-      if (p.warehouse && !whs.find((w) => w.id === p.warehouse!.id)) {
-        whs.push(p.warehouse);
-      }
-    });
-
-    setPurchaseOrders(pos);
-    setSuppliers(sups.sort((a, b) => a.name.localeCompare(b.name)));
-    setWarehouses(whs.sort((a, b) => a.code.localeCompare(b.code)));
-    setReceivers(users.sort((a, b) => a.name.localeCompare(b.name)));
-
-    return { pos, sups, whs, users };
-  };
-
-  const applyPo = (poId: string, base?: GrForm) => {
-    const po = purchaseOrders.find((p) => p.id === poId);
-    const linesFromPo: GrLine[] =
-      po?.lines && po.lines.length > 0
-        ? po.lines.map((ln) => {
-            const name = ln.product_name || ln.name || "Product";
-            const qty = String(Math.max(0, Number(ln.qty) || 0));
-            return {
-              key: newLineKey(),
-              product_id: ln.product_id ? String(ln.product_id) : "",
-              product_name: name,
-              expected: qty || String(po.items ?? 1),
-              received: qty || String(po.items ?? 1),
-              unit_price: String(Number(ln.unit_price) || 0),
-            };
-          })
-        : [
-            {
-              ...emptyLine(),
-              product_name: po ? `PO ${po.po_number}` : "",
-              expected: String(po?.items ?? 1),
-              received: String(po?.items ?? 1),
-            },
-          ];
-
-    return {
-      ...(base ?? form),
-      purchase_order_id: poId,
-      supplier_id: po?.supplier_id ?? po?.supplier?.id ?? base?.supplier_id ?? form.supplier_id,
-      warehouse_id:
-        po?.warehouse_id ?? po?.warehouse?.id ?? base?.warehouse_id ?? form.warehouse_id,
-      lines: linesFromPo,
-    };
-  };
-
-  const openAdd = async () => {
+  /** Open modal immediately; warehouses from React Query, PO/suppliers load in background. */
+  const openAdd = () => {
     if (!canCreate) {
-      showToast("error", "Permission denied", "You cannot create records on this page.");
+      showToast(
+        "error",
+        "Permission denied",
+        "You cannot create records on this page."
+      );
       return;
     }
 
     setFormError(null);
+    const firstWh = warehouseOptions[0]?.id ?? "";
+    setForm({
+      ...emptyForm(),
+      warehouse_id: firstWh,
+      receiver_id: receivers[0]?.id ?? "",
+    });
     setShowAdd(true);
-    const { pos, users } = await loadFormOptions();
-    const firstPo = pos[0];
-    if (firstPo) {
-      // need purchaseOrders state — use returned pos
-      const linesFromPo: GrLine[] =
-        firstPo.lines && firstPo.lines.length > 0
-          ? firstPo.lines.map((ln) => {
-              const name = ln.product_name || ln.name || "Product";
-              const qty = String(Math.max(0, Number(ln.qty) || 0));
-              return {
-                key: newLineKey(),
-                product_id: ln.product_id ? String(ln.product_id) : "",
-                product_name: name,
-                expected: qty || String(firstPo.items ?? 1),
-                received: qty || String(firstPo.items ?? 1),
-                unit_price: String(Number(ln.unit_price) || 0),
-              };
-            })
-          : [
-              {
-                ...emptyLine(),
-                product_name: `PO ${firstPo.po_number}`,
-                expected: String(firstPo.items ?? 1),
-                received: String(firstPo.items ?? 1),
-              },
-            ];
-      setForm({
-        ...emptyForm(),
-        purchase_order_id: firstPo.id,
-        supplier_id: firstPo.supplier_id ?? firstPo.supplier?.id ?? "",
-        warehouse_id: firstPo.warehouse_id ?? firstPo.warehouse?.id ?? "",
-        receiver_id: users[0]?.id ?? "",
-        lines: linesFromPo,
-      });
-    } else {
-      setForm({
-        ...emptyForm(),
-        receiver_id: users[0]?.id ?? "",
-      });
-    }
+
+    if (warehouses.length === 0) void refetchWarehouses();
+
+    void loadFormOptions().then(({ pos, users }) => {
+      const firstPo = pos[0];
+      const whId =
+        firstPo?.warehouse_id ??
+        firstPo?.warehouse?.id ??
+        warehouseOptions[0]?.id ??
+        warehouses[0]?.id ??
+        "";
+      if (firstPo) {
+        setForm({
+          ...emptyForm(),
+          purchase_order_id: firstPo.id,
+          supplier_id: firstPo.supplier_id ?? firstPo.supplier?.id ?? "",
+          warehouse_id: whId,
+          receiver_id: users[0]?.id ?? receivers[0]?.id ?? "",
+          lines: linesFromPo(firstPo),
+        });
+      } else {
+        setForm((f) => ({
+          ...f,
+          warehouse_id: f.warehouse_id || whId,
+          receiver_id: f.receiver_id || users[0]?.id || "",
+        }));
+      }
+    });
   };
 
+  // Auto-fill warehouse when query arrives while modal is open
+  useEffect(() => {
+    if (!showAdd) return;
+    if (warehouseOptions.length === 0) return;
+    setForm((f) => {
+      if (f.warehouse_id && warehouseOptions.some((w) => w.id === f.warehouse_id)) {
+        return f;
+      }
+      return { ...f, warehouse_id: warehouseOptions[0].id };
+    });
+  }, [showAdd, warehouseOptions]);
+
   const onPoChange = (poId: string) => {
-    setForm((f) => applyPo(poId, f));
+    const po = purchaseOrders.find((p) => p.id === poId);
+    setForm((f) => ({
+      ...f,
+      purchase_order_id: poId,
+      supplier_id: po?.supplier_id ?? po?.supplier?.id ?? f.supplier_id,
+      warehouse_id: po?.warehouse_id ?? po?.warehouse?.id ?? f.warehouse_id,
+      lines: linesFromPo(po),
+    }));
   };
 
   const setLine = (key: string, patch: Partial<GrLine>) => {
@@ -624,6 +697,7 @@ function Receiving() {
     }));
   };
 
+  /* ── Create receipt ──────────────────────────────────────── */
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
@@ -634,6 +708,10 @@ function Receiving() {
     }
     if (!form.supplier_id) {
       setFormError("Supplier is required.");
+      return;
+    }
+    if (warehouseOptions.length > 0 && !form.warehouse_id) {
+      setFormError("Select a warehouse for receiving.");
       return;
     }
 
@@ -664,7 +742,6 @@ function Receiving() {
         data.receipt_number ?? `GR-${Date.now().toString().slice(-6)}`
       );
 
-      // Product transactions — receiving
       await Promise.all(
         form.lines
           .filter((l) => l.product_name.trim() && Number(l.received) > 0)
@@ -672,7 +749,9 @@ function Receiving() {
             try {
               await api.post("/product-transactions", {
                 product_id:
-                  l.product_id && UUID_RE.test(l.product_id) ? l.product_id : null,
+                  l.product_id && UUID_RE.test(l.product_id)
+                    ? l.product_id
+                    : null,
                 product_name: l.product_name.trim(),
                 transaction_type: "receiving",
                 reference_id:
@@ -697,13 +776,14 @@ function Receiving() {
         `${receiptNumber}${po ? ` · ${po.po_number}` : ""} · ${received.toLocaleString()} units`
       );
       setPage(1);
-      await fetchReceipts();
-    } catch (err: any) {
-      const body = err?.response?.data;
+      await invalidateGoodsReceipts();
+      await refetchAll();
+    } catch (err: unknown) {
+      const body = (err as { response?: { data?: any } })?.response?.data;
       const msg =
         body?.message ||
         (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        err?.message ||
+        (err as Error)?.message ||
         "Failed to create receipt";
       setFormError(String(msg));
     } finally {
@@ -711,9 +791,14 @@ function Receiving() {
     }
   };
 
+  /* ── Complete receipt ────────────────────────────────────── */
   const complete = async (id: string, receiptNumber: string) => {
     if (!canUpdate) {
-      showToast("error", "Permission denied", "You cannot complete goods receipts.");
+      showToast(
+        "error",
+        "Permission denied",
+        "You cannot complete goods receipts."
+      );
       return;
     }
     setCompletingId(id);
@@ -724,7 +809,8 @@ function Receiving() {
         "Receiving complete",
         `${receiptNumber} closed. Post stock-in via Stock Movements if needed.`
       );
-      await fetchReceipts();
+      await invalidateGoodsReceipts();
+      await refetchAll();
     } catch (err) {
       showToast(
         "error",
@@ -738,80 +824,58 @@ function Receiving() {
 
   const totals = lineTotals(form.lines);
 
+  const handleRefresh = () => {
+    void refetchAll();
+    void refetchWarehouses();
+    showToast("success", "Refreshed", "Receipts reloaded.");
+  };
+
+  /* ── Render ──────────────────────────────────────────────── */
   return (
     <div className="orders-page">
       <Sidebar />
       <div className="main-wrapper">
         <Topbar />
         <main className="content">
+          {permsLoaded && !canView && (
+            <div
+              className="card"
+              style={{ padding: 40, textAlign: "center", marginBottom: 16 }}
+            >
+              <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
+              <p className="text-muted" style={{ margin: 0 }}>
+                You do not have permission to view this page. Ask an admin to
+                grant <code>receiving.view</code>.
+              </p>
+            </div>
+          )}
+
           <div className="page-header">
             <div>
               <h1 className="page-title">Goods Receiving</h1>
               <p className="page-subtitle">
-                Receive against PO · product lines as transactions · stock into warehouse
+                Link PO · count received qty · receiving transactions
+                {isFetching && !loading ? " · refreshing…" : ""}
               </p>
             </div>
             <div className="page-actions">
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => {
-                  fetchReceipts();
-                  showToast("success", "Refreshed", "Receipts reloaded.");
-                }}
+                onClick={handleRefresh}
                 disabled={loading}
               >
                 <IconRefresh /> Refresh
               </button>
               {canCreate && (
-              <button type="button" className="btn btn-primary" onClick={openAdd}>
-                <IconPlus /> New Receipt
-              </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void openAdd()}
+                >
+                  <IconPlus /> New Receipt
+                </button>
               )}
-            </div>
-          </div>
-
-          {permsLoaded && !canView ? (
-            <div className="card" style={{ padding: 40, textAlign: "center" }}>
-              <div className="empty-state">
-                <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
-                <p className="text-muted">
-                  You do not have permission to view this page. Ask an admin to grant 
-                  <code>receiving.view</code>.
-                </p>
-              </div>
-            </div>
-          ) : (
-          <>
-
-          <div className="order-steps">
-            <div className="order-step">
-              <span className="os-num">1</span>
-              <div>
-                <strong>Select PO</strong>
-                <span>Link purchase order</span>
-              </div>
-            </div>
-            <div className="order-step">
-              <span className="os-num">2</span>
-              <div>
-                <strong>Count goods</strong>
-                <span>Expected vs received</span>
-              </div>
-            </div>
-            <div className="order-step">
-              <span className="os-num">3</span>
-              <div>
-                <strong>Confirm</strong>
-                <span>Post receipt + transactions</span>
-              </div>
-            </div>
-            <div className="order-step">
-              <span className="os-num">4</span>
-              <div>
-                <strong>Complete</strong>
-                <span>Close &amp; stock-in</span>
-              </div>
             </div>
           </div>
 
@@ -830,294 +894,318 @@ function Receiving() {
             </div>
           )}
 
-          <div className="stats-grid">
-            <button
-              type="button"
-              className={`stat-card${status === "all" ? " is-active" : ""}`}
-              style={{ cursor: "pointer", textAlign: "left" }}
-              onClick={() => {
-                setStatus("all");
-                setPage(1);
-              }}
-            >
-              <div className="stat-label">Receipts</div>
-              <div className="stat-value">
-                {loading ? "…" : statsView.all.toLocaleString()}
-              </div>
-              <div className="stat-hint">All receipts</div>
-            </button>
-            <button
-              type="button"
-              className={`stat-card${status === "pending" ? " is-active" : ""}`}
-              style={{ cursor: "pointer", textAlign: "left" }}
-              onClick={() => {
-                setStatus(status === "pending" ? "all" : "pending");
-                setPage(1);
-              }}
-            >
-              <div className="stat-label">In Progress</div>
-              <div className="stat-value warning">
-                {loading ? "…" : statsView.open.toLocaleString()}
-              </div>
-              <div className="stat-hint">Open receipts</div>
-            </button>
-            <button
-              type="button"
-              className={`stat-card${status === "completed" || status === "received" ? " is-active" : ""}`}
-              style={{ cursor: "pointer", textAlign: "left" }}
-              onClick={() => {
-                setStatus(
-                  status === "completed" || status === "received" ? "all" : "completed"
-                );
-                setPage(1);
-              }}
-            >
-              <div className="stat-label">Completed</div>
-              <div className="stat-value success">
-                {loading ? "…" : statsView.done.toLocaleString()}
-              </div>
-              <div className="stat-hint">Closed receipts</div>
-            </button>
-            <div className="stat-card">
-              <div className="stat-label">Lines Received</div>
-              <div className="stat-value">
-                {loading ? "…" : statsView.lines.toLocaleString()}
-              </div>
-              <div className="stat-hint">Units posted</div>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="table-toolbar">
-              <div className="table-search">
-                <IconSearch />
-                <input
-                  type="text"
-                  placeholder="Search receipt, PO, supplier…"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
-              </div>
-              <div className="table-filters">
-                <select
-                  value={status}
-                  onChange={(e) => {
-                    setStatus(e.target.value);
+          {canView && (
+            <>
+              <div className="stats-grid">
+                <button
+                  type="button"
+                  className={`stat-card${status === "all" ? " is-active" : ""}`}
+                  style={{ cursor: "pointer", textAlign: "left", width: "100%" }}
+                  onClick={() => {
+                    setStatus("all");
                     setPage(1);
                   }}
                 >
-                  <option value="all">All status</option>
-                  <option value="pending">Pending</option>
-                  <option value="processing">Processing</option>
-                  <option value="partial">Partial</option>
-                  <option value="received">Received</option>
-                  <option value="completed">Completed</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-                <select
-                  value={wh}
-                  onChange={(e) => {
-                    setWh(e.target.value);
+                  <div className="stat-label">All Receipts</div>
+                  <div className="stat-value">
+                    {loading ? "…" : statsView.all.toLocaleString()}
+                  </div>
+                  <div className="stat-hint">Total documents</div>
+                </button>
+                <button
+                  type="button"
+                  className={`stat-card${
+                    status === "pending" || status === "processing"
+                      ? " is-active"
+                      : ""
+                  }`}
+                  style={{ cursor: "pointer", textAlign: "left", width: "100%" }}
+                  onClick={() => {
+                    setStatus(status === "pending" ? "all" : "pending");
                     setPage(1);
                   }}
                 >
-                  <option value="all">All sites</option>
-                  {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name ? `${w.code} — ${w.name}` : w.code}
-                    </option>
-                  ))}
-                </select>
+                  <div className="stat-label">Open</div>
+                  <div className="stat-value warning">
+                    {loading ? "…" : statsView.open.toLocaleString()}
+                  </div>
+                  <div className="stat-hint">Pending / processing</div>
+                </button>
+                <button
+                  type="button"
+                  className={`stat-card${
+                    status === "completed" || status === "received"
+                      ? " is-active"
+                      : ""
+                  }`}
+                  style={{ cursor: "pointer", textAlign: "left", width: "100%" }}
+                  onClick={() => {
+                    setStatus(status === "completed" ? "all" : "completed");
+                    setPage(1);
+                  }}
+                >
+                  <div className="stat-label">Completed</div>
+                  <div className="stat-value success">
+                    {loading ? "…" : statsView.done.toLocaleString()}
+                  </div>
+                  <div className="stat-hint">Closed receipts</div>
+                </button>
+                <div className="stat-card">
+                  <div className="stat-label">Lines Received</div>
+                  <div className="stat-value">
+                    {loading ? "…" : statsView.lines.toLocaleString()}
+                  </div>
+                  <div className="stat-hint">Units posted</div>
+                </div>
               </div>
-            </div>
 
-            <div className="table-wrap">
-              <table className="orders-table">
-                <thead>
-                  <tr>
-                    <th>Receipt #</th>
-                    <th>PO</th>
-                    <th>Supplier</th>
-                    <th>Warehouse</th>
-                    <th>Date</th>
-                    <th>Expected</th>
-                    <th>Received</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading ? (
-                    Array.from({ length: 5 }).map((_, i) => (
-                      <tr key={`skel-${i}`}>
-                        {Array.from({ length: 9 }).map((__, j) => (
-                          <td key={j}>
-                            <div
-                              className="skel"
-                              style={{
-                                width: j === 0 ? 110 : 64,
-                                height: 12,
-                                background:
-                                  "linear-gradient(90deg, var(--sa-cream-2) 25%, var(--sa-beige) 50%, var(--sa-cream-2) 75%)",
-                                backgroundSize: "200% 100%",
-                                borderRadius: 6,
-                              }}
-                            />
-                          </td>
-                        ))}
+              <div className="card">
+                <div className="table-toolbar">
+                  <div className="table-search">
+                    <IconSearch />
+                    <input
+                      type="text"
+                      placeholder="Search receipt, PO, supplier…"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      aria-label="Search goods receipts"
+                    />
+                  </div>
+                  <div className="table-filters">
+                    <select
+                      value={status}
+                      onChange={(e) => {
+                        setStatus(e.target.value);
+                        setPage(1);
+                      }}
+                      aria-label="Filter by status"
+                    >
+                      <option value="all">All status</option>
+                      <option value="pending">Pending</option>
+                      <option value="processing">Processing</option>
+                      <option value="partial">Partial</option>
+                      <option value="received">Received</option>
+                      <option value="completed">Completed</option>
+                      <option value="cancelled">Cancelled</option>
+                    </select>
+                    <select
+                      value={wh}
+                      onChange={(e) => {
+                        setWh(e.target.value);
+                        setPage(1);
+                      }}
+                      aria-label="Filter by warehouse"
+                    >
+                      <option value="all">All sites</option>
+                      {warehouseOptions.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name ? `${w.code} — ${w.name}` : w.code}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="table-wrap">
+                  <table className="orders-table">
+                    <thead>
+                      <tr>
+                        <th>Receipt #</th>
+                        <th>PO</th>
+                        <th>Supplier</th>
+                        <th>Warehouse</th>
+                        <th>Date</th>
+                        <th>Expected</th>
+                        <th>Received</th>
+                        <th>Status</th>
+                        <th>Actions</th>
                       </tr>
-                    ))
-                  ) : receipts.length === 0 ? (
-                    <tr>
-                      <td colSpan={9} className="empty-row">
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: "center",
-                            gap: 10,
-                            padding: 24,
-                          }}
-                        >
-                          <IconBox />
-                          <p style={{ margin: 0, fontWeight: 550 }}>
-                            No receipts match your filters
-                          </p>
-                          {canCreate && (
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={openAdd}
-                          >
-                            <IconPlus /> New Receipt
-                          </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    receipts.map((r) => {
-                      const canComplete = OPEN_STATUSES.includes(
-                        (r.status || "").toLowerCase()
-                      );
-                      return (
-                        <tr key={r.id}>
-                          <td>
-                            <div className="product-cell">
-                              <div
-                                className="product-avatar"
-                                style={{
-                                  background: "rgba(90, 154, 110, 0.12)",
-                                  color: "var(--sa-sage-deep)",
-                                }}
-                              >
-                                <IconBox />
-                              </div>
-                              <div>
-                                <div className="product-name">{r.receipt_number}</div>
-                                {r.receiver?.name && (
-                                  <div className="product-meta">{r.receiver.name}</div>
-                                )}
-                              </div>
+                    </thead>
+                    <tbody>
+                      {loading ? (
+                        Array.from({ length: 5 }).map((_, i) => (
+                          <tr key={`skel-${i}`}>
+                            {Array.from({ length: 9 }).map((__, j) => (
+                              <td key={j}>
+                                <div
+                                  className="skel"
+                                  style={{
+                                    width: j === 0 ? 110 : 64,
+                                    height: 12,
+                                    background:
+                                      "linear-gradient(90deg, var(--sa-cream-2) 25%, var(--sa-beige) 50%, var(--sa-cream-2) 75%)",
+                                    backgroundSize: "200% 100%",
+                                    borderRadius: 6,
+                                  }}
+                                />
+                              </td>
+                            ))}
+                          </tr>
+                        ))
+                      ) : receipts.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="empty-row">
+                            <div
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                alignItems: "center",
+                                gap: 10,
+                                padding: 24,
+                              }}
+                            >
+                              <IconBox />
+                              <p style={{ margin: 0, fontWeight: 550 }}>
+                                No receipts match your filters
+                              </p>
+                              {canCreate && (
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  onClick={() => void openAdd()}
+                                >
+                                  <IconPlus /> New Receipt
+                                </button>
+                              )}
                             </div>
                           </td>
-                          <td className="fw-600">
-                            {r.purchase_order?.po_number ?? "—"}
-                          </td>
-                          <td>{r.supplier?.name ?? "—"}</td>
-                          <td>
-                            {r.warehouse
-                              ? r.warehouse.name
-                                ? `${r.warehouse.code}`
-                                : r.warehouse.code
-                              : "—"}
-                          </td>
-                          <td className="text-muted">{formatDateLong(r.date)}</td>
-                          <td>
-                            {Number(r.expected).toLocaleString(undefined, {
-                              maximumFractionDigits: 2,
-                            })}
-                          </td>
-                          <td className="fw-600">
-                            {Number(r.received).toLocaleString(undefined, {
-                              maximumFractionDigits: 2,
-                            })}
-                          </td>
-                          <td>
-                            <span className={`status-badge status-${r.status}`}>
-                              {r.status}
-                            </span>
-                          </td>
-                          <td>
-                            {canComplete && canUpdate ? (
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-primary"
-                                disabled={completingId === r.id}
-                                onClick={() => complete(r.id, r.receipt_number)}
-                              >
-                                <IconCheck />
-                                {completingId === r.id ? "…" : "Complete"}
-                              </button>
-                            ) : canComplete && !canUpdate ? (
-                              <span className="text-muted" style={{ fontSize: 12 }}>
-                                No permission
-                              </span>
-                            ) : (
-                              <span className="text-muted" style={{ fontSize: 12 }}>
-                                Closed
-                              </span>
-                            )}
-                          </td>
                         </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                      ) : (
+                        receipts.map((r) => {
+                          const canComplete = OPEN_STATUSES.includes(
+                            (r.status || "").toLowerCase()
+                          );
+                          return (
+                            <tr key={r.id}>
+                              <td>
+                                <div className="product-cell">
+                                  <div
+                                    className="product-avatar"
+                                    style={{
+                                      background: "rgba(90, 154, 110, 0.12)",
+                                      color: "var(--sa-sage-deep)",
+                                    }}
+                                  >
+                                    <IconBox />
+                                  </div>
+                                  <div>
+                                    <div className="product-name">
+                                      {r.receipt_number}
+                                    </div>
+                                    {r.receiver?.name && (
+                                      <div className="product-meta">
+                                        {r.receiver.name}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="fw-600">
+                                {r.purchase_order?.po_number ?? "—"}
+                              </td>
+                              <td>{r.supplier?.name ?? "—"}</td>
+                              <td>{r.warehouse ? r.warehouse.code : "—"}</td>
+                              <td className="text-muted">
+                                {formatDateLong(r.date)}
+                              </td>
+                              <td>
+                                {Number(r.expected).toLocaleString(undefined, {
+                                  maximumFractionDigits: 2,
+                                })}
+                              </td>
+                              <td className="fw-600">
+                                {Number(r.received).toLocaleString(undefined, {
+                                  maximumFractionDigits: 2,
+                                })}
+                              </td>
+                              <td>
+                                <span
+                                  className={`status-badge status-${r.status}`}
+                                >
+                                  {r.status}
+                                </span>
+                              </td>
+                              <td>
+                                {canComplete && canUpdate ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm btn-primary"
+                                    disabled={completingId === r.id}
+                                    onClick={() =>
+                                      void complete(r.id, r.receipt_number)
+                                    }
+                                  >
+                                    <IconCheck />
+                                    {completingId === r.id ? "…" : "Complete"}
+                                  </button>
+                                ) : canComplete && !canUpdate ? (
+                                  <span
+                                    className="text-muted"
+                                    style={{ fontSize: 12 }}
+                                  >
+                                    No permission
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="text-muted"
+                                    style={{ fontSize: 12 }}
+                                  >
+                                    Closed
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
 
-            <div className="table-pagination">
-              <span className="pagination-info">
-                Page {page} of {lastPage} · {total.toLocaleString()} total
-              </span>
-              <div className="pagination-btns">
-                <button
-                  type="button"
-                  disabled={page <= 1 || loading}
-                  onClick={() => setPage((p) => p - 1)}
-                >
-                  ‹
-                </button>
-                {Array.from({ length: lastPage }, (_, i) => i + 1)
-                  .slice(Math.max(0, page - 3), page + 2)
-                  .map((n) => (
+                <div className="table-pagination">
+                  <span className="pagination-info">
+                    Page {page} of {lastPage} · {total.toLocaleString()} total
+                  </span>
+                  <div className="pagination-btns">
                     <button
-                      key={n}
                       type="button"
-                      className={n === page ? "active" : ""}
-                      onClick={() => setPage(n)}
+                      disabled={page <= 1 || loading}
+                      onClick={() => setPage((p) => p - 1)}
                     >
-                      {n}
+                      ‹
                     </button>
-                  ))}
-                <button
-                  type="button"
-                  disabled={page >= lastPage || loading}
-                  onClick={() => setPage((p) => p + 1)}
-                >
-                  ›
-                </button>
+                    {Array.from({ length: lastPage }, (_, i) => i + 1)
+                      .slice(Math.max(0, page - 3), page + 2)
+                      .map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          className={n === page ? "active" : ""}
+                          onClick={() => setPage(n)}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    <button
+                      type="button"
+                      disabled={page >= lastPage || loading}
+                      onClick={() => setPage((p) => p + 1)}
+                    >
+                      ›
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-          </>
+            </>
           )}
         </main>
       </div>
 
       {showAdd && (
-        <div className="modal-overlay" onClick={() => !saving && setShowAdd(false)}>
+        <div
+          className="modal-overlay"
+          onClick={() => !saving && setShowAdd(false)}
+        >
           <div
             className="card"
             onClick={(e) => e.stopPropagation()}
@@ -1129,6 +1217,7 @@ function Receiving() {
               overflow: "auto",
             }}
             role="dialog"
+            aria-modal="true"
             aria-labelledby="gr-create-title"
           >
             <div
@@ -1140,11 +1229,21 @@ function Receiving() {
               }}
             >
               <div>
-                <h2 id="gr-create-title" style={{ margin: 0, fontSize: 18, fontWeight: 650 }}>
+                <h2
+                  id="gr-create-title"
+                  style={{ margin: 0, fontSize: 18, fontWeight: 650 }}
+                >
                   New Goods Receipt
                 </h2>
-                <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--sa-muted)" }}>
-                  Link a PO · count received qty · recorded as receiving transactions
+                <p
+                  style={{
+                    margin: "4px 0 0",
+                    fontSize: 13,
+                    color: "var(--sa-muted)",
+                  }}
+                >
+                  Link a PO · count received qty · recorded as receiving
+                  transactions
                 </p>
               </div>
               <button
@@ -1152,6 +1251,7 @@ function Receiving() {
                 className="btn btn-secondary"
                 onClick={() => setShowAdd(false)}
                 disabled={saving}
+                aria-label="Close"
               >
                 <IconX />
               </button>
@@ -1176,8 +1276,9 @@ function Receiving() {
             <form onSubmit={handleAdd}>
               <div className="form-grid-2">
                 <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                  <label>Purchase Order *</label>
+                  <label htmlFor="gr-po">Purchase Order *</label>
                   <select
+                    id="gr-po"
                     required
                     value={form.purchase_order_id}
                     onChange={(e) => onPoChange(e.target.value)}
@@ -1200,8 +1301,9 @@ function Receiving() {
                 </div>
 
                 <div className="form-field">
-                  <label>Supplier *</label>
+                  <label htmlFor="gr-supplier">Supplier *</label>
                   <select
+                    id="gr-supplier"
                     required
                     value={form.supplier_id}
                     onChange={(e) =>
@@ -1219,26 +1321,59 @@ function Receiving() {
                 </div>
 
                 <div className="form-field">
-                  <label>Warehouse</label>
-                  <select
-                    value={form.warehouse_id}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, warehouse_id: e.target.value }))
-                    }
-                    disabled={saving}
-                  >
-                    <option value="">— None —</option>
-                    {warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name ? `${w.code} — ${w.name}` : w.code}
-                      </option>
-                    ))}
-                  </select>
+                  <label htmlFor="gr-wh">
+                    Warehouse {warehouseOptions.length > 0 ? "*" : ""}
+                  </label>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <select
+                      id="gr-wh"
+                      value={form.warehouse_id}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, warehouse_id: e.target.value }))
+                      }
+                      disabled={saving || whBusy}
+                      style={{ flex: 1 }}
+                      required={warehouseOptions.length > 0}
+                    >
+                      {warehouseOptions.length === 0 ? (
+                        <option value="">
+                          {whBusy ? "Loading warehouses…" : "— No warehouses —"}
+                        </option>
+                      ) : (
+                        <>
+                          <option value="">— Select warehouse —</option>
+                          {warehouseOptions.map((w) => (
+                            <option key={w.id} value={w.id}>
+                              {w.name ? `${w.code} — ${w.name}` : w.code}
+                            </option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                    {warehouseOptions.length === 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        disabled={whBusy || saving}
+                        onClick={() => void refetchWarehouses()}
+                        title="Reload warehouses"
+                      >
+                        {whBusy ? "…" : "Retry"}
+                      </button>
+                    )}
+                  </div>
+                  {warehouseOptions.length === 0 && !whBusy && (
+                    <span className="po-field-hint">
+                      No warehouses loaded. Create a site under Warehouses, then
+                      click Retry.
+                    </span>
+                  )}
                 </div>
 
                 <div className="form-field">
-                  <label>Receiver</label>
+                  <label htmlFor="gr-receiver">Receiver</label>
                   <select
+                    id="gr-receiver"
                     value={form.receiver_id}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, receiver_id: e.target.value }))
@@ -1255,20 +1390,26 @@ function Receiving() {
                 </div>
 
                 <div className="form-field">
-                  <label>Date</label>
+                  <label htmlFor="gr-date">Date</label>
                   <input
+                    id="gr-date"
                     type="date"
                     value={form.date}
-                    onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, date: e.target.value }))
+                    }
                     disabled={saving}
                   />
                 </div>
 
                 <div className="form-field">
-                  <label>Status</label>
+                  <label htmlFor="gr-status">Status</label>
                   <select
+                    id="gr-status"
                     value={form.status}
-                    onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, status: e.target.value }))
+                    }
                     disabled={saving}
                   >
                     <option value="pending">Pending</option>
@@ -1285,7 +1426,8 @@ function Receiving() {
                   <div>
                     <span className="po-lines-title">Products received</span>
                     <span className="po-lines-hint">
-                      From PO lines · adjust received qty · receiving transactions
+                      From PO lines · adjust received qty · receiving
+                      transactions
                     </span>
                   </div>
                   <button
@@ -1311,7 +1453,9 @@ function Receiving() {
                             type="text"
                             value={line.product_name}
                             onChange={(e) =>
-                              setLine(line.key, { product_name: e.target.value })
+                              setLine(line.key, {
+                                product_name: e.target.value,
+                              })
                             }
                             disabled={saving}
                             placeholder="Product name"
@@ -1400,7 +1544,10 @@ function Receiving() {
                         totals.received !== totals.expected && (
                           <span className="so-footer-warn">
                             {" "}
-                            · Δ {(totals.received - totals.expected).toLocaleString()}
+                            · Δ{" "}
+                            {(
+                              totals.received - totals.expected
+                            ).toLocaleString()}
                           </span>
                         )}
                     </span>

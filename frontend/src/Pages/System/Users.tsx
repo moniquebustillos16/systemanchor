@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { useUsers, useUserStats, useRoles } from "../../hooks/useUsers";
+import { useQuery } from "@tanstack/react-query";
+import { queryKeys } from "../../lib/queryClient";
+import { invalidateUsers } from "../../lib/invalidate";
 import "../css/System.css";
 
 const svg = {
@@ -60,8 +64,6 @@ type User = {
   warehouses?: Warehouse[] | null;
 };
 
-type UserStats = { all: number; active: number; inactive: number; suspended: number };
-
 type UserForm = {
   name: string;
   email: string;
@@ -110,12 +112,53 @@ function userPrimaryWarehouse(u: User): Warehouse | null {
   return u.warehouse || u.warehouses?.[0] || null;
 }
 
-function extractList<T>(json: any): T[] {
-  if (!json) return [];
-  if (Array.isArray(json)) return json;
-  if (Array.isArray(json.data)) return json.data;
-  if (Array.isArray(json.data?.data)) return json.data.data;
-  return [];
+function normalizeUser(raw: Record<string, unknown>): User {
+  const roleRaw = raw.role as Record<string, unknown> | null | undefined;
+  const whRaw = raw.warehouse as Record<string, unknown> | null | undefined;
+  const whsRaw = Array.isArray(raw.warehouses)
+    ? (raw.warehouses as Record<string, unknown>[])
+    : null;
+
+  return {
+    id: String(raw.id ?? ""),
+    name: String(raw.name ?? ""),
+    email: String(raw.email ?? ""),
+    role_id:
+      raw.role_id != null
+        ? String(raw.role_id)
+        : roleRaw?.id != null
+          ? String(roleRaw.id)
+          : null,
+    warehouse_id: raw.warehouse_id != null ? String(raw.warehouse_id) : null,
+    access_all_warehouses: !!raw.access_all_warehouses,
+    status: String(raw.status ?? "active"),
+    last_login_at: (raw.last_login_at as string | null) ?? null,
+    role: roleRaw
+      ? { id: String(roleRaw.id ?? ""), name: String(roleRaw.name ?? "") }
+      : null,
+    warehouse: whRaw
+      ? {
+          id: String(whRaw.id ?? ""),
+          name: String(whRaw.name ?? ""),
+          code: whRaw.code != null ? String(whRaw.code) : undefined,
+          location:
+            (whRaw.location as string | null) ??
+            (whRaw.address as string | null) ??
+            null,
+        }
+      : null,
+    warehouses: whsRaw
+      ? whsRaw.map((w) => ({
+          id: String(w.id ?? ""),
+          name: String(w.name ?? ""),
+          code: w.code != null ? String(w.code) : undefined,
+          location:
+            (w.location as string | null) ??
+            (w.address as string | null) ??
+            null,
+        }))
+      : null,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -149,7 +192,8 @@ function validateUserForm(
     errors.email = "Enter a valid email address.";
   } else {
     const dup = existingUsers.some(
-      (u) => u.email.toLowerCase() === email && (!editing || u.id !== editing.id)
+      (u) =>
+        u.email.toLowerCase() === email && (!editing || u.id !== editing.id)
     );
     if (dup) errors.email = "A user with this email already exists.";
   }
@@ -170,7 +214,6 @@ function validateUserForm(
     }
   }
 
-  // Warehouse access: either "all" OR one-or-more specific IDs
   if (!form.access_all_warehouses && form.warehouse_ids.length === 0) {
     errors.warehouse_ids =
       "Assign at least one warehouse, or enable “Access all warehouses”.";
@@ -199,37 +242,18 @@ function firstFormError(errors: FormErrors): string | null {
   return null;
 }
 
-/* ------------------------------------------------------------------ */
-/* Module-level cache + inflight                                      */
-/* ------------------------------------------------------------------ */
-
-const TTL = 5 * 60_000; // 5 min
-type CE<T> = { data: T; at: number };
-
-const cache = {
-  users: null as CE<User[]> | null,
-  roles: null as CE<Role[]> | null,
-  warehouses: null as CE<Warehouse[]> | null,
-  stats: null as CE<UserStats> | null,
-};
-
-const inflight = {
-  users: null as Promise<User[]> | null,
-  roles: null as Promise<Role[]> | null,
-  warehouses: null as Promise<Warehouse[]> | null,
-  stats: null as Promise<UserStats> | null,
-};
-
-function isFresh<T>(e: CE<T> | null): e is CE<T> {
-  return !!e && Date.now() - e.at < TTL;
-}
-
-/** Extract a clean, user-facing message from any thrown value */
-function getErrorMessage(err: unknown, fallback = "Something went wrong"): string {
+function getErrorMessage(
+  err: unknown,
+  fallback = "Something went wrong"
+): string {
   if (!err) return fallback;
   const e = err as any;
-  if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError") {
-    return ""; // silent – request was cancelled
+  if (
+    e?.name === "CanceledError" ||
+    e?.code === "ERR_CANCELED" ||
+    e?.name === "AbortError"
+  ) {
+    return "";
   }
   const msg =
     e?.response?.data?.message ||
@@ -239,23 +263,43 @@ function getErrorMessage(err: unknown, fallback = "Something went wrong"): strin
   return typeof msg === "string" && msg.trim() ? msg.trim() : fallback;
 }
 
-function Users() {
-  const [users, setUsers] = useState<User[]>(() => (isFresh(cache.users) ? cache.users.data : []));
-  const [roles, setRoles] = useState<Role[]>(() => (isFresh(cache.roles) ? cache.roles.data : []));
-  const [warehouses, setWarehouses] = useState<Warehouse[]>(() =>
-    isFresh(cache.warehouses) ? cache.warehouses.data : []
-  );
-  const [stats, setStats] = useState<UserStats>(() =>
-    isFresh(cache.stats) ? cache.stats.data : { all: 0, active: 0, inactive: 0, suspended: 0 }
-  );
+/* ── Warehouses via shared query key ─────────────────────────── */
+function useWarehousesList() {
+  return useQuery({
+    queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
+    queryFn: async () => {
+      const { data: j } = await api.get("/warehouses", {
+        params: { per_page: 200, all: 1 },
+      });
+      const raw = Array.isArray(j)
+        ? j
+        : Array.isArray(j?.data)
+          ? j.data
+          : Array.isArray(j?.data?.data)
+            ? j.data.data
+            : [];
+      return raw.map((w: any) => ({
+        id: String(w.id),
+        name: String(w.name ?? ""),
+        code: w.code != null ? String(w.code) : undefined,
+        location: w.location ?? w.address ?? null,
+      })) as Warehouse[];
+    },
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  });
+}
 
+function Users() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [roleFilter, setRoleFilter] = useState("all");
   const [warehouseFilter, setWarehouseFilter] = useState("all");
-  const [loading, setLoading] = useState(() => !isFresh(cache.users));
-  const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
+  const [toast, setToast] = useState<{
+    type: string;
+    title: string;
+    msg: string;
+  } | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
@@ -271,267 +315,50 @@ function Users() {
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [saving, setSaving] = useState(false);
 
-  const abortRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(true);
-  const autoRetryRef = useRef(0);
+  const showToast = useCallback(
+    (type: string, title: string, msg: string) => {
+      setToast({ type, title, msg });
+      setTimeout(() => setToast(null), 2800);
+    },
+    []
+  );
 
-  const showToast = useCallback((type: string, title: string, msg: string) => {
-    setToast({ type, title, msg });
-    setTimeout(() => setToast(null), 2800);
-  }, []);
+  /* ── Data via TanStack Query ──────────────────────────────── */
+  const usersQ = useUsers({
+    page: 1,
+    perPage: 200,
+    search: "",
+    status: status === "all" ? "" : status,
+    roleId: roleFilter === "all" ? null : roleFilter,
+    warehouseId: warehouseFilter === "all" ? null : warehouseFilter,
+  });
 
-  /* ================================================================ */
-  /* Fetchers – cache + inflight + SWR                                */
-  /* ================================================================ */
+  const statsQ = useUserStats();
+  const rolesQ = useRoles();
+  const warehousesQ = useWarehousesList();
 
-  const fetchStats = useCallback(async (force = false) => {
-    try {
-      if (!force && isFresh(cache.stats)) {
-        setStats(cache.stats.data);
-        return;
-      }
-      // Stale-while-revalidate: paint cached data immediately
-      if (!force && cache.stats) setStats(cache.stats.data);
+  const users = useMemo(
+    () => (usersQ.rows as Record<string, unknown>[]).map(normalizeUser),
+    [usersQ.rows]
+  );
 
-      let data: UserStats;
-      if (inflight.stats && !force) {
-        data = await inflight.stats;
-      } else {
-        const request = api.get("/users/stats").then(({ data: j }) => ({
-          all: Number(j.all ?? 0),
-          active: Number(j.active ?? 0),
-          inactive: Number(j.inactive ?? 0),
-          suspended: Number(j.suspended ?? 0),
-        }));
-        inflight.stats = request;
-        try {
-          data = await request;
-          cache.stats = { data, at: Date.now() };
-        } finally {
-          inflight.stats = null;
-        }
-      }
-      if (mountedRef.current) setStats(data);
-    } catch (err) {
-      // Soft fail – stats are non-critical; keep last known good data
-      getErrorMessage(err);
-    }
-  }, []);
+  const roles = useMemo(
+    () =>
+      (rolesQ.rows as Record<string, unknown>[]).map((r) => ({
+        id: String(r.id ?? ""),
+        name: String(r.name ?? ""),
+      })),
+    [rolesQ.rows]
+  );
 
-  const fetchRoles = useCallback(async (force = false) => {
-    try {
-      if (!force && isFresh(cache.roles)) {
-        setRoles(cache.roles.data);
-        return;
-      }
-      if (!force && cache.roles) setRoles(cache.roles.data);
+  const warehouses = warehousesQ.data ?? [];
+  const stats = statsQ.stats;
 
-      let list: Role[];
-      if (inflight.roles && !force) {
-        list = await inflight.roles;
-      } else {
-        const request = api
-          .get("/roles?per_page=200&all=1&sort=name&dir=asc")
-          .then(({ data: j }) => extractList<Role>(j));
-        inflight.roles = request;
-        try {
-          list = await request;
-          cache.roles = { data: list, at: Date.now() };
-        } finally {
-          inflight.roles = null;
-        }
-      }
-      if (mountedRef.current) setRoles(list);
-    } catch (err) {
-      // Soft fail – empty role list is acceptable
-      getErrorMessage(err);
-    }
-  }, []);
-
-  const fetchWarehouses = useCallback(async (force = false) => {
-    try {
-      if (!force && isFresh(cache.warehouses)) {
-        setWarehouses(cache.warehouses.data);
-        return;
-      }
-      if (!force && cache.warehouses) setWarehouses(cache.warehouses.data);
-
-      let list: Warehouse[];
-      if (inflight.warehouses && !force) {
-        list = await inflight.warehouses;
-      } else {
-        const request = api.get("/warehouses").then(({ data: j }) => {
-          const raw = Array.isArray(j)
-            ? j
-            : Array.isArray(j?.data)
-              ? j.data
-              : Array.isArray(j?.data?.data)
-                ? j.data.data
-                : [];
-          return raw.map((w: any) => ({
-            id: String(w.id),
-            name: String(w.name ?? ""),
-            code: w.code != null ? String(w.code) : undefined,
-            location: w.location ?? w.address ?? null,
-          })) as Warehouse[];
-        });
-        inflight.warehouses = request;
-        try {
-          list = await request;
-          cache.warehouses = { data: list, at: Date.now() };
-        } finally {
-          inflight.warehouses = null;
-        }
-      }
-      if (mountedRef.current) setWarehouses(list);
-    } catch (err) {
-      // Soft fail – empty catalog is ok
-      getErrorMessage(err);
-    }
-  }, []);
-
-  const fetchUsers = useCallback(async (force = false) => {
-    const hardFilter =
-      status !== "all" || roleFilter !== "all" || warehouseFilter !== "all";
-
-    // Serve fresh cache instantly when no hard filters
-    if (!force && !hardFilter && isFresh(cache.users) && cache.users!.data.length > 0) {
-      setUsers(cache.users!.data);
-      setLoading(false);
-      setError(null);
-      return;
-    }
-
-    // Stale-while-revalidate: paint cached data immediately
-    if (!force && !hardFilter && cache.users && cache.users.data.length > 0) {
-      setUsers(cache.users.data);
-      setLoading(false);
-    } else if (!cache.users || hardFilter) {
-      setLoading(true);
-    }
-    setError(null);
-
-    // Reuse in-flight unfiltered request (Strict Mode safe)
-    if (!hardFilter && inflight.users && !force) {
-      try {
-        const list = await inflight.users;
-        if (!mountedRef.current) return;
-        setUsers(list);
-        setLoading(false);
-        setError(null);
-      } catch {
-        /* owner of the promise handles the error */
-      }
-      return;
-    }
-
-    // Cancel any previous filtered request
-    if (abortRef.current) {
-      abortRef.current.abort();
-    }
-    const ac = new AbortController();
-    abortRef.current = ac;
-
-    try {
-      const params = new URLSearchParams({
-        per_page: "200",
-        sort: "name",
-        dir: "asc",
-      });
-      if (status !== "all") params.set("status", status);
-      if (roleFilter !== "all") params.set("role_id", roleFilter);
-      if (warehouseFilter !== "all") params.set("warehouse_id", warehouseFilter);
-
-      const request = api
-        .get(`/users?${params}`, { signal: ac.signal })
-        .then(({ data: json }) => extractList<User>(json));
-
-      if (!hardFilter) inflight.users = request;
-
-      let list: User[];
-      try {
-        list = await request;
-      } finally {
-        if (!hardFilter) inflight.users = null;
-      }
-
-      if (ac.signal.aborted || !mountedRef.current) return;
-
-      setUsers(list);
-      setError(null);
-      autoRetryRef.current = 0;
-
-      if (!hardFilter) {
-        cache.users = { data: list, at: Date.now() };
-      }
-    } catch (err: unknown) {
-      const msg = getErrorMessage(err);
-      if (!msg || !mountedRef.current) return; // cancelled or unmounted
-
-      // Exponential backoff auto-retry (max 2)
-      if (autoRetryRef.current < 2) {
-        autoRetryRef.current += 1;
-        const delay = 500 * Math.pow(2, autoRetryRef.current - 1); // 500ms → 1000ms
-        setTimeout(() => {
-          if (mountedRef.current) fetchUsers(true);
-        }, delay);
-        return;
-      }
-
-      setError(msg || "Unable to load users");
-    } finally {
-      if (!ac.signal.aborted && mountedRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [status, roleFilter, warehouseFilter]);
-
-  /* Mount: users FIRST, then secondary. Inflight/cache survive Strict Mode remounts. */
-  useEffect(() => {
-    mountedRef.current = true;
-
-    (async () => {
-      await fetchUsers();
-      if (!mountedRef.current) return;
-      void fetchStats();
-      void fetchRoles();
-      void fetchWarehouses();
-    })();
-
-    return () => {
-      mountedRef.current = false;
-      // Do not abort here – let inflight finish so remount can reuse it
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* Auto-refetch when hard filters change */
-  useEffect(() => {
-    fetchUsers();
-  }, [status, roleFilter, warehouseFilter]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* Stats say users exist but list empty → one auto-refetch */
-  useEffect(() => {
-    if (loading || error) return;
-    if (stats.all > 0 && users.length === 0 && status === "all" && roleFilter === "all") {
-      const t = setTimeout(() => {
-        cache.users = null;
-        fetchUsers(true);
-      }, 400);
-      return () => clearTimeout(t);
-    }
-  }, [stats.all, users.length, loading, error, status, roleFilter, fetchUsers]);
-
-  /* Refetch when tab becomes visible */
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") {
-        if (!isFresh(cache.users)) fetchUsers();
-        if (!isFresh(cache.stats)) fetchStats();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [fetchUsers, fetchStats]);
+  const loading = usersQ.isLoading && users.length === 0;
+  const error =
+    usersQ.isError && users.length === 0
+      ? getErrorMessage(usersQ.error, "Unable to load users")
+      : null;
 
   useEffect(() => {
     if (!modalOpen) return;
@@ -542,7 +369,7 @@ function Users() {
     return () => window.removeEventListener("keydown", onKey);
   }, [modalOpen, saving]);
 
-  /* Client-side search – no network */
+  /* Client-side search – same as original */
   const filteredUsers = useMemo(() => {
     let list = users;
     if (warehouseFilter !== "all") {
@@ -567,7 +394,10 @@ function Users() {
   const withWarehouseCount = useMemo(
     () =>
       filteredUsers.filter(
-        (u) => u.access_all_warehouses || userWarehouseIds(u).length > 0 || !!u.warehouse_id
+        (u) =>
+          u.access_all_warehouses ||
+          userWarehouseIds(u).length > 0 ||
+          !!u.warehouse_id
       ).length,
     [filteredUsers]
   );
@@ -577,11 +407,6 @@ function Users() {
     for (const w of warehouses) m.set(w.id, w);
     return m;
   }, [warehouses]);
-
-  const bustCache = () => {
-    cache.users = null;
-    cache.stats = null;
-  };
 
   const openCreate = () => {
     setEditing(null);
@@ -613,7 +438,10 @@ function Users() {
     setModalOpen(true);
   };
 
-  const updateFormField = <K extends keyof UserForm>(key: K, value: UserForm[K]) => {
+  const updateFormField = <K extends keyof UserForm>(
+    key: K,
+    value: UserForm[K]
+  ) => {
     setForm((f) => ({ ...f, [key]: value }));
     setFormErrors((prev) => {
       if (!prev[key]) return prev;
@@ -636,7 +464,6 @@ function Users() {
 
     setSaving(true);
     try {
-      // Normalize: if every warehouse is checked, treat as access_all
       const allIds = warehouses.map((w) => w.id);
       const selectedAll =
         !form.access_all_warehouses &&
@@ -644,16 +471,16 @@ function Users() {
         allIds.every((id) => form.warehouse_ids.includes(id));
 
       const accessAll = form.access_all_warehouses || selectedAll;
-      const warehouseIds = accessAll ? [] : [...new Set(form.warehouse_ids.filter(Boolean))];
+      const warehouseIds = accessAll
+        ? []
+        : [...new Set(form.warehouse_ids.filter(Boolean))];
 
       const payload: Record<string, unknown> = {
         name: form.name.trim(),
         email: form.email.trim().toLowerCase(),
         role_id: form.role_id || null,
         access_all_warehouses: accessAll,
-        // Primary warehouse = first selected (legacy single-column support)
         warehouse_id: accessAll ? null : warehouseIds[0] || null,
-        // Multi-warehouse array for backends that accept it on the user resource
         warehouse_ids: accessAll ? [] : warehouseIds,
         status: form.status || "active",
       };
@@ -666,8 +493,8 @@ function Users() {
         body = (await api.post("/users", payload)).data;
       }
 
-      const savedId: string | undefined = body?.data?.id || editing?.id || body?.id;
-      // Dedicated pivot endpoint – authoritative for multi + all access
+      const savedId: string | undefined =
+        body?.data?.id || editing?.id || body?.id;
       if (savedId) {
         try {
           await api.put(`/users/${savedId}/warehouses`, {
@@ -675,15 +502,19 @@ function Users() {
             warehouse_ids: warehouseIds,
           });
         } catch {
-          /* optional – primary payload may already have applied */
+          /* optional */
         }
       }
 
-      showToast("success", editing ? "Updated" : "Created", editing ? "User updated." : "User created.");
+      showToast(
+        "success",
+        editing ? "Updated" : "Created",
+        editing ? "User updated." : "User created."
+      );
       setModalOpen(false);
       setFormErrors({});
-      bustCache();
-      await Promise.all([fetchUsers(true), fetchStats(true)]);
+      await invalidateUsers();
+      await Promise.all([usersQ.refetch(), statsQ.refetch()]);
     } catch (err: unknown) {
       const msg = getErrorMessage(err, "Save failed");
       showToast("error", "Error", msg || "Save failed");
@@ -697,10 +528,14 @@ function Users() {
     try {
       await api.delete(`/users/${u.id}`);
       showToast("success", "Deleted", `"${u.name}" removed.`);
-      bustCache();
-      await Promise.all([fetchUsers(true), fetchStats(true)]);
+      await invalidateUsers();
+      await Promise.all([usersQ.refetch(), statsQ.refetch()]);
     } catch (err: unknown) {
-      showToast("error", "Error", getErrorMessage(err, "Delete failed") || "Delete failed");
+      showToast(
+        "error",
+        "Error",
+        getErrorMessage(err, "Delete failed") || "Delete failed"
+      );
     }
   };
 
@@ -712,7 +547,10 @@ function Users() {
   };
 
   const hasActiveFilters =
-    search.trim() !== "" || status !== "all" || roleFilter !== "all" || warehouseFilter !== "all";
+    search.trim() !== "" ||
+    status !== "all" ||
+    roleFilter !== "all" ||
+    warehouseFilter !== "all";
 
   const toggleWarehouse = (id: string) => {
     setForm((f) => ({
@@ -731,7 +569,6 @@ function Users() {
 
   return (
     <div className="system-page">
-      {/* Responsive modal helpers – scopes to this page only */}
       <style>{`
         @media (max-width: 520px) {
           .users-modal .roles-form-grid {
@@ -752,10 +589,16 @@ function Users() {
           <div className="page-header">
             <div>
               <h1 className="page-title">Users</h1>
-              <p className="page-subtitle">Accounts with role and warehouse access</p>
+              <p className="page-subtitle">
+                Accounts with role and warehouse access
+              </p>
             </div>
             <div className="page-actions">
-              <button type="button" className="btn btn-primary" onClick={openCreate}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={openCreate}
+              >
                 <IconPlus /> Add User
               </button>
             </div>
@@ -768,7 +611,9 @@ function Users() {
             </div>
             <div className="stat-card">
               <div className="stat-label">Active</div>
-              <div className="stat-value users-stat-active">{stats.active}</div>
+              <div className="stat-value users-stat-active">
+                {stats.active}
+              </div>
             </div>
             <div className="stat-card">
               <div className="stat-label">With warehouse</div>
@@ -777,7 +622,9 @@ function Users() {
             </div>
             <div className="stat-card">
               <div className="stat-label">Warehouses</div>
-              <div className="stat-value">{warehouses.length || "—"}</div>
+              <div className="stat-value">
+                {warehouses.length || "—"}
+              </div>
             </div>
           </div>
 
@@ -794,13 +641,21 @@ function Users() {
                 />
               </div>
               <div className="table-filters users-filters">
-                <select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
+                <select
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value)}
+                  aria-label="Filter by status"
+                >
                   <option value="all">All statuses</option>
                   <option value="active">Active</option>
                   <option value="inactive">Inactive</option>
                   <option value="suspended">Suspended</option>
                 </select>
-                <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} aria-label="Filter by role">
+                <select
+                  value={roleFilter}
+                  onChange={(e) => setRoleFilter(e.target.value)}
+                  aria-label="Filter by role"
+                >
                   <option value="all">All roles</option>
                   {roles.map((r) => (
                     <option key={r.id} value={r.id}>
@@ -822,7 +677,11 @@ function Users() {
                   ))}
                 </select>
                 {hasActiveFilters && (
-                  <button type="button" className="btn btn-sm btn-secondary" onClick={clearFilters}>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={clearFilters}
+                  >
                     Clear
                   </button>
                 )}
@@ -858,19 +717,13 @@ function Users() {
                         <div className="users-empty">
                           <p>{error}</p>
                           <p className="text-muted" style={{ fontSize: 13 }}>
-                            {autoRetryRef.current > 0
-                              ? "Retrying automatically…"
-                              : "Check your connection and try again."}
+                            Check your connection and try again.
                           </p>
                           <button
                             type="button"
                             className="btn btn-sm btn-secondary"
                             style={{ marginTop: 8 }}
-                            onClick={() => {
-                              cache.users = null;
-                              autoRetryRef.current = 0;
-                              fetchUsers(true);
-                            }}
+                            onClick={() => usersQ.refetch()}
                           >
                             Retry now
                           </button>
@@ -889,12 +742,20 @@ function Users() {
                                 : "No users yet."}
                           </p>
                           {hasActiveFilters ? (
-                            <button type="button" className="btn btn-sm btn-secondary" onClick={clearFilters}>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-secondary"
+                              onClick={clearFilters}
+                            >
                               Clear filters
                             </button>
                           ) : (
                             !loading && (
-                              <button type="button" className="btn btn-sm btn-primary" onClick={openCreate}>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-primary"
+                                onClick={openCreate}
+                              >
                                 <IconPlus /> Add User
                               </button>
                             )
@@ -907,13 +768,15 @@ function Users() {
                       const whIds = userWarehouseIds(u);
                       const primary =
                         userPrimaryWarehouse(u) ||
-                        (u.warehouse_id ? warehouseNameById.get(u.warehouse_id) ?? null : null);
+                        (u.warehouse_id
+                          ? warehouseNameById.get(u.warehouse_id) ?? null
+                          : null);
                       const multiNames =
                         u.warehouses && u.warehouses.length > 0
                           ? u.warehouses.map((w) => w.name)
-                          : whIds
+                          : (whIds
                               .map((id) => warehouseNameById.get(id)?.name)
-                              .filter(Boolean) as string[];
+                              .filter(Boolean) as string[]);
                       const multiCount = Math.max(
                         u.warehouses?.length ?? 0,
                         whIds.length,
@@ -924,38 +787,60 @@ function Users() {
                         <tr key={u.id}>
                           <td>
                             <div className="user-cell">
-                              <div className="user-avatar">{initials(u.name)}</div>
+                              <div className="user-avatar">
+                                {initials(u.name)}
+                              </div>
                               <span className="fw-600">{u.name}</span>
                             </div>
                           </td>
                           <td className="text-muted">{u.email}</td>
                           <td>
                             {u.role?.name ? (
-                              <span className="users-role-chip">{u.role.name}</span>
+                              <span className="users-role-chip">
+                                {u.role.name}
+                              </span>
                             ) : (
                               <span className="text-muted">—</span>
                             )}
                           </td>
                           <td>
                             {u.access_all_warehouses ? (
-                              <span className="role-wh-all">All warehouses</span>
+                              <span className="role-wh-all">
+                                All warehouses
+                              </span>
                             ) : multiCount > 1 ? (
                               <span
                                 className="user-wh-chip"
-                                title={multiNames.join(", ") || `${multiCount} warehouses`}
+                                title={
+                                  multiNames.join(", ") ||
+                                  `${multiCount} warehouses`
+                                }
                               >
                                 <IconWarehouse />
                                 <span>
-                                  {multiNames[0] || primary?.name || "Warehouse"}
-                                  <span className="text-muted"> +{multiCount - 1}</span>
+                                  {multiNames[0] ||
+                                    primary?.name ||
+                                    "Warehouse"}
+                                  <span className="text-muted">
+                                    {" "}
+                                    +{multiCount - 1}
+                                  </span>
                                 </span>
                               </span>
                             ) : primary ? (
-                              <span className="user-wh-chip" title={primary.location || primary.code || ""}>
+                              <span
+                                className="user-wh-chip"
+                                title={
+                                  primary.location || primary.code || ""
+                                }
+                              >
                                 <IconWarehouse />
                                 <span>{primary.name}</span>
                                 {primary.code && (
-                                  <span className="track-code" style={{ marginLeft: 6 }}>
+                                  <span
+                                    className="track-code"
+                                    style={{ marginLeft: 6 }}
+                                  >
                                     {primary.code}
                                   </span>
                                 )}
@@ -977,13 +862,23 @@ function Users() {
                               {u.status}
                             </span>
                           </td>
-                          <td className="text-muted">{formatDateTime(u.last_login_at)}</td>
+                          <td className="text-muted">
+                            {formatDateTime(u.last_login_at)}
+                          </td>
                           <td>
                             <div className="users-row-actions">
-                              <button type="button" className="btn btn-sm btn-secondary" onClick={() => openEdit(u)}>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => openEdit(u)}
+                              >
                                 Edit
                               </button>
-                              <button type="button" className="btn btn-sm btn-secondary" onClick={() => handleDelete(u)}>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => handleDelete(u)}
+                              >
                                 Delete
                               </button>
                             </div>
@@ -1037,7 +932,6 @@ function Users() {
               margin: 0,
             }}
           >
-            {/* Sticky header */}
             <div
               className="roles-modal-header"
               style={{
@@ -1050,7 +944,10 @@ function Users() {
                 borderBottom: "1px solid var(--border-color, #e5e7eb)",
               }}
             >
-              <h2 id="user-modal-title" style={{ margin: 0, fontSize: "1.15rem" }}>
+              <h2
+                id="user-modal-title"
+                style={{ margin: 0, fontSize: "1.15rem" }}
+              >
                 {editing ? "Edit User" : "Add User"}
               </h2>
               <button
@@ -1075,7 +972,6 @@ function Users() {
                 overflow: "hidden",
               }}
             >
-              {/* Scrollable body */}
               <div
                 className="roles-form-grid"
                 style={{
@@ -1103,10 +999,14 @@ function Users() {
                     maxLength={100}
                     aria-invalid={!!formErrors.name}
                   />
-                  {formErrors.name && <span className="field-error">{formErrors.name}</span>}
+                  {formErrors.name && (
+                    <span className="field-error">{formErrors.name}</span>
+                  )}
                 </label>
 
-                <label className={`form-field ${formErrors.email ? "has-error" : ""}`}>
+                <label
+                  className={`form-field ${formErrors.email ? "has-error" : ""}`}
+                >
                   <span>Email *</span>
                   <input
                     type="email"
@@ -1115,28 +1015,42 @@ function Users() {
                     placeholder="email@example.com"
                     aria-invalid={!!formErrors.email}
                   />
-                  {formErrors.email && <span className="field-error">{formErrors.email}</span>}
+                  {formErrors.email && (
+                    <span className="field-error">{formErrors.email}</span>
+                  )}
                 </label>
 
-                <label className={`form-field ${formErrors.password ? "has-error" : ""}`}>
-                  <span>Password {editing ? "(leave blank to keep)" : "*"}</span>
+                <label
+                  className={`form-field ${
+                    formErrors.password ? "has-error" : ""
+                  }`}
+                >
+                  <span>
+                    Password {editing ? "(leave blank to keep)" : "*"}
+                  </span>
                   <input
                     type="password"
                     value={form.password}
-                    onChange={(e) => updateFormField("password", e.target.value)}
+                    onChange={(e) =>
+                      updateFormField("password", e.target.value)
+                    }
                     placeholder={editing ? "••••••••" : "Min 6 characters"}
                     minLength={editing ? undefined : 6}
                     aria-invalid={!!formErrors.password}
                     autoComplete="new-password"
                   />
-                  {formErrors.password && <span className="field-error">{formErrors.password}</span>}
+                  {formErrors.password && (
+                    <span className="field-error">{formErrors.password}</span>
+                  )}
                 </label>
 
                 <label className="form-field">
                   <span>Role</span>
                   <select
                     value={form.role_id}
-                    onChange={(e) => updateFormField("role_id", e.target.value)}
+                    onChange={(e) =>
+                      updateFormField("role_id", e.target.value)
+                    }
                   >
                     <option value="">No role</option>
                     {roles.map((r) => (
@@ -1147,28 +1061,42 @@ function Users() {
                   </select>
                 </label>
 
-                <label className={`form-field ${formErrors.status ? "has-error" : ""}`}>
+                <label
+                  className={`form-field ${
+                    formErrors.status ? "has-error" : ""
+                  }`}
+                >
                   <span>Status</span>
                   <select
                     value={form.status}
-                    onChange={(e) => updateFormField("status", e.target.value)}
+                    onChange={(e) =>
+                      updateFormField("status", e.target.value)
+                    }
                   >
                     <option value="active">Active</option>
                     <option value="inactive">Inactive</option>
                     <option value="suspended">Suspended</option>
                   </select>
-                  {formErrors.status && <span className="field-error">{formErrors.status}</span>}
+                  {formErrors.status && (
+                    <span className="field-error">{formErrors.status}</span>
+                  )}
                 </label>
 
-                {/* Warehouse access – full width */}
                 <div
-                  className={`form-field full ${formErrors.warehouse_ids ? "has-error" : ""}`}
+                  className={`form-field full ${
+                    formErrors.warehouse_ids ? "has-error" : ""
+                  }`}
                   style={{ gridColumn: "1 / -1" }}
                 >
                   <span>Warehouse access *</span>
                   <div
                     className="user-wh-access-modes"
-                    style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                      marginTop: 4,
+                    }}
                   >
                     <label className="users-all-wh-check">
                       <input
@@ -1191,7 +1119,10 @@ function Users() {
                       />
                       <span>
                         <strong>Access all warehouses</strong>
-                        <span className="text-muted" style={{ marginLeft: 6, fontSize: 12 }}>
+                        <span
+                          className="text-muted"
+                          style={{ marginLeft: 6, fontSize: 12 }}
+                        >
                           (system-wide — overrides specific list)
                         </span>
                       </span>
@@ -1217,7 +1148,13 @@ function Users() {
                                 : `${form.warehouse_ids.length} warehouses selected`}
                           </span>
                           {warehouses.length > 0 && (
-                            <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <span
+                              style={{
+                                display: "flex",
+                                gap: 6,
+                                flexWrap: "wrap",
+                              }}
+                            >
                               <button
                                 type="button"
                                 className="btn btn-sm btn-secondary"
@@ -1241,7 +1178,12 @@ function Users() {
                                 type="button"
                                 className="btn btn-sm btn-secondary"
                                 disabled={form.warehouse_ids.length === 0}
-                                onClick={() => setForm((f) => ({ ...f, warehouse_ids: [] }))}
+                                onClick={() =>
+                                  setForm((f) => ({
+                                    ...f,
+                                    warehouse_ids: [],
+                                  }))
+                                }
                               >
                                 Clear
                               </button>
@@ -1260,10 +1202,15 @@ function Users() {
                           }}
                         >
                           {warehouses.length === 0 ? (
-                            <span className="text-muted">No warehouses available</span>
+                            <span className="text-muted">
+                              No warehouses available
+                            </span>
                           ) : (
                             warehouses.map((w) => (
-                              <label key={w.id} className="user-wh-check-item">
+                              <label
+                                key={w.id}
+                                className="user-wh-check-item"
+                              >
                                 <input
                                   type="checkbox"
                                   checked={form.warehouse_ids.includes(w.id)}
@@ -1279,33 +1226,46 @@ function Users() {
                         </div>
 
                         {form.warehouse_ids.length > 1 && (
-                          <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-                            This user can operate in {form.warehouse_ids.length} warehouses.
+                          <p
+                            className="text-muted"
+                            style={{ fontSize: 12, margin: 0 }}
+                          >
+                            This user can operate in{" "}
+                            {form.warehouse_ids.length} warehouses.
                           </p>
                         )}
                         {warehouses.length > 0 &&
                           form.warehouse_ids.length === warehouses.length &&
                           form.warehouse_ids.length > 0 && (
-                            <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-                              All warehouses checked — will be saved as “Access all warehouses”.
+                            <p
+                              className="text-muted"
+                              style={{ fontSize: 12, margin: 0 }}
+                            >
+                              All warehouses checked — will be saved as “Access
+                              all warehouses”.
                             </p>
                           )}
                       </>
                     )}
 
                     {form.access_all_warehouses && (
-                      <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-                        User can access every warehouse, including ones added later.
+                      <p
+                        className="text-muted"
+                        style={{ fontSize: 12, margin: 0 }}
+                      >
+                        User can access every warehouse, including ones added
+                        later.
                       </p>
                     )}
                   </div>
                   {formErrors.warehouse_ids && (
-                    <span className="field-error">{formErrors.warehouse_ids}</span>
+                    <span className="field-error">
+                      {formErrors.warehouse_ids}
+                    </span>
                   )}
                 </div>
               </div>
 
-              {/* Sticky footer actions */}
               <div
                 className="roles-modal-actions"
                 style={{
@@ -1317,7 +1277,12 @@ function Users() {
               >
                 <div
                   className="roles-modal-actions-right"
-                  style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    justifyContent: "flex-end",
+                    flexWrap: "wrap",
+                  }}
                 >
                   <button
                     type="button"
@@ -1327,7 +1292,11 @@ function Users() {
                   >
                     Cancel
                   </button>
-                  <button type="submit" className="btn btn-primary" disabled={saving}>
+                  <button
+                    type="submit"
+                    className="btn btn-primary"
+                    disabled={saving}
+                  >
                     {saving ? "Saving…" : editing ? "Update" : "Create"}
                   </button>
                 </div>

@@ -19,11 +19,10 @@ use Carbon\Carbon;
 
 class DashboardController extends Controller
 {
-    private const CACHE_TTL = 30; // seconds — short so ops stay fresh
+    private const CACHE_TTL = 30; // seconds
 
     /**
      * GET /api/dashboard
-     * Full operations overview. Cached briefly; all aggregators use single-pass SQL.
      */
     public function index(Request $request)
     {
@@ -49,7 +48,9 @@ class DashboardController extends Controller
             $alerts       = $this->stockAlerts();
             $recentMoves  = $this->recentMovements();
             $activity     = $this->activityFeed();
-            $trend        = $this->inventoryTrend($range, $invStats['inventory_value']);
+
+            $invValue = (float) ($invStats['inventory_value'] ?? 0);
+            $trend    = $this->inventoryTrend($range, $invValue);
 
             $avgUtil = count($warehouses)
                 ? (int) round(collect($warehouses)->avg('utilized'))
@@ -58,50 +59,56 @@ class DashboardController extends Controller
             $healthScore = $this->computeHealthScore(
                 $invStats,
                 $avgUtil,
-                $soStats['pending'],
-                $poStats['pending']
+                (int) ($soStats['pending'] ?? 0),
+                (int) ($poStats['pending'] ?? 0)
             );
 
+            // Safe keys — inventory:stats may come from InventoryController without active_skus
+            $totalProducts = (int) ($invStats['total_products'] ?? 0);
+            $activeSkus    = (int) ($invStats['active_skus'] ?? $totalProducts);
+            $lowStock      = (int) ($invStats['low_stock'] ?? 0);
+            $outOfStock    = (int) ($invStats['out_of_stock'] ?? 0);
+
             return [
-                'generated_at'    => now()->toIso8601String(),
-                'range'           => $range,
+                'generated_at'     => now()->toIso8601String(),
+                'range'            => $range,
 
-                'inventory_value' => $invStats['inventory_value'],
-                'total_products'  => $invStats['total_products'],
-                'low_stock'       => $invStats['low_stock'],
-                'out_of_stock'    => $invStats['out_of_stock'],
-                'active_skus'     => $invStats['active_skus'],
+                'inventory_value'  => $invValue,
+                'total_products'   => $totalProducts,
+                'low_stock'        => $lowStock,
+                'out_of_stock'     => $outOfStock,
+                'active_skus'      => $activeSkus,
 
-                'sales_orders'    => $soStats,
-                'purchase_orders' => $poStats,
+                'sales_orders'     => $soStats,
+                'purchase_orders'  => $poStats,
 
-                'stock_movements' => $movementStats,
-                'cycle_counts'    => $cycleStats,
-                'goods_receipts'  => $receiptStats,
-                'returns'         => $returnStats,
+                'stock_movements'  => $movementStats,
+                'cycle_counts'     => $cycleStats,
+                'goods_receipts'   => $receiptStats,
+                'returns'          => $returnStats,
 
-                'warehouses'      => $warehouses,
-                'avg_utilization' => $avgUtil,
-                'site_count'      => count($warehouses),
+                'warehouses'       => $warehouses,
+                'avg_utilization'  => $avgUtil,
+                'site_count'       => count($warehouses),
 
-                'category_mix'    => $categories,
-                'inventory_trend' => $trend['values'],
-                'trend_labels'    => $trend['labels'],
-                'stock_in_series' => $trend['stock_in'],
-                'stock_out_series'=> $trend['stock_out'],
+                'category_mix'     => $categories,
+                'inventory_trend'  => $trend['values'],
+                'trend_labels'     => $trend['labels'],
+                'stock_in_series'  => $trend['stock_in'],
+                'stock_out_series' => $trend['stock_out'],
 
-                'recent_orders'   => $recentOrders,
-                'stock_alerts'    => $alerts,
-                'recent_movements'=> $recentMoves,
-                'activity_feed'   => $activity,
+                'recent_orders'    => $recentOrders,
+                'stock_alerts'     => $alerts,
+                'recent_movements' => $recentMoves,
+                'activity_feed'    => $activity,
 
-                'health_score'    => $healthScore,
-                'pipeline'        => [
-                    ['label' => 'Open SO', 'count' => $soStats['pending'], 'color' => '#C49A5A'],
-                    ['label' => 'Done SO', 'count' => $soStats['done'],    'color' => '#5A9A6E'],
-                    ['label' => 'All SO',  'count' => $soStats['all'],     'color' => '#9A6B45'],
-                    ['label' => 'Open PO', 'count' => $poStats['pending'], 'color' => '#6B9B7A'],
-                    ['label' => 'All PO',  'count' => $poStats['all'],     'color' => '#A89880'],
+                'health_score'     => $healthScore,
+                'pipeline'         => [
+                    ['label' => 'Open SO', 'count' => (int) ($soStats['pending'] ?? 0), 'color' => '#C49A5A'],
+                    ['label' => 'Done SO', 'count' => (int) ($soStats['done'] ?? 0),    'color' => '#5A9A6E'],
+                    ['label' => 'All SO',  'count' => (int) ($soStats['all'] ?? 0),     'color' => '#9A6B45'],
+                    ['label' => 'Open PO', 'count' => (int) ($poStats['pending'] ?? 0), 'color' => '#6B9B7A'],
+                    ['label' => 'All PO',  'count' => (int) ($poStats['all'] ?? 0),     'color' => '#A89880'],
                 ],
             ];
         });
@@ -109,21 +116,20 @@ class DashboardController extends Controller
         return response()->json($payload);
     }
 
-    /**
-     * Lightweight stats-only endpoint (keeps existing frontend compatibility).
-     */
     public function stats()
     {
         return response()->json($this->inventoryStats());
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Private aggregators — single-pass SQL, no N+1                      */
+    /*  Private aggregators                                                 */
     /* ------------------------------------------------------------------ */
 
+    /**
+     * Shared cache key with InventoryController — always include active_skus.
+     */
     private function inventoryStats(): array
     {
-        // Reuse inventory controller cache when available
         return Cache::remember('inventory:stats', 20, function () {
             $row = Product::query()
                 ->whereNull('deleted_at')
@@ -138,7 +144,7 @@ class DashboardController extends Controller
 
             return [
                 'total_products'  => (int) ($row->total_products ?? 0),
-                'active_skus'     => (int) ($row->active_skus ?? 0),
+                'active_skus'     => (int) ($row->active_skus ?? $row->total_products ?? 0),
                 'low_stock'       => (int) ($row->low_stock ?? 0),
                 'out_of_stock'    => (int) ($row->out_of_stock ?? 0),
                 'inventory_value' => (float) ($row->inventory_value ?? 0),
@@ -175,8 +181,8 @@ class DashboardController extends Controller
                 ->whereNull('deleted_at')
                 ->selectRaw("
                     COUNT(*) as all_count,
-                    COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as pending,
-                    COALESCE(SUM(CASE WHEN status IN ('completed','received','shipped') THEN 1 ELSE 0 END), 0) as done,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','processing','PENDING','PROCESSING') THEN 1 ELSE 0 END), 0) as pending,
+                    COALESCE(SUM(CASE WHEN status IN ('completed','received','shipped','COMPLETED','RECEIVED','SHIPPED') THEN 1 ELSE 0 END), 0) as done,
                     COALESCE(SUM(total), 0) as total_value
                 ")
                 ->first();
@@ -195,7 +201,6 @@ class DashboardController extends Controller
         $today = Carbon::today()->startOfDay();
         $week  = Carbon::today()->subDays(7)->startOfDay();
 
-        // Bound ranges in PHP so we avoid driver-specific DATE() casting
         $todayCnt = (int) StockMovement::where('movement_date', '>=', $today)
             ->where('movement_date', '<', $today->copy()->addDay())
             ->count();
@@ -223,18 +228,22 @@ class DashboardController extends Controller
 
     private function cycleCountStats(): array
     {
-        $row = CycleCount::query()
-            ->selectRaw("
-                COUNT(*) as all_count,
-                COALESCE(SUM(CASE WHEN status IN ('pending','draft') THEN 1 ELSE 0 END), 0) as pending,
-                COALESCE(AVG(CASE WHEN status = 'completed' THEN accuracy ELSE NULL END), NULL) as avg_acc,
-                COALESCE(SUM(CASE
-                    WHEN status = 'completed'
-                     AND variance IS NOT NULL
-                     AND variance NOT IN ('0', '—', '')
-                    THEN 1 ELSE 0 END), 0) as open_var
-            ")
-            ->first();
+        try {
+            $row = CycleCount::query()
+                ->selectRaw("
+                    COUNT(*) as all_count,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','draft') THEN 1 ELSE 0 END), 0) as pending,
+                    COALESCE(AVG(CASE WHEN status = 'completed' THEN accuracy ELSE NULL END), NULL) as avg_acc,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed'
+                         AND variance IS NOT NULL
+                         AND variance NOT IN ('0', '—', '')
+                        THEN 1 ELSE 0 END), 0) as open_var
+                ")
+                ->first();
+        } catch (\Throwable $e) {
+            return ['all' => 0, 'pending' => 0, 'avg_acc' => null, 'open_var' => 0];
+        }
 
         return [
             'all'      => (int) ($row->all_count ?? 0),
@@ -246,15 +255,19 @@ class DashboardController extends Controller
 
     private function goodsReceiptStats(): array
     {
-        $row = GoodsReceipt::query()
-            ->whereNull('deleted_at')
-            ->selectRaw("
-                COUNT(*) as all_count,
-                COALESCE(SUM(CASE WHEN status IN ('pending','processing','partial') THEN 1 ELSE 0 END), 0) as open_cnt,
-                COALESCE(SUM(CASE WHEN status IN ('completed','received') THEN 1 ELSE 0 END), 0) as done_cnt,
-                COALESCE(SUM(received), 0) as lines
-            ")
-            ->first();
+        try {
+            $row = GoodsReceipt::query()
+                ->whereNull('deleted_at')
+                ->selectRaw("
+                    COUNT(*) as all_count,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','processing','partial') THEN 1 ELSE 0 END), 0) as open_cnt,
+                    COALESCE(SUM(CASE WHEN status IN ('completed','received') THEN 1 ELSE 0 END), 0) as done_cnt,
+                    COALESCE(SUM(received), 0) as lines
+                ")
+                ->first();
+        } catch (\Throwable $e) {
+            return ['all' => 0, 'open' => 0, 'done' => 0, 'lines' => 0];
+        }
 
         return [
             'all'   => (int) ($row->all_count ?? 0),
@@ -266,14 +279,18 @@ class DashboardController extends Controller
 
     private function returnStats(): array
     {
-        $row = ReturnModel::query()
-            ->selectRaw("
-                COUNT(*) as all_count,
-                COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as open_cnt,
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as closed_cnt,
-                COALESCE(SUM(items), 0) as items
-            ")
-            ->first();
+        try {
+            $row = ReturnModel::query()
+                ->selectRaw("
+                    COUNT(*) as all_count,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as open_cnt,
+                    COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as closed_cnt,
+                    COALESCE(SUM(items), 0) as items
+                ")
+                ->first();
+        } catch (\Throwable $e) {
+            return ['all' => 0, 'open' => 0, 'closed' => 0, 'items' => 0];
+        }
 
         return [
             'all'    => (int) ($row->all_count ?? 0),
@@ -283,16 +300,12 @@ class DashboardController extends Controller
         ];
     }
 
-    /**
-     * Fixed N+1: one query for warehouses + one grouped sum for product qty by warehouse.
-     */
     private function warehousesWithUtilization(): array
     {
         $warehouses = Warehouse::whereNull('deleted_at')
             ->orderBy('code')
             ->get(['id', 'code', 'name', 'location', 'capacity', 'utilized', 'status']);
 
-        // Bulk qty per warehouse — avoids per-row Product::sum
         $qtyByWh = Product::query()
             ->whereNull('deleted_at')
             ->whereNotNull('warehouse_id')
@@ -434,89 +447,94 @@ class DashboardController extends Controller
 
     private function recentMovements(): array
     {
-        return StockMovement::with([
-                'product:id,sku,name',
-                'fromWarehouse:id,code,name',
-                'toWarehouse:id,code,name',
-            ])
-            ->orderByDesc('movement_date')
-            ->limit(8)
-            ->get()
-            ->map(function ($m) {
-                return [
-                    'id'        => $m->id,
-                    'number'    => $m->movement_number ?? null,
-                    'type'      => $m->type,
-                    'qty'       => (float) $m->qty,
-                    'product'   => $m->product?->name ?? $m->product?->sku ?? '—',
-                    'sku'       => $m->product?->sku,
-                    'from'      => $m->fromWarehouse?->code ?? '—',
-                    'to'        => $m->toWarehouse?->code ?? '—',
-                    'reference' => $m->reference,
-                    'date'      => optional($m->movement_date)->toDateString()
-                        ?? substr((string) $m->movement_date, 0, 10),
-                    'status'    => $m->status ?? 'posted',
-                ];
-            })
-            ->all();
+        try {
+            return StockMovement::with([
+                    'product:id,sku,name',
+                    'fromWarehouse:id,code,name',
+                    'toWarehouse:id,code,name',
+                ])
+                ->orderByDesc('movement_date')
+                ->limit(8)
+                ->get()
+                ->map(function ($m) {
+                    return [
+                        'id'        => $m->id,
+                        'number'    => $m->movement_number ?? null,
+                        'type'      => $m->type,
+                        'qty'       => (float) $m->qty,
+                        'product'   => $m->product?->name ?? $m->product?->sku ?? '—',
+                        'sku'       => $m->product?->sku,
+                        'from'      => $m->fromWarehouse?->code ?? '—',
+                        'to'        => $m->toWarehouse?->code ?? '—',
+                        'reference' => $m->reference,
+                        'date'      => optional($m->movement_date)->toDateString()
+                            ?? substr((string) $m->movement_date, 0, 10),
+                        'status'    => $m->status ?? 'posted',
+                    ];
+                })
+                ->all();
+        } catch (\Throwable $e) {
+            return [];
+        }
     }
 
     private function activityFeed(): array
     {
         $items = [];
 
-        SalesOrder::whereNull('deleted_at')
-            ->orderByDesc('created_at')
-            ->limit(3)
-            ->get(['id', 'so_number', 'status', 'created_at'])
-            ->each(function ($o) use (&$items) {
-                $items[] = [
-                    'kind'  => 'so',
-                    'color' => '#5A9A6E',
-                    'text'  => 'Sales order ' . ($o->so_number ?? $o->id) . ' · ' . ($o->status ?? 'pending'),
-                    'time'  => optional($o->created_at)->diffForHumans() ?? 'recently',
-                    'path'  => '/sales-orders',
-                ];
-            });
+        try {
+            SalesOrder::whereNull('deleted_at')
+                ->orderByDesc('created_at')
+                ->limit(3)
+                ->get(['id', 'so_number', 'status', 'created_at'])
+                ->each(function ($o) use (&$items) {
+                    $items[] = [
+                        'kind'  => 'so',
+                        'color' => '#5A9A6E',
+                        'text'  => 'Sales order ' . ($o->so_number ?? $o->id) . ' · ' . ($o->status ?? 'pending'),
+                        'time'  => optional($o->created_at)->diffForHumans() ?? 'recently',
+                        'path'  => '/sales-orders',
+                    ];
+                });
 
-        PurchaseOrder::whereNull('deleted_at')
-            ->orderByDesc('created_at')
-            ->limit(2)
-            ->get(['id', 'po_number', 'status', 'created_at'])
-            ->each(function ($o) use (&$items) {
-                $items[] = [
-                    'kind'  => 'po',
-                    'color' => '#9A6B45',
-                    'text'  => 'Purchase order ' . ($o->po_number ?? $o->id) . ' · ' . ($o->status ?? 'pending'),
-                    'time'  => optional($o->created_at)->diffForHumans() ?? 'recently',
-                    'path'  => '/purchase-orders',
-                ];
-            });
+            PurchaseOrder::whereNull('deleted_at')
+                ->orderByDesc('created_at')
+                ->limit(2)
+                ->get(['id', 'po_number', 'status', 'created_at'])
+                ->each(function ($o) use (&$items) {
+                    $items[] = [
+                        'kind'  => 'po',
+                        'color' => '#9A6B45',
+                        'text'  => 'Purchase order ' . ($o->po_number ?? $o->id) . ' · ' . ($o->status ?? 'pending'),
+                        'time'  => optional($o->created_at)->diffForHumans() ?? 'recently',
+                        'path'  => '/purchase-orders',
+                    ];
+                });
 
-        StockMovement::orderByDesc('created_at')
-            ->limit(3)
-            ->get(['id', 'type', 'qty', 'reference', 'created_at'])
-            ->each(function ($m) use (&$items) {
-                $items[] = [
-                    'kind'  => 'move',
-                    'color' => match ($m->type) {
-                        'IN' => '#5A9A6E',
-                        'OUT' => '#B85C4A',
-                        'TRANSFER' => '#9A6B45',
-                        default => '#C49A5A',
-                    },
-                    'text'  => $m->type . ' · qty ' . $m->qty . ($m->reference ? " · {$m->reference}" : ''),
-                    'time'  => optional($m->created_at)->diffForHumans() ?? 'recently',
-                    'path'  => '/stock-movements',
-                ];
-            });
+            StockMovement::orderByDesc('created_at')
+                ->limit(3)
+                ->get(['id', 'type', 'qty', 'reference', 'created_at'])
+                ->each(function ($m) use (&$items) {
+                    $items[] = [
+                        'kind'  => 'move',
+                        'color' => match ($m->type) {
+                            'IN' => '#5A9A6E',
+                            'OUT' => '#B85C4A',
+                            'TRANSFER' => '#9A6B45',
+                            default => '#C49A5A',
+                        },
+                        'text'  => $m->type . ' · qty ' . $m->qty . ($m->reference ? " · {$m->reference}" : ''),
+                        'time'  => optional($m->created_at)->diffForHumans() ?? 'recently',
+                        'path'  => '/stock-movements',
+                    ];
+                });
+        } catch (\Throwable $e) {
+            // keep partial feed
+        }
 
         return array_slice($items, 0, 8);
     }
 
-    /**
-     * One grouped query for the whole range instead of 2 queries per month.
-     */
     private function inventoryTrend(string $range, float $currentValue): array
     {
         $months = match ($range) {
@@ -525,19 +543,23 @@ class DashboardController extends Controller
             default => 7,
         };
 
-        $now = Carbon::now()->startOfMonth();
+        $now  = Carbon::now()->startOfMonth();
         $from = $now->copy()->subMonths($months - 1)->startOfMonth();
 
-        $driver = DB::getDriverName();
+        $driver    = DB::getDriverName();
         $monthExpr = $driver === 'pgsql'
             ? "to_char(movement_date, 'YYYY-MM')"
             : "DATE_FORMAT(movement_date, '%Y-%m')";
 
-        $rows = StockMovement::query()
-            ->where('movement_date', '>=', $from)
-            ->selectRaw("{$monthExpr} as ym, type, COALESCE(SUM(qty), 0) as total_qty, COUNT(*) as move_cnt")
-            ->groupBy(DB::raw($monthExpr), 'type')
-            ->get();
+        try {
+            $rows = StockMovement::query()
+                ->where('movement_date', '>=', $from)
+                ->selectRaw("{$monthExpr} as ym, type, COALESCE(SUM(qty), 0) as total_qty, COUNT(*) as move_cnt")
+                ->groupBy(DB::raw($monthExpr), 'type')
+                ->get();
+        } catch (\Throwable $e) {
+            $rows = collect();
+        }
 
         $byMonth = [];
         foreach ($rows as $r) {
@@ -554,33 +576,28 @@ class DashboardController extends Controller
             }
         }
 
-        $labels = [];
-        $values = [];
-        $stockIn = [];
+        $labels   = [];
+        $values   = [];
+        $stockIn  = [];
         $stockOut = [];
-        $hasAny = !empty($byMonth);
+        $hasAny   = !empty($byMonth);
 
         for ($i = $months - 1; $i >= 0; $i--) {
-            $start = $now->copy()->subMonths($i);
-            $ym = $start->format('Y-m');
-            $labels[] = $start->format('M');
-            $inQty = $byMonth[$ym]['in'] ?? 0;
-            $outQty = $byMonth[$ym]['out'] ?? 0;
-            $stockIn[] = max(0, (int) round($byMonth[$ym]['in_cnt'] ?? 0));
+            $start      = $now->copy()->subMonths($i);
+            $ym         = $start->format('Y-m');
+            $labels[]   = $start->format('M');
+            $stockIn[]  = max(0, (int) round($byMonth[$ym]['in_cnt'] ?? 0));
             $stockOut[] = max(0, (int) round($byMonth[$ym]['out_cnt'] ?? 0));
-            $values[] = null; // filled below when we have data
+            $values[]   = null;
         }
 
         if ($hasAny) {
             $values[$months - 1] = round($currentValue);
             $scale = max(1, $currentValue / max(1, array_sum(array_column($byMonth, 'in')) ?: 1));
             for ($i = $months - 2; $i >= 0; $i--) {
-                $start = $now->copy()->subMonths($months - 1 - ($i + 1));
-                $ym = $start->format('Y-m');
-                // use next month's net for back-fill
                 $nextStart = $now->copy()->subMonths($months - 1 - ($i + 1));
-                $nextYm = $nextStart->format('Y-m');
-                $delta = (($byMonth[$nextYm]['in'] ?? 0) - ($byMonth[$nextYm]['out'] ?? 0)) * $scale * 0.15;
+                $nextYm    = $nextStart->format('Y-m');
+                $delta     = (($byMonth[$nextYm]['in'] ?? 0) - ($byMonth[$nextYm]['out'] ?? 0)) * $scale * 0.15;
                 $values[$i] = max(0, round(($values[$i + 1] ?? $currentValue) - $delta));
             }
         } else {
@@ -615,10 +632,12 @@ class DashboardController extends Controller
     private function computeHealthScore(array $inv, int $avgUtil, int $openSo, int $openPo): int
     {
         $score = 100;
-        $sku = max(1, $inv['total_products']);
+        $sku   = max(1, (int) ($inv['total_products'] ?? 1));
+        $out   = (int) ($inv['out_of_stock'] ?? 0);
+        $low   = (int) ($inv['low_stock'] ?? 0);
 
-        $score -= min(30, ($inv['out_of_stock'] / $sku) * 100);
-        $score -= min(20, ($inv['low_stock'] / $sku) * 40);
+        $score -= min(30, ($out / $sku) * 100);
+        $score -= min(20, ($low / $sku) * 40);
 
         if ($avgUtil > 95) {
             $score -= 12;

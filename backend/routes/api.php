@@ -80,14 +80,33 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/roles/{id}', [RolesController::class, 'destroy']);
 
     // ---------- Profile ----------
-    Route::get('/profile', [ProfileController::class, 'show']);
-    Route::put('/profile', [ProfileController::class, 'update']);
-    Route::patch('/profile', [ProfileController::class, 'update']);
-    Route::put('/profile/password', [ProfileController::class, 'updatePassword']);
-    Route::put('/profile/settings', [ProfileController::class, 'updateSettings']);
-    Route::patch('/profile/settings', [ProfileController::class, 'updateSettings']);
-    Route::post('/profile/image', [ProfileController::class, 'uploadImage']);
-    Route::delete('/profile/image', [ProfileController::class, 'deleteImage']);
+    // 
+Route::get('/profile', [ProfileController::class, 'show']);
+Route::put('/profile', [ProfileController::class, 'update']);
+Route::patch('/profile', [ProfileController::class, 'update']);
+Route::put('/profile/password', [ProfileController::class, 'updatePassword']);
+Route::put('/profile/settings', [ProfileController::class, 'updateSettings']);
+Route::patch('/profile/settings', [ProfileController::class, 'updateSettings']);
+Route::post('/profile/image', [ProfileController::class, 'uploadImage']);
+Route::delete('/profile/image', [ProfileController::class, 'deleteImage']);
+Route::post('/profile/avatar', [ProfileController::class, 'uploadImage']);
+Route::delete('/profile/avatar', [ProfileController::class, 'deleteImage']);
+
+Route::get('/profile/sessions', [ProfileController::class, 'sessions']);
+Route::delete('/profile/sessions/{id}', [ProfileController::class, 'revokeSession']);
+Route::delete('/profile/sessions', [ProfileController::class, 'revokeOtherSessions']);
+
+Route::get('/profile/activity', [ProfileController::class, 'activity']);
+
+Route::get('/profile/2fa', [ProfileController::class, 'twoFactorStatus']);
+Route::post('/profile/2fa', [ProfileController::class, 'enableTwoFactor']);
+Route::post('/profile/2fa/enable', [ProfileController::class, 'enableTwoFactor']);
+Route::post('/profile/2fa/disable', [ProfileController::class, 'disableTwoFactor']);
+Route::delete('/profile/2fa', [ProfileController::class, 'disableTwoFactor']);
+
+    Route::get('/sessions', [ProfileController::class, 'sessions']);
+    Route::delete('/sessions/{id}', [ProfileController::class, 'revokeSession']);
+    Route::delete('/sessions', [ProfileController::class, 'revokeOtherSessions']);
 
     // ---------- Permissions ----------
     Route::get('/permissions/stats', [PermissionController::class, 'stats']);
