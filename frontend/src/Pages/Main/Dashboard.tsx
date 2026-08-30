@@ -977,10 +977,8 @@ function normMoveType(t: unknown): string {
 function Dashboard() {
   const navigate = useNavigate();
   const [trendRange, setTrendRange] = useState("7m");
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [usingUnified, setUsingUnified] = useState(false);
 
-  /* ── TanStack Query (Phase 4) ─────────────────────────────── */
+  /* ── TanStack Query — single server source of truth ───────── */
   const {
     data: dash,
     isLoading: dashLoading,
@@ -989,64 +987,11 @@ function Dashboard() {
     dataUpdatedAt,
   } = useDashboard({ range: trendRange, enabled: true });
 
-  const boot = bootstrapDash();
-  const [loading, setLoading] = useState(() => !boot);
+  // Instant paint from session snapshot only (not a second live server cache)
+  const boot = useMemo(() => bootstrapDash(), []);
 
-  const [invValue, setInvValue] = useState(() => boot?.invValue ?? 0);
-  const [lowStock, setLowStock] = useState(() => boot?.lowStock ?? 0);
-  const [outStock, setOutStock] = useState(() => boot?.outStock ?? 0);
-  const [skuCount, setSkuCount] = useState(() => boot?.skuCount ?? 0);
-
-  const [soPending, setSoPending] = useState(() => boot?.soPending ?? 0);
-  const [soAll, setSoAll] = useState(() => boot?.soAll ?? 0);
-  const [soDone, setSoDone] = useState(() => boot?.soDone ?? 0);
-  const [poPending, setPoPending] = useState(() => boot?.poPending ?? 0);
-  const [poAll, setPoAll] = useState(() => boot?.poAll ?? 0);
-  const [soValue, setSoValue] = useState(() => boot?.soValue ?? 0);
-  const [poValue, setPoValue] = useState(() => boot?.poValue ?? 0);
-
-  const [warehouses, setWarehouses] = useState<Warehouse[]>(
-    () => (Array.isArray(boot?.warehouses) ? boot!.warehouses : [])
-  );
-  const [recentOrders, setRecentOrders] = useState<OrderRow[]>(
-    () => (Array.isArray(boot?.recentOrders) ? boot!.recentOrders : [])
-  );
-  const [alerts, setAlerts] = useState<AlertItem[]>(
-    () => (Array.isArray(boot?.alerts) ? boot!.alerts : [])
-  );
-  const [categories, setCategories] = useState<
-    { label: string; value: number; color: string }[]
-  >(() => (Array.isArray(boot?.categories) ? boot!.categories : []));
-  const [pipeline, setPipeline] = useState<
-    { label: string; count: number; color: string }[]
-  >([]);
-
-  const [serverTrend, setServerTrend] = useState<number[] | null>(
-    () => boot?.serverTrend ?? null
-  );
-  const [serverTrendLabels, setServerTrendLabels] = useState<string[] | null>(
-    () => boot?.serverTrendLabels ?? null
-  );
-  const [serverStockIn, setServerStockIn] = useState<number[] | null>(
-    () => boot?.serverStockIn ?? null
-  );
-  const [serverStockOut, setServerStockOut] = useState<number[] | null>(
-    () => boot?.serverStockOut ?? null
-  );
-
-  const [moveStats, setMoveStats] = useState<OpsStats>(() => boot?.moveStats ?? {});
-  const [cycleStats, setCycleStats] = useState<OpsStats>(() => boot?.cycleStats ?? {});
-  const [receiptStats, setReceiptStats] = useState<OpsStats>(() => boot?.receiptStats ?? {});
-  const [returnStats, setReturnStats] = useState<OpsStats>(() => boot?.returnStats ?? {});
-  const [recentMoves, setRecentMoves] = useState<MovementRow[]>(
-    () => (Array.isArray(boot?.recentMoves) ? boot!.recentMoves : [])
-  );
-  const [activityFeed, setActivityFeed] = useState<ActivityItem[]>(
-    () => (Array.isArray(boot?.activityFeed) ? boot!.activityFeed : [])
-  );
-
-  const { permissions: userPermissions, isLoaded: permsLoaded, isAdmin} = usePermissions();
-
+  const { permissions: userPermissions, isLoaded: permsLoaded, isAdmin } =
+    usePermissions();
 
   const canViewPath = useCallback(
     (path: string) => !permsLoaded || canPath(userPermissions, path, isAdmin),
@@ -1065,47 +1010,52 @@ function Dashboard() {
     [canViewPath, navigate]
   );
 
+  /* ── Derive UI values from dash (fallback: boot snapshot) ─── */
+  const invValue = dash?.invValue ?? boot?.invValue ?? 0;
+  const lowStock = dash?.lowStock ?? boot?.lowStock ?? 0;
+  const outStock = dash?.outStock ?? boot?.outStock ?? 0;
+  const skuCount = dash?.skuCount ?? boot?.skuCount ?? 0;
 
-  /* Phase 4: TanStack Query → local UI state */
-  useEffect(() => {
-    if (!dash) return;
+  const soPending = dash?.soPending ?? boot?.soPending ?? 0;
+  const soAll = dash?.soAll ?? boot?.soAll ?? 0;
+  const soDone = dash?.soDone ?? boot?.soDone ?? 0;
+  const poPending = dash?.poPending ?? boot?.poPending ?? 0;
+  const poAll = dash?.poAll ?? boot?.poAll ?? 0;
+  const soValue = dash?.soValue ?? boot?.soValue ?? 0;
+  const poValue = dash?.poValue ?? boot?.poValue ?? 0;
 
-    setInvValue(dash.invValue);
-    setLowStock(dash.lowStock);
-    setOutStock(dash.outStock);
-    setSkuCount(dash.skuCount);
-    setSoPending(dash.soPending);
-    setSoAll(dash.soAll);
-    setSoDone(dash.soDone);
-    setPoPending(dash.poPending);
-    setPoAll(dash.poAll);
-    setSoValue(dash.soValue);
-    setPoValue(dash.poValue);
-
-    setWarehouses(
-      (dash.warehouses ?? []).map((w) => ({
+  const warehouses: Warehouse[] = useMemo(() => {
+    if (dash?.warehouses?.length) {
+      return dash.warehouses.map((w) => ({
         id: String(w.id),
         code: w.code,
         name: String(w.name ?? w.code ?? ""),
-        utilized: w.utilized,
-        capacity: w.capacity,
-        location: w.location,
-      }))
-    );
+        location: w.location != null ? String(w.location) : undefined,
+        capacity: w.capacity != null ? Number(w.capacity) : undefined,
+        utilized: w.utilized != null ? Number(w.utilized) : undefined,
+        status: w.status != null ? String(w.status) : undefined,
+      }));
+    }
+    return Array.isArray(boot?.warehouses) ? boot!.warehouses : [];
+  }, [dash, boot]);
 
-    setRecentOrders(
-      (dash.recentOrders ?? []).map((o) => ({
-        id: o.id,
+  const recentOrders: OrderRow[] = useMemo(() => {
+    if (dash?.recentOrders?.length) {
+      return dash.recentOrders.map((o) => ({
+        id: String(o.id),
         kind: o.kind,
         party: o.party,
-        total: o.total,
-        status: o.status,
-        date: o.date,
-      }))
-    );
+        total: Number(o.total ?? 0),
+        status: String(o.status ?? "pending"),
+        date: String(o.date ?? "").slice(0, 10),
+      }));
+    }
+    return Array.isArray(boot?.recentOrders) ? boot!.recentOrders : [];
+  }, [dash, boot]);
 
-    setAlerts(
-      (dash.alerts ?? []).map((a) => ({
+  const alerts: AlertItem[] = useMemo(() => {
+    if (dash?.alerts?.length) {
+      return dash.alerts.map((a) => ({
         type:
           a.type === "danger"
             ? ("danger" as const)
@@ -1116,101 +1066,119 @@ function Dashboard() {
         msg: a.msg,
         path: a.path || "/products",
         sku: a.sku,
-      }))
-    );
-
-    setCategories(dash.categories ?? []);
-    setPipeline(dash.pipeline ?? []);
-    setMoveStats((dash.moveStats ?? {}) as OpsStats);
-    setCycleStats((dash.cycleStats ?? {}) as OpsStats);
-    setReceiptStats((dash.receiptStats ?? {}) as OpsStats);
-    setReturnStats((dash.returnStats ?? {}) as OpsStats);
-
-    // recent movements from unified /dashboard only (no secondary stock-movements fetch)
-    const rawMoves = Array.isArray(dash.recentMoves) ? dash.recentMoves : [];
-    if (rawMoves.length) {
-      setRecentMoves(
-        rawMoves.slice(0, 8).map((m) => {
-          const row = m as Record<string, unknown>;
-          // DashboardController::recentMovements returns product/from/to as strings
-          const productField = row.product;
-          const productName =
-            typeof productField === "string"
-              ? productField
-              : String(
-                  (productField as { name?: string; sku?: string } | undefined)?.name ??
-                    (productField as { sku?: string } | undefined)?.sku ??
-                    row.product_name ??
-                    "—"
-                );
-          const sku =
-            typeof productField === "object" && productField && "sku" in productField
-              ? String((productField as { sku?: string }).sku ?? "")
-              : row.sku != null
-                ? String(row.sku)
-                : undefined;
-          return {
-            id: String(row.id ?? ""),
-            type: normMoveType(row.type),
-            qty: Number(row.qty ?? 0),
-            product: productName,
-            sku: sku || undefined,
-            from: String(
-              (row.from_warehouse as { code?: string } | undefined)?.code ??
-                row.from ??
-                "—"
-            ),
-            to: String(
-              (row.to_warehouse as { code?: string } | undefined)?.code ??
-                row.to ??
-                "—"
-            ),
-            reference: row.reference != null ? String(row.reference) : undefined,
-            date: String(row.movement_date ?? row.date ?? "").slice(0, 10),
-            status: String(row.status ?? "posted"),
-          };
-        })
-      );
+      }));
     }
+    return Array.isArray(boot?.alerts) ? boot!.alerts : [];
+  }, [dash, boot]);
 
-    if (dash.serverTrend?.length) setServerTrend(dash.serverTrend);
-    if (dash.serverTrendLabels?.length) setServerTrendLabels(dash.serverTrendLabels);
-    if (dash.serverStockIn?.length) setServerStockIn(dash.serverStockIn);
-    if (dash.serverStockOut?.length) setServerStockOut(dash.serverStockOut);
+  const categories = useMemo(
+    () =>
+      dash?.categories?.length
+        ? dash.categories
+        : Array.isArray(boot?.categories)
+          ? boot!.categories
+          : [],
+    [dash, boot]
+  );
 
-    setUsingUnified(!!dash.usingUnified);
+  const pipeline = useMemo(() => {
+    if (dash?.pipeline?.length) return dash.pipeline;
+    return [
+      { label: "Open SO", count: soPending, color: "#C49A5A" },
+      { label: "Done SO", count: soDone, color: "#5A9A6E" },
+      { label: "All SO", count: soAll, color: "#9A6B45" },
+      { label: "Open PO", count: poPending, color: "#6B9B7A" },
+      { label: "All PO", count: poAll, color: "#A89880" },
+    ];
+  }, [dash, soPending, soDone, soAll, poPending, poAll]);
 
-    const rawFeed = Array.isArray(dash.activityFeed) ? dash.activityFeed : [];
-    if (rawFeed.length) {
-      setActivityFeed(
-        rawFeed.slice(0, 12).map((a) => {
-          const row = a as Record<string, unknown>;
-          return {
-            kind: String(row.kind ?? "info"),
-            color: String(row.color ?? "#9A6B45"),
-            text: String(row.text ?? row.title ?? row.msg ?? "Activity"),
-            time: String(row.time ?? row.at ?? row.created_at ?? ""),
-            path: String(row.path ?? "/dashboard"),
-          } satisfies ActivityItem;
-        })
-      );
+  const moveStats = (dash?.moveStats ?? boot?.moveStats ?? {}) as OpsStats;
+  const cycleStats = (dash?.cycleStats ?? boot?.cycleStats ?? {}) as OpsStats;
+  const receiptStats = (dash?.receiptStats ?? boot?.receiptStats ?? {}) as OpsStats;
+  const returnStats = (dash?.returnStats ?? boot?.returnStats ?? {}) as OpsStats;
+
+  const recentMoves: MovementRow[] = useMemo(() => {
+    const rawMoves = Array.isArray(dash?.recentMoves) ? dash!.recentMoves : null;
+    if (rawMoves && rawMoves.length) {
+      return rawMoves.slice(0, 8).map((m) => {
+        const row = m as Record<string, unknown>;
+        const productField = row.product;
+        const productName =
+          typeof productField === "string"
+            ? productField
+            : String(
+                (productField as { name?: string; sku?: string } | undefined)?.name ??
+                  (productField as { sku?: string } | undefined)?.sku ??
+                  row.product_name ??
+                  "—"
+              );
+        const sku =
+          typeof productField === "object" && productField && "sku" in productField
+            ? String((productField as { sku?: string }).sku ?? "")
+            : row.sku != null
+              ? String(row.sku)
+              : undefined;
+        return {
+          id: String(row.id ?? ""),
+          type: normMoveType(row.type),
+          qty: Number(row.qty ?? 0),
+          product: productName,
+          sku: sku || undefined,
+          from: String(
+            (row.from_warehouse as { code?: string } | undefined)?.code ??
+              row.from ??
+              "—"
+          ),
+          to: String(
+            (row.to_warehouse as { code?: string } | undefined)?.code ??
+              row.to ??
+              "—"
+          ),
+          reference: row.reference != null ? String(row.reference) : undefined,
+          date: String(row.movement_date ?? row.date ?? "").slice(0, 10),
+          status: String(row.status ?? "posted"),
+        };
+      });
     }
+    return Array.isArray(boot?.recentMoves) ? boot!.recentMoves : [];
+  }, [dash, boot]);
 
-    setLastUpdated(dataUpdatedAt ? new Date(dataUpdatedAt) : new Date());
-    setLoading(false);
+  const activityFeed: ActivityItem[] = useMemo(() => {
+    const rawFeed = Array.isArray(dash?.activityFeed) ? dash!.activityFeed : null;
+    if (rawFeed && rawFeed.length) {
+      return rawFeed.slice(0, 12).map((a) => {
+        const row = a as Record<string, unknown>;
+        return {
+          kind: String(row.kind ?? "info"),
+          color: String(row.color ?? "#9A6B45"),
+          text: String(row.text ?? row.title ?? row.msg ?? "Activity"),
+          time: String(row.time ?? row.at ?? row.created_at ?? ""),
+          path: String(row.path ?? "/dashboard"),
+        };
+      });
+    }
+    return Array.isArray(boot?.activityFeed) ? boot!.activityFeed : [];
+  }, [dash, boot]);
 
-  }, [dash, dataUpdatedAt]);
+  const serverTrend =
+    dash?.serverTrend?.length ? dash.serverTrend : boot?.serverTrend ?? null;
+  const serverTrendLabels =
+    dash?.serverTrendLabels?.length
+      ? dash.serverTrendLabels
+      : boot?.serverTrendLabels ?? null;
+  const serverStockIn =
+    dash?.serverStockIn?.length ? dash.serverStockIn : boot?.serverStockIn ?? null;
+  const serverStockOut =
+    dash?.serverStockOut?.length
+      ? dash.serverStockOut
+      : boot?.serverStockOut ?? null;
 
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
+  const loading = !dash && dashLoading && !boot;
+
+  /* Persist snapshot when live query data arrives (instant re-entry paint) */
   useEffect(() => {
-    if (dash) {
-      setLoading(false);
-      return;
-    }
-    if (dashLoading) setLoading(true);
-  }, [dash, dashLoading]);
-
-  /* Persist snapshot for instant re-entry paint */
-  useEffect(() => {
+    if (!dash) return;
     if (invValue === 0 && skuCount === 0 && soAll === 0 && !warehouses.length) return;
     const snap: DashSnapshot = {
       at: Date.now(),
@@ -1244,25 +1212,34 @@ function Dashboard() {
     dashStore().entry = snap;
     writeDashSS(snap);
   }, [
-    invValue, lowStock, outStock, skuCount,
-    soPending, soAll, soDone, poPending, poAll, soValue, poValue,
-    warehouses, recentOrders, alerts, categories,
-    moveStats, cycleStats, receiptStats, returnStats,
-    recentMoves, activityFeed,
-    serverTrend, serverTrendLabels, serverStockIn, serverStockOut,
+    dash,
+    invValue,
+    lowStock,
+    outStock,
+    skuCount,
+    soPending,
+    soAll,
+    soDone,
+    poPending,
+    poAll,
+    soValue,
+    poValue,
+    warehouses,
+    recentOrders,
+    alerts,
+    categories,
+    moveStats,
+    cycleStats,
+    receiptStats,
+    returnStats,
+    recentMoves,
+    activityFeed,
+    serverTrend,
+    serverTrendLabels,
+    serverStockIn,
+    serverStockOut,
     trendRange,
   ]);
-
-  useEffect(() => {
-    if (usingUnified && pipeline.length) return;
-    setPipeline([
-      { label: "Open SO", count: soPending, color: "#C49A5A" },
-      { label: "Done SO", count: soDone, color: "#5A9A6E" },
-      { label: "All SO", count: soAll, color: "#9A6B45" },
-      { label: "Open PO", count: poPending, color: "#6B9B7A" },
-      { label: "All PO", count: poAll, color: "#A89880" },
-    ]);
-  }, [soPending, soDone, soAll, poPending, poAll, usingUnified, pipeline.length]);
 
   const avgUtil = useMemo(() => {
     const list = Array.isArray(warehouses) ? warehouses : [];
