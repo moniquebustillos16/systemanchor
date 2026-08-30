@@ -246,8 +246,10 @@ function Shipping() {
   const [deliveringId, setDeliveringId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
+  // Sales Orders pattern: warehouse dropdown from useWarehouses (API scopes non-admins)
   const { rows: whRows, refetch: refetchWarehouses } = useWarehouses({
     enabled: true,
+    perPage: 200,
   });
 
   const warehouses: Warehouse[] = useMemo(
@@ -261,12 +263,14 @@ function Shipping() {
             name: row.name != null ? String(row.name) : undefined,
           };
         })
-        .filter((w) => w.id),
+        .filter((w) => w.id)
+        .sort((a, b) => (a.code || "").localeCompare(b.code || "")),
     [whRows]
   );
 
+  // Prefer Query list; formWarehouses only as empty-boot fallback
   const warehouseOptions =
-    formWarehouses.length > 0 ? formWarehouses : warehouses;
+    warehouses.length > 0 ? warehouses : formWarehouses;
 
   const {
     rows: shipRows,
@@ -320,11 +324,44 @@ function Shipping() {
   /* ── Lookups: SO + products + warehouses (for create form) ─ */
   const loadLookups = useCallback(async () => {
     try {
-      const [soRes, prodRes, whRes] = await Promise.all([
-        api.get("/sales-orders", { params: { per_page: 200, all: 1 } }),
-        api.get("/products", { params: { per_page: 200 } }),
-        fetchWarehousesCached().then((rows) => ({ data: rows })),
+      // allSettled + real inventory endpoint + per-call timeout (SO pattern resilience)
+      const [soSettled, prodSettled, whSettled] = await Promise.allSettled([
+        api.get("/sales-orders", {
+          params: { per_page: 50, paginate: true },
+          timeout: 30_000,
+        }),
+        api.get("/inventories", {
+          params: { per_page: 50, paginate: true },
+          timeout: 30_000,
+        }),
+        // Prefer shared Query cache; fall back gracefully
+        (async () => {
+          try {
+            const rows = await fetchWarehousesCached();
+            return { data: rows };
+          } catch {
+            const { data } = await api.get("/warehouses", {
+              params: { per_page: 100, all: 1 },
+              timeout: 30_000,
+            });
+            return { data };
+          }
+        })(),
       ]);
+
+      if (soSettled.status === "rejected") {
+        console.warn("[Shipping] sales-orders lookup failed:", soSettled.reason);
+      }
+      if (prodSettled.status === "rejected") {
+        console.warn("[Shipping] inventories lookup failed:", prodSettled.reason);
+      }
+      if (whSettled.status === "rejected") {
+        console.warn("[Shipping] warehouses lookup failed:", whSettled.reason);
+      }
+
+      const soRes = soSettled.status === "fulfilled" ? soSettled.value : { data: [] };
+      const prodRes = prodSettled.status === "fulfilled" ? prodSettled.value : { data: [] };
+      const whRes = whSettled.status === "fulfilled" ? whSettled.value : { data: [] };
 
       const soList: SalesOrder[] = getItems(soRes.data).map((item) => {
         const row = asRecord(item);
@@ -411,8 +448,7 @@ function Shipping() {
 
       return { soList, prodList, whList };
     } catch (e) {
-      console.error("[Shipping] lookups failed:", e);
-      showToast("error", "Lookups failed", "Could not load form options.");
+      console.warn("[Shipping] lookups failed:", e);
       return {
         soList: [] as SalesOrder[],
         prodList: [] as ProductOpt[],
@@ -1237,13 +1273,20 @@ function Shipping() {
                       setForm((f) => ({ ...f, warehouse_id: e.target.value }))
                     }
                     disabled={saving}
+                    required={warehouseOptions.length > 0}
                   >
-                    <option value="">— None —</option>
-                    {warehouseOptions.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name ? `${w.code} — ${w.name}` : w.code}
-                      </option>
-                    ))}
+                    {warehouseOptions.length === 0 ? (
+                      <option value="">— No warehouses —</option>
+                    ) : (
+                      <>
+                        <option value="">— Select warehouse —</option>
+                        {warehouseOptions.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name ? `${w.code} — ${w.name}` : w.code}
+                          </option>
+                        ))}
+                      </>
+                    )}
                   </select>
                   {warehouseOptions.length === 0 && (
                     <span className="po-field-hint">

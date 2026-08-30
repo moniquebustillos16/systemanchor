@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
-import { usePermissions, fetchCurrentUserCached } from "../../hooks/useCurrentUser";
-import { fetchUserWarehousesCached } from "../../hooks/useWarehouses";
+import { usePermissions} from "../../hooks/useCurrentUser";
 import { useInventoryPage, useInventoryCategories } from "../../hooks/useInventory";
 import { useQuery } from "@tanstack/react-query";
 import { queryClient, queryKeys } from "../../lib/queryClient";
@@ -324,11 +323,6 @@ function productToForm(p: Product): ProductForm {
 }
 
 type Toast = { type: "success" | "error"; title: string; message?: string } | null;
-type UserWarehouseScope = {
-  accessAll: boolean;
-  warehouseIds: string[];
-  warehouses: Warehouse[];
-};
 /* ── Module cache (survives Strict Mode remounts) ─────────────── */
 /* List/stats owned by TanStack Query (useInventoryPage). Detail cache only for View/Edit. */
 
@@ -366,20 +360,15 @@ function Inventory() {
   const [filterCat, setFilterCat] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterWh, setFilterWh] = useState("all");
-  const [whScope, setWhScope] = useState<UserWarehouseScope | null>(null);
-  const [whScopeLoading, setWhScopeLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("sku");
   const [sortAsc, setSortAsc] = useState(true);
   const [page, setPage] = useState(1);
   const pageSize = 50;
   
  
+  // Sales Orders pattern: "all" → null (API scopes non-admins)
   const effectiveWarehouseId =
-  filterWh !== "all"
-    ? filterWh
-    : whScope && !whScope.accessAll && whScope.warehouseIds.length === 1
-      ? whScope.warehouseIds[0]
-      : null;
+    filterWh === "all" || !filterWh ? null : filterWh;
 
     
   
@@ -453,25 +442,8 @@ function Inventory() {
 
   const metaLoading =
     categoriesQuery.isLoading || warehousesQuery.isLoading || suppliersQuery.isLoading;
-  const warehousesForFilter = useMemo(() => {
-  // Still loading scope → show whatever we have from allWarehouses
-  if (!whScope) return allWarehouses;
-
-  // User can see all warehouses
-  if (whScope.accessAll) return allWarehouses;
-
-  if (whScope.warehouseIds.length === 0) return [];
-
-  const allowedIds = new Set(whScope.warehouseIds.map(String));
-
-  // Prefer full objects from allWarehouses (has proper name)
-  const fromAll = allWarehouses.filter((w) => allowedIds.has(String(w.id)));
-
-  if (fromAll.length > 0) return fromAll;
-
-  // Fallback: use the warehouses that came from the scope endpoint
-  return whScope.warehouses ?? [];
-}, [whScope, allWarehouses]);
+  // Sales Orders pattern: filter options = useWarehouses list (API scopes non-admins)
+const warehousesForFilter = allWarehouses;
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>("add");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -520,115 +492,9 @@ function Inventory() {
 
 
 
-  const fetchUserWarehouseScope = useCallback(async () => {
-  setWhScopeLoading(true);
-  try {
-    let userId: string | null = null;
-    let accessAll = false;
-    let warehouses: Warehouse[] = [];
-
-    try {
-      const me = await fetchCurrentUserCached();
-      const u = (me as any)?.data ?? (me as any)?.user ?? me;
-      userId = u?.id ? String(u.id) : null;
-      accessAll = Boolean(u?.access_all_warehouses);
-
-      const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
-      if (Array.isArray(fromMe) && fromMe.length > 0) {
-        warehouses = fromMe.map((w: any) =>
-          typeof w === "string"
-            ? { id: String(w), code: "", name: undefined }
-            : {
-                id: String(w.id),
-                code: w.code ?? "",
-                name: w.name,
-              }
-        );
-      }
-    } catch {
-      /* continue */
-    }
-
-    if (userId && warehouses.length === 0) {
-      try {
-        const json = await fetchUserWarehousesCached(userId);
-const payload = (json as any)?.data ?? json;
-
-accessAll = Boolean(payload?.access_all_warehouses);
-
-// Safely extract array no matter the response shape
-let list: any[] = [];
-const raw = payload?.warehouses ?? payload?.data ?? payload;
-
-if (Array.isArray(raw)) {
-  list = raw;
-} else if (Array.isArray(raw?.data)) {
-  list = raw.data;
-} else if (raw && typeof raw === "object") {
-  // sometimes Laravel returns a single object or collection-like
-  list = Object.values(raw).filter(
-    (v: any) => v && typeof v === "object" && v.id
-  );
-}
-
-warehouses = list.map((w: any) => ({
-  id: String(w.id),
-  code: w.code ?? "",
-  name: w.name ?? "",
-}));
-      } catch (e) {
-        console.warn("[Inventory] /users/:id/warehouses failed", e);
-      }
-    }
-
-    if (warehouses.length === 0 && userId) {
-      try {
-        const me = await fetchCurrentUserCached();
-        const u = (me as any)?.data ?? (me as any)?.user ?? me;
-        if (u?.warehouse_id) {
-          warehouses = [
-            {
-              id: String(u.warehouse_id),
-              code: u.warehouse?.code ?? "",
-              name: u.warehouse?.name,
-            },
-          ];
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-
-    const warehouseIds = Array.from(
-      new Set(warehouses.map((w) => w.id).filter(Boolean))
-    );
-
-    setWhScope({
-      accessAll,
-      warehouseIds,
-      warehouses,
-    });
-  } catch (e) {
-    console.error("[Inventory] warehouse scope failed", e);
-    setWhScope({ accessAll: false, warehouseIds: [], warehouses: [] });
-  } finally {
-    setWhScopeLoading(false);
-  }
-}, []);
-
-    
-    useEffect(() => {
-  void fetchUserWarehouseScope();
-}, [fetchUserWarehouseScope]);
 
   
-useEffect(() => {
-  if (!whScope || whScope.accessAll) return;
-  if (filterWh === "all" && whScope.warehouseIds.length === 1) {
-    setFilterWh(whScope.warehouseIds[0]);
-    setPage(1);
-  }
-}, [whScope, filterWh]);
+// Sales Orders: keep filter default "all"
   
   const canView = can("inventory.view", "inventories.view", "products.view");
   const canCreate = can("inventory.create", "inventories.create", "products.create");
@@ -1503,28 +1369,6 @@ useEffect(() => {
             </div>
           ) : (
           <>
-                    {invFetching && (
-            <div
-              className="card"
-              style={{
-                padding: "10px 16px",
-                marginBottom: 14,
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                fontSize: 13,
-              }}
-              role="status"
-            >
-              <div
-                className="roles-spinner"
-                style={{ width: 16, height: 16, borderWidth: 2, flexShrink: 0 }}
-              />
-              <span className="text-muted">Refreshing inventory…</span>
-            </div>
-          )}
-
-
           <div className="inv-tabs">
             <button
               type="button"
@@ -1615,16 +1459,13 @@ useEffect(() => {
     setFilterWh(e.target.value);
     setPage(1);
   }}
-  disabled={whScopeLoading}
 >
-  {(whScope?.accessAll ?? true) && (
-    <option value="all">All warehouses</option>
-  )}
- {warehousesForFilter.map((w) => (
-  <option key={w.id} value={w.id}>
-    {w.name?.trim() || w.code || "(No name)"}
-  </option>
-))}
+  <option value="all">All sites</option>
+  {warehousesForFilter.map((w) => (
+    <option key={w.id} value={w.id}>
+      {w.name ? `${w.code} — ${w.name}` : (w.code || "(No name)")}
+    </option>
+  ))}
 </select>
                   </div>
                 </div>

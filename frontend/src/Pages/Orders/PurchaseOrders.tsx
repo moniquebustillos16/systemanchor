@@ -502,17 +502,8 @@ function PurchaseOrders() {
   const [page, setPage] = useState(1);
   const pageSize = 15;
 
-  // Warehouse assignment scope (Inventory pattern) — declared before list query
+  // Scope still loaded for optional client filter; dropdown matches Sales Orders
   const [whScope, setWhScope] = useState<UserWarehouseScope | null>(null);
-  const [whScopeLoading, setWhScopeLoading] = useState(true);
-
-  // Same as Inventory effectiveWarehouseId
-  const effectiveWarehouseId =
-    wh !== "all" && wh
-      ? wh
-      : whScope && !whScope.accessAll && whScope.warehouseIds.length === 1
-        ? whScope.warehouseIds[0]
-        : null;
 
   const {
     rows: poRows,
@@ -526,10 +517,10 @@ function PurchaseOrders() {
     perPage: pageSize,
     search: debouncedSearch,
     status,
-    warehouseId: effectiveWarehouseId,
+    // Sales Orders pattern: "all" → null (API scopes non-admins)
+    warehouseId: wh === "all" || !wh ? null : wh,
     supplierId: filterSupplier === "all" || !filterSupplier ? null : filterSupplier,
-    // Wait for warehouse scope so non-admin never briefly loads ALL warehouses' POs
-    enabled: !whScopeLoading,
+    enabled: true,
   });
 
 
@@ -569,8 +560,8 @@ function PurchaseOrders() {
     refetch: refetchWarehouses,
   } = useWarehouses({ enabled: true, perPage: 200 });
 
-  /** Prefer useWarehouses; fall back to local meta bootstrap only if query empty */
-  const allWarehouseOptions = useMemo(() => {
+  // Sales Orders pattern: dropdown = useWarehouses list (API already scopes non-admins)
+  const warehousesFromQuery = useMemo<Warehouse[]>(() => {
     const fromQuery = (whRows ?? [])
       .map((w) => {
         const r = w as Record<string, unknown>;
@@ -578,7 +569,7 @@ function PurchaseOrders() {
           id: String(r.id ?? ""),
           code: String(r.code ?? r.name ?? r.id ?? ""),
           name: r.name != null ? String(r.name) : undefined,
-        } as Warehouse;
+        };
       })
       .filter((w) => !!w.id)
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
@@ -586,31 +577,6 @@ function PurchaseOrders() {
     return warehouses;
   }, [whRows, warehouses]);
 
-  /**
-   * Warehouse dropdown options (fast path).
-   * - No scope yet → []
-   * - accessAll → full list (useWarehouses / meta); fallback to scope list
-   * - Assigned → show scope warehouses IMMEDIATELY (don't wait for /warehouses)
-   */
-  const warehouseOptions = useMemo(() => {
-    if (!whScope) return [];
-
-    if (whScope.accessAll) {
-      return allWarehouseOptions.length > 0
-        ? allWarehouseOptions
-        : (whScope.warehouses ?? []);
-    }
-
-    if (whScope.warehouseIds.length === 0) return [];
-
-    const allowedIds = new Set(whScope.warehouseIds.map(String));
-    // Prefer richer names from full list when available
-    const fromAll = allWarehouseOptions.filter((w) => allowedIds.has(String(w.id)));
-    if (fromAll.length > 0) return fromAll;
-
-    // Instant: data already on scope from /users/:id/warehouses
-    return (whScope.warehouses ?? []).filter((w) => !!w.id);
-  }, [whScope, allWarehouseOptions]);
 
   const whBusy = whLoading || whFetching;
 
@@ -670,8 +636,6 @@ function PurchaseOrders() {
 
   /** Load assigned warehouses — fast: localStorage first, then parallel API */
   const fetchUserWarehouseScope = useCallback(async () => {
-    setWhScopeLoading(true);
-
     let userId: string | null = null;
     let accessAll = false;
     let warehousesList: Warehouse[] = [];
@@ -839,8 +803,6 @@ function PurchaseOrders() {
       if (!warehousesList.length && !accessAll) {
         setWhScope({ accessAll: false, warehouseIds: [], warehouses: [] });
       }
-    } finally {
-      setWhScopeLoading(false);
     }
   }, []);
 
@@ -1007,29 +969,18 @@ function PurchaseOrders() {
     void fetchMeta();
   }, [fetchMeta]);
 
-  // Non-admin: never stay on "All warehouses" — lock to assigned id(s)
-  useEffect(() => {
-    if (!whScope || whScope.accessAll) return;
-    if (whScope.warehouseIds.length === 0) return;
-
-    const allowed = new Set(whScope.warehouseIds.map(String));
-    const needsFix = wh === "all" || !allowed.has(String(wh));
-    if (!needsFix) return;
-
-    setWh(whScope.warehouseIds[0]);
-    setPage(1);
-  }, [whScope, wh]);
+  // Sales Orders: keep filter default "all"
 
 
   // Auto-select first warehouse when useWarehouses data arrives while modal is open
   useEffect(() => {
     if (!showAdd) return;
-    if (warehouseOptions.length === 0) return;
+    if (warehousesFromQuery.length === 0) return;
     setForm((f) => {
-      if (f.warehouse_id && warehouseOptions.some((w) => w.id === f.warehouse_id)) return f;
-      return { ...f, warehouse_id: warehouseOptions[0].id };
+      if (f.warehouse_id && warehousesFromQuery.some((w) => w.id === f.warehouse_id)) return f;
+      return { ...f, warehouse_id: warehousesFromQuery[0].id };
     });
-  }, [showAdd, warehouseOptions]);
+  }, [showAdd, warehousesFromQuery]);
 
   useEffect(() => {
     document.body.classList.toggle("modal-open", showAdd || !!viewOrder || !!confirmAction);
@@ -1114,7 +1065,7 @@ function PurchaseOrders() {
     setProductQuery("");
 
     const cached = poStore().meta;
-    const whs = warehouseOptions;
+    const whs = warehousesFromQuery;
     const sups = suppliers.length
       ? suppliers
       : cached?.suppliers?.length
@@ -1165,7 +1116,7 @@ function PurchaseOrders() {
           return {
             ...f,
             supplier_id: sid,
-            warehouse_id: f.warehouse_id || warehouseOptions[0]?.id || "",
+            warehouse_id: f.warehouse_id || warehousesFromQuery[0]?.id || "",
             lines: needLines && offs[0] ? [emptyLine(offs[0])] : f.lines,
           };
         });
@@ -1274,7 +1225,7 @@ function PurchaseOrders() {
       return;
     }
 
-    if (warehouseOptions.length > 0 && !form.warehouse_id) {
+    if (warehousesFromQuery.length > 0 && !form.warehouse_id) {
       setFormError("Select a warehouse for receiving.");
       return;
     }
@@ -1382,7 +1333,7 @@ function PurchaseOrders() {
             : null),
         warehouse:
           (data.warehouse as PurchaseOrder["warehouse"]) ??
-          warehouseOptions.find((w) => w.id === form.warehouse_id) ??
+          warehousesFromQuery.find((w) => w.id === form.warehouse_id) ??
           null,
         lines: createdLines,
         order_items: createdLines,
@@ -1961,13 +1912,9 @@ function PurchaseOrders() {
                     setWh(e.target.value);
                     setPage(1);
                   }}
-                  disabled={whScopeLoading}
                 >
-                  {/* Only admin / access_all sees "All warehouses" (Inventory pattern) */}
-                  {whScope?.accessAll && (
-                    <option value="all">All warehouses</option>
-                  )}
-                  {warehouseOptions.map((w) => (
+                  <option value="all">All sites</option>
+                  {warehousesFromQuery.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.name ? `${w.code} — ${w.name}` : w.code}
                     </option>
@@ -2332,23 +2279,23 @@ function PurchaseOrders() {
                 </div>
 
                 <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                  <label>Warehouse {warehouseOptions.length > 0 ? "*" : ""}</label>
+                  <label>Warehouse {warehousesFromQuery.length > 0 ? "*" : ""}</label>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <select
                       value={form.warehouse_id}
                       onChange={(e) => setForm((f) => ({ ...f, warehouse_id: e.target.value }))}
-                      disabled={saving || whBusy || whScopeLoading}
+                      disabled={saving || whBusy}
                       style={{ flex: 1 }}
-                      required={warehouseOptions.length > 0}
+                      required={warehousesFromQuery.length > 0}
                     >
-                      {warehouseOptions.length === 0 ? (
+                      {warehousesFromQuery.length === 0 ? (
                         <option value="">
-                          {whBusy || whScopeLoading ? "Loading warehouses…" : "— No warehouses —"}
+                          {whBusy ? "Loading warehouses…" : "— No warehouses —"}
                         </option>
                       ) : (
                         <>
                           <option value="">— Select warehouse —</option>
-                          {warehouseOptions.map((w) => (
+                          {warehousesFromQuery.map((w) => (
                             <option key={w.id} value={w.id}>
                               {w.name ? `${w.code} — ${w.name}` : w.code}
                             </option>
@@ -2356,11 +2303,11 @@ function PurchaseOrders() {
                         </>
                       )}
                     </select>
-                    {warehouseOptions.length === 0 && (
+                    {warehousesFromQuery.length === 0 && (
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
-                        disabled={whBusy || whScopeLoading || saving}
+                        disabled={whBusy || saving}
                         onClick={() => void refetchWarehouses()}
                         title="Reload warehouses"
                       >
@@ -2368,7 +2315,7 @@ function PurchaseOrders() {
                       </button>
                     )}
                   </div>
-                  {warehouseOptions.length === 0 && !whBusy && (
+                  {warehousesFromQuery.length === 0 && !whBusy && (
                     <span className="po-field-hint" style={{ display: "block", marginTop: 6 }}>
                       No warehouses loaded. Open Warehouses and create at least one site, then
                       click Retry.

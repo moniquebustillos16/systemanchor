@@ -273,10 +273,8 @@ function StockMovements() {
     if (snap?.rows?.length && Date.now() - (snap.at || 0) < 30 * 60_000) return snap.rows;
     return [];
   });
-  const [loading, setLoading] = useState(() => {
-    const snap = readSS<{ rows: ApiMovement[]; at: number }>(SS_HIST);
-    return !(snap?.rows?.length || historyCache.size);
-  });
+  // No full-page loading gate (show shell immediately after login)
+  const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -391,17 +389,25 @@ function StockMovements() {
     if (!force && productsCache.inflight) return productsCache.inflight as Promise<ProductOpt[]>;
 
     const work = (async () => {
-      const { data: json } = await api.get("/inventories", {
-        params: { per_page: 100, paginate: true },
-      });
-      return extractArr<ProductOpt>(json).map((p) => ({ ...p, id: String(p.id) }));
+      try {
+        const { data: json } = await api.get("/inventories", {
+          params: { per_page: 50, paginate: true },
+          timeout: 30_000,
+        });
+        return extractArr<ProductOpt>(json).map((p) => ({ ...p, id: String(p.id) }));
+      } catch (e) {
+        console.warn("[StockMovements] loadProducts failed:", e);
+        return (productsCache.entry?.data as ProductOpt[]) ?? [];
+      }
     })();
 
     productsCache.inflight = work;
     try {
       const rows = await work;
-      productsCache.entry = { data: rows, at: Date.now() };
-      writeSS(SS_PROD, { rows, at: Date.now() });
+      if (rows.length) {
+        productsCache.entry = { data: rows, at: Date.now() };
+        writeSS(SS_PROD, { rows, at: Date.now() });
+      }
       return rows;
     } finally {
       productsCache.inflight = null;
@@ -458,10 +464,21 @@ function StockMovements() {
 
   const bootstrapMeta = useCallback(async (force = false) => {
     try {
-      const [productRows, locationWarehouses] = await Promise.all([
+      const [prodResult, whResult] = await Promise.allSettled([
         loadProducts(force),
         loadWarehouses(force),
       ]);
+
+      const productRows = prodResult.status === "fulfilled" ? prodResult.value : [];
+      const locationWarehouses = whResult.status === "fulfilled" ? whResult.value : [];
+
+      if (prodResult.status === "rejected") {
+        console.warn("[StockMovements] products meta failed:", prodResult.reason);
+      }
+      if (whResult.status === "rejected") {
+        console.warn("[StockMovements] warehouses meta failed:", whResult.reason);
+      }
+
       setProducts(productRows);
       setProductId((prev) => prev || productRows[0]?.id || "");
 
@@ -472,7 +489,7 @@ function StockMovements() {
           if (p.warehouse?.id) {
             whMap.set(String(p.warehouse.id), {
               id: String(p.warehouse.id),
-              code: p.warehouse.code,
+              code: p.warehouse.code ?? "",
             });
           }
         });
@@ -483,7 +500,7 @@ function StockMovements() {
       setFromWh((prev) => prev || whList[0]?.id || "");
       setToWh((prev) => prev || whList[1]?.id || whList[0]?.id || "");
     } catch (e) {
-      console.error("[StockMovements] meta failed:", e);
+      console.warn("[StockMovements] meta failed:", e);
     }
   }, [loadProducts, loadWarehouses]);
 
@@ -523,17 +540,12 @@ function StockMovements() {
     setError(null);
   }, [movementRows, movLoading]);
 
-  // Table skeletons only when we have nothing to show
+  // Never block the page on first fetch — keep previous rows / empty state
   useEffect(() => {
-    if (history.length === 0 && movLoading) {
-      setLoading(true);
-    } else {
+    if (history.length > 0 || !movLoading) {
       setLoading(false);
     }
   }, [movLoading, history.length]);
-
-  const pageLoading =
-    !hasDataRef.current && history.length === 0 && movLoading;
 
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === productId) ?? null,
@@ -671,53 +683,6 @@ function StockMovements() {
       : moveType === "transfer"
       ? "Transfer reference…"
       : "Count session / ticket…";
-
-    if (pageLoading) {
-    return (
-      <div className="stock-movements-page">
-        <Sidebar />
-        <div className="main-wrapper">
-          <Topbar />
-          <main className="content">
-            <div
-              style={{
-                minHeight: "calc(100vh - 120px)",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 16,
-                padding: 32,
-              }}
-              role="status"
-              aria-live="polite"
-              aria-busy="true"
-            >
-              <div
-                className="roles-spinner"
-                style={{ width: 36, height: 36, borderWidth: 3 }}
-              />
-              <div style={{ textAlign: "center", maxWidth: 320 }}>
-                <div
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 600,
-                    marginBottom: 6,
-                    letterSpacing: "-0.01em",
-                  }}
-                >
-                  Loading stock movements
-                </div>
-                <div className="text-muted" style={{ fontSize: 13, lineHeight: 1.5 }}>
-                  Fetching movement history and warehouse data…
-                </div>
-              </div>
-            </div>
-          </main>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="stock-movements-page">

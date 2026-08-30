@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -43,10 +44,24 @@ class WarehouseController extends Controller
                 || !$request->boolean('paginate', true);
             $page = max((int) $request->query('page', 1), 1);
 
-            // Cache unfiltered lists (dashboard / selects hit this often)
+            // Scope: null = all warehouses; array = only assigned ids
+            $allowed = $this->allowedWarehouseIds($request->user());
+
+            // Cache must be per-user when scoped, otherwise every user gets the full list
             $useCache = $search === '' && !$request->filled('status');
+            $scopeKey = $allowed === null
+                ? 'all'
+                : ('u:' . ($request->user()?->id ?? 'guest') . ':' . md5(implode(',', $allowed)));
             $cacheKey = $useCache
-                ? sprintf('warehouses:list:%s:%s:%d:%d:%s', $sort, $dir, $perPage, $page, $plain ? 'plain' : 'page')
+                ? sprintf(
+                    'warehouses:list:%s:%s:%s:%d:%d:%s',
+                    $scopeKey,
+                    $sort,
+                    $dir,
+                    $perPage,
+                    $page,
+                    $plain ? 'plain' : 'page'
+                )
                 : null;
 
             if ($cacheKey && ($cached = Cache::get($cacheKey)) !== null) {
@@ -57,6 +72,27 @@ class WarehouseController extends Controller
 
             if (in_array('deleted_at', $this->allTableColumns(), true)) {
                 $query->whereNull('deleted_at');
+            }
+
+            // Enforce assigned warehouses for non–access-all users
+            if (is_array($allowed)) {
+                if ($allowed === []) {
+                    $payload = [
+                        'success' => true,
+                        'data'    => [],
+                    ];
+                    if (!$plain) {
+                        $payload['current_page'] = 1;
+                        $payload['last_page'] = 1;
+                        $payload['total'] = 0;
+                        $payload['per_page'] = $perPage;
+                    }
+                    if ($cacheKey) {
+                        Cache::put($cacheKey, $payload, self::LIST_CACHE_TTL);
+                    }
+                    return response()->json($payload);
+                }
+                $query->whereIn('id', $allowed);
             }
 
             if ($search !== '') {
@@ -157,11 +193,14 @@ class WarehouseController extends Controller
         ], 201);
     }
 
-    public function show(string $id)
+    public function show(Request $request, string $id)
     {
+        $warehouse = Warehouse::query()->findOrFail($id);
+        $this->assertCanAccessWarehouse($request->user(), (string) $id);
+
         return response()->json([
             'success' => true,
-            'data'    => Warehouse::query()->findOrFail($id),
+            'data'    => $warehouse,
         ]);
     }
 
@@ -216,6 +255,59 @@ class WarehouseController extends Controller
         ]);
     }
 
+    /* ─────────────────────────────────────────────
+     |  WAREHOUSE SCOPE (dropdown + list)
+     ───────────────────────────────────────────── */
+
+    /**
+     * null  = user may see every warehouse (access_all_warehouses)
+     * array = only these warehouse UUIDs
+     *
+     * @return list<string>|null
+     */
+    private function allowedWarehouseIds(?User $user): ?array
+    {
+        if (!$user) {
+            return [];
+        }
+
+        if (method_exists($user, 'canAccessAllWarehouses') && $user->canAccessAllWarehouses()) {
+            return null;
+        }
+
+        if (!empty($user->access_all_warehouses)) {
+            return null;
+        }
+
+        $ids = [];
+
+        if (method_exists($user, 'warehouses')) {
+            $ids = $user->warehouses()
+                ->pluck('warehouses.id')
+                ->map(fn ($id) => (string) $id)
+                ->all();
+        }
+
+        if (!empty($user->warehouse_id)) {
+            $ids[] = (string) $user->warehouse_id;
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    private function assertCanAccessWarehouse(?User $user, string $warehouseId): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        if (!in_array($warehouseId, $allowed, true)) {
+            abort(403, 'You do not have access to this warehouse.');
+        }
+    }
+
     private function normalizeStatus(mixed $status): string
     {
         if (is_bool($status)) {
@@ -263,7 +355,9 @@ class WarehouseController extends Controller
 
     private function bustListCache(): void
     {
-        foreach (['20', '30', '50', '100'] as $n) {
+        // Legacy global keys + common per-page variants
+        foreach (['20', '30', '50', '100', '200'] as $n) {
+            Cache::forget("warehouses:list:all:code:asc:{$n}:1:plain");
             Cache::forget("warehouses:list:code:asc:{$n}:1:plain");
         }
     }

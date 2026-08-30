@@ -32,6 +32,9 @@ class InventoryController extends Controller
             ->select(self::LIST_COLUMNS)
             ->whereNull('deleted_at');
 
+        // Enforce assigned-warehouse scope for non–access-all users
+        $this->applyWarehouseScope($query, $request);
+
         $with = ['category:id,name', 'warehouse:id,code,name', 'supplier:id,name'];
         if ($request->boolean('with_images')) {
             $with[] = 'images';
@@ -53,9 +56,12 @@ class InventoryController extends Controller
         if ($request->filled('category_id')) {
             $query->where('category_id', $request->category_id);
         }
+
+        // Optional client filter — must still be within allowed set (checked in applyWarehouseScope)
         if ($request->filled('warehouse_id')) {
             $query->where('warehouse_id', $request->warehouse_id);
         }
+
         if ($request->filled('supplier_id')) {
             $query->where('supplier_id', $request->supplier_id);
         }
@@ -100,25 +106,24 @@ class InventoryController extends Controller
      |  STATS
      ───────────────────────────────────────────── */
 
-    public function stats()
+    public function stats(Request $request)
     {
-        $payload = Cache::remember('inventory:stats', self::STATS_CACHE_TTL, function () {
-            $row = Product::query()
-                ->whereNull('deleted_at')
-                ->selectRaw("
-                    COUNT(*) as total_products,
-                    COALESCE(SUM(CASE WHEN qty > 0 AND qty < min_stock THEN 1 ELSE 0 END), 0) as low_stock,
-                    COALESCE(SUM(CASE WHEN qty <= 0 THEN 1 ELSE 0 END), 0) as out_of_stock,
-                    COALESCE(SUM(qty * price), 0) as inventory_value
-                ")
-                ->first();
+        $user = $request->user();
+        $allowed = $this->allowedWarehouseIds($user);
 
-            return [
-                'total_products'  => (int) ($row->total_products ?? 0),
-                'low_stock'       => (int) ($row->low_stock ?? 0),
-                'out_of_stock'    => (int) ($row->out_of_stock ?? 0),
-                'inventory_value' => (float) ($row->inventory_value ?? 0),
-            ];
+        // Global cache only for users who can see all warehouses
+        if ($allowed === null) {
+            $payload = Cache::remember('inventory:stats', self::STATS_CACHE_TTL, function () {
+                return $this->computeStats(null);
+            });
+
+            return response()->json($payload);
+        }
+
+        // Scoped users: cache per user so numbers match their warehouses
+        $cacheKey = 'inventory:stats:user:' . $user->id;
+        $payload = Cache::remember($cacheKey, self::STATS_CACHE_TTL, function () use ($allowed) {
+            return $this->computeStats($allowed);
         });
 
         return response()->json($payload);
@@ -128,7 +133,7 @@ class InventoryController extends Controller
      |  SHOW (includes images for detail / edit modal)
      ───────────────────────────────────────────── */
 
-    public function show(string $id)
+    public function show(Request $request, string $id)
     {
         $product = Product::with([
                 'category:id,name',
@@ -139,6 +144,8 @@ class InventoryController extends Controller
             ])
             ->whereNull('deleted_at')
             ->findOrFail($id);
+
+        $this->assertCanAccessProduct($request->user(), $product);
 
         return response()->json($this->decorate($product));
     }
@@ -164,6 +171,20 @@ class InventoryController extends Controller
             'status'       => ['nullable', Rule::in(['active', 'inactive'])],
         ]);
 
+        // Non–access-all users may only create products in assigned warehouses
+        $warehouseId = $validated['warehouse_id'] ?? null;
+        if ($warehouseId !== null) {
+            $this->assertCanAccessWarehouseId($request->user(), (string) $warehouseId);
+        } else {
+            // Require a warehouse for restricted users
+            $allowed = $this->allowedWarehouseIds($request->user());
+            if (is_array($allowed)) {
+                return response()->json([
+                    'message' => 'warehouse_id is required for your account.',
+                ], 422);
+            }
+        }
+
         $product = Product::create([
             'sku'          => $validated['sku'],
             'name'         => $validated['name'],
@@ -182,7 +203,7 @@ class InventoryController extends Controller
         $product->load(['category:id,name', 'warehouse:id,code,name', 'supplier:id,name']);
 
         $this->notifyStockLevel($product);
-        Cache::forget('inventory:stats');
+        $this->forgetStatsCache($request->user());
 
         return response()->json([
             'message' => 'Product created successfully',
@@ -197,6 +218,9 @@ class InventoryController extends Controller
     public function update(Request $request, string $id)
     {
         $product = Product::whereNull('deleted_at')->findOrFail($id);
+
+        // Must already be allowed to see this product
+        $this->assertCanAccessProduct($request->user(), $product);
 
         $validated = $request->validate([
             'sku' => [
@@ -216,6 +240,11 @@ class InventoryController extends Controller
             'status'       => ['sometimes', Rule::in(['active', 'inactive'])],
         ]);
 
+        // Moving to another warehouse must also be allowed
+        if (array_key_exists('warehouse_id', $validated) && $validated['warehouse_id'] !== null) {
+            $this->assertCanAccessWarehouseId($request->user(), (string) $validated['warehouse_id']);
+        }
+
         $product->update($validated);
         $product->load([
             'category:id,name',
@@ -228,7 +257,7 @@ class InventoryController extends Controller
         if (array_key_exists('qty', $validated) || array_key_exists('min_stock', $validated)) {
             $this->notifyStockLevel($product);
         }
-        Cache::forget('inventory:stats');
+        $this->forgetStatsCache($request->user());
 
         return response()->json([
             'message' => 'Inventory updated successfully',
@@ -240,15 +269,161 @@ class InventoryController extends Controller
      |  DELETE (soft)
      ───────────────────────────────────────────── */
 
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
         $product = Product::whereNull('deleted_at')->findOrFail($id);
+
+        $this->assertCanAccessProduct($request->user(), $product);
+
         $product->delete();
-        Cache::forget('inventory:stats');
+        $this->forgetStatsCache($request->user());
 
         return response()->json([
             'message' => 'Product deleted successfully',
         ]);
+    }
+
+    /* ─────────────────────────────────────────────
+     |  WAREHOUSE SCOPE HELPERS
+     ───────────────────────────────────────────── */
+
+    /**
+     * null  = user may access all warehouses (access_all_warehouses)
+     * array = only these warehouse UUIDs (may be empty)
+     *
+     * @return list<string>|null
+     */
+    private function allowedWarehouseIds(?User $user): ?array
+    {
+        if (!$user) {
+            return [];
+        }
+
+        if (method_exists($user, 'canAccessAllWarehouses') && $user->canAccessAllWarehouses()) {
+            return null;
+        }
+
+        if (!empty($user->access_all_warehouses)) {
+            return null;
+        }
+
+        $ids = [];
+
+        if (method_exists($user, 'warehouses')) {
+            $ids = $user->warehouses()
+                ->pluck('warehouses.id')
+                ->map(fn ($id) => (string) $id)
+                ->all();
+        }
+
+        // Include primary warehouse_id if set
+        if (!empty($user->warehouse_id)) {
+            $ids[] = (string) $user->warehouse_id;
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    /**
+     * Restrict a product query to the current user's warehouses.
+     * Also rejects a client-supplied warehouse_id outside their assignment.
+     */
+    private function applyWarehouseScope($query, Request $request): void
+    {
+        $allowed = $this->allowedWarehouseIds($request->user());
+
+        if ($allowed === null) {
+            return; // full access
+        }
+
+        if ($allowed === []) {
+            // No warehouses assigned → no products
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        if ($request->filled('warehouse_id')) {
+            $requested = (string) $request->warehouse_id;
+            if (!in_array($requested, $allowed, true)) {
+                abort(403, 'You do not have access to this warehouse.');
+            }
+            // index() will also apply where warehouse_id = requested
+            return;
+        }
+
+        $query->whereIn('warehouse_id', $allowed);
+    }
+
+    private function assertCanAccessProduct(?User $user, Product $product): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        $wid = $product->warehouse_id !== null ? (string) $product->warehouse_id : null;
+
+        if ($wid === null || !in_array($wid, $allowed, true)) {
+            abort(403, 'You do not have access to this product warehouse.');
+        }
+    }
+
+    private function assertCanAccessWarehouseId(?User $user, string $warehouseId): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        if (!in_array($warehouseId, $allowed, true)) {
+            abort(403, 'You do not have access to this warehouse.');
+        }
+    }
+
+    /**
+     * @param  list<string>|null  $allowedWarehouseIds  null = all
+     */
+    private function computeStats(?array $allowedWarehouseIds): array
+    {
+        $query = Product::query()->whereNull('deleted_at');
+
+        if (is_array($allowedWarehouseIds)) {
+            if ($allowedWarehouseIds === []) {
+                return [
+                    'total_products'  => 0,
+                    'low_stock'       => 0,
+                    'out_of_stock'    => 0,
+                    'inventory_value' => 0.0,
+                ];
+            }
+            $query->whereIn('warehouse_id', $allowedWarehouseIds);
+        }
+
+        $row = $query
+            ->selectRaw("
+                COUNT(*) as total_products,
+                COALESCE(SUM(CASE WHEN qty > 0 AND qty < min_stock THEN 1 ELSE 0 END), 0) as low_stock,
+                COALESCE(SUM(CASE WHEN qty <= 0 THEN 1 ELSE 0 END), 0) as out_of_stock,
+                COALESCE(SUM(qty * price), 0) as inventory_value
+            ")
+            ->first();
+
+        return [
+            'total_products'  => (int) ($row->total_products ?? 0),
+            'low_stock'       => (int) ($row->low_stock ?? 0),
+            'out_of_stock'    => (int) ($row->out_of_stock ?? 0),
+            'inventory_value' => (float) ($row->inventory_value ?? 0),
+        ];
+    }
+
+    private function forgetStatsCache(?User $user): void
+    {
+        Cache::forget('inventory:stats');
+        if ($user) {
+            Cache::forget('inventory:stats:user:' . $user->id);
+        }
     }
 
     /* ─────────────────────────────────────────────

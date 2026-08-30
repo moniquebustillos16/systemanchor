@@ -283,24 +283,40 @@ export function useWarehousesCatalog(options: { enabled?: boolean } = {}) {
           ? j.data
           : Array.isArray(j?.data?.data)
             ? j.data.data
-            : [];
-      return raw.map((w: any) => ({
-        id: String(w.id),
-        name: String(w.name ?? ""),
-        code: w.code != null ? String(w.code) : undefined,
-        location: w.location ?? null,
-        address: w.address ?? null,
-      })) as WarehouseRow[];
+            : Array.isArray(j?.warehouses)
+              ? j.warehouses
+              : [];
+      return (raw as any[])
+        .map((w: any) => ({
+          id: String(w.id ?? ""),
+          name: String(w.name ?? w.code ?? ""),
+          code: w.code != null ? String(w.code) : undefined,
+          location: w.location ?? null,
+          address: w.address ?? null,
+        }))
+        .filter((w) => w.id) as WarehouseRow[];
     },
     enabled,
     staleTime: CATALOG_STALE_MS,
     placeholderData: (prev) => prev,
   });
 
+  // Shared query key may hold a raw API body from useWarehouses — always normalize to array
+  const rows = useMemo(() => {
+    const d = q.data as unknown;
+    if (Array.isArray(d)) return d as WarehouseRow[];
+    if (d && typeof d === "object") {
+      const o = d as Record<string, unknown>;
+      if (Array.isArray(o.data)) return o.data as WarehouseRow[];
+      if (Array.isArray(o.warehouses)) return o.warehouses as WarehouseRow[];
+    }
+    return [] as WarehouseRow[];
+  }, [q.data]);
+
   return {
-    rows: q.data ?? [],
+    rows,
     data: q.data,
-    isLoading: q.isLoading && !q.data,
+    isLoading: q.isLoading && rows.length === 0,
     isFetching: q.isFetching,
     isError: q.isError,
     error: q.error,
