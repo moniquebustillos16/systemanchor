@@ -199,7 +199,6 @@ async function fetchDashboardData(range: string): Promise<DashboardViewModel> {
   if (!payload || typeof payload !== "object") {
     throw new Error("Dashboard API returned an empty payload");
   }
-  // Canonical contract: DashboardController index fields
   if (
     !("inventory_value" in payload) &&
     !("total_products" in payload) &&
