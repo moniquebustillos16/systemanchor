@@ -152,6 +152,18 @@ class UserWarehouseController extends Controller
 
     public function forUser(string $userId)
     {
+        $auth = request()->user();
+
+    $isSelf = $auth && (string) $auth->id === (string) $userId;
+    $isAdmin = $auth?->role && strcasecmp((string) $auth->role->name, 'Admin') === 0;
+    $canManageUsers = $auth && method_exists($auth, 'hasPermission')
+        && $auth->hasPermission('users.view');
+
+    if (!$isSelf && !$isAdmin && !$canManageUsers) {
+        return response()->json([
+            'message' => 'You do not have permission to perform this action.',
+        ], 403);
+    }
         $cacheKey = "user:{$userId}:warehouses";
 
         $payload = Cache::remember($cacheKey, self::CACHE_TTL, function () use ($userId) {

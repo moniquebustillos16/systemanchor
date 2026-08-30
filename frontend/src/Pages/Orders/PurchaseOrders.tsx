@@ -5,7 +5,8 @@ import api from "../../api/axios";
 import { usePurchaseOrders } from "../../hooks/useOrders";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidatePurchaseOrders } from "../../lib/invalidate";
-import { usePermissions } from "../../hooks/useCurrentUser";
+import { usePermissions, fetchCurrentUserCached } from "../../hooks/useCurrentUser";
+import { fetchUserWarehousesCached, fetchWarehousesCached } from "../../hooks/useWarehouses";
 import { extractAdminFlag } from "../../lib/permissions";
 import "../css/Orders.css";
 
@@ -740,12 +741,9 @@ function PurchaseOrders() {
 
     try {
       // —— Parallel network: /me + /users/:id/warehouses ——
-      const mePromise = api.get("/me").then((r) => r.data).catch(() => null);
+      const mePromise = fetchCurrentUserCached().catch(() => null);
       const whPromise = userId
-        ? api
-            .get(`/users/${userId}/warehouses`)
-            .then((r) => r.data)
-            .catch(() => null)
+        ? fetchUserWarehousesCached(userId).catch(() => null)
         : Promise.resolve(null);
 
       let [me, whJson] = await Promise.all([mePromise, whPromise]);
@@ -784,7 +782,7 @@ function PurchaseOrders() {
         if (!whJson && userId) {
           // /me arrived first with userId we didn't have — fetch warehouses now
           try {
-            const { data } = await api.get(`/users/${userId}/warehouses`);
+            const data = await fetchUserWarehousesCached(userId);
             whJson = data;
           } catch {
             /* ignore */
@@ -889,9 +887,8 @@ function PurchaseOrders() {
         const loadWarehouses = async (): Promise<Warehouse[]> => {
           // GET /api/warehouses (WarehouseController)
           try {
-            const { data: json } = await api.get("/warehouses", {
-              params: { per_page: 200, all: 1 },
-            });
+            const _whRows = await fetchWarehousesCached();
+            const json = { data: _whRows };
             const list = extractList<Warehouse>(json);
             return list
               .map((w) => {

@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
-import api from "../../api/axios";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Insights.css";
-
+import { fetchInventoryStatsCached } from "../../hooks/useInventory";
+import {
+  fetchSalesOrderStatsCached,
+  fetchPurchaseOrderStatsCached,
+  fetchGoodsReceiptStatsCached,
+  fetchShipmentStatsCached,
+} from "../../hooks/useOrders";
+import { fetchWarehousesCached } from "../../hooks/useWarehouses";
 
 type Warehouse = {
   id: string;
@@ -86,13 +92,13 @@ function Analytics() {
     setError(null);
     try {
       const results = await Promise.allSettled([
-        api.get("/inventories/stats").then((r) => r.data),
-        api.get("/sales-orders/stats").then((r) => r.data),
-        api.get("/purchase-orders/stats").then((r) => r.data),
-        api.get("/warehouses", { params: { per_page: 100 } }).then((r) => r.data),
-        api.get("/goods-receipts/stats").then((r) => r.data),
-        api.get("/shipments/stats").then((r) => r.data),
-      ]);
+      fetchInventoryStatsCached(),
+      fetchSalesOrderStatsCached(),
+      fetchPurchaseOrderStatsCached(),
+      fetchWarehousesCached({ per_page: 100 }),
+      fetchGoodsReceiptStatsCached(),
+      fetchShipmentStatsCached(),
+]);
 
       if (results[0].status === "fulfilled") {
         const j = results[0].value as Record<string, number>;
@@ -115,15 +121,9 @@ function Analytics() {
         setPoValue(toNum(j.total_value ?? j.value));
       }
       if (results[3].status === "fulfilled") {
-        const j = results[3].value as { data?: Warehouse[] } | Warehouse[];
-        const list = Array.isArray(j) ? j : j.data ?? [];
-        setWarehouses(
-          list.map((w: Warehouse) => ({
-            ...w,
-            id: String(w.id),
-          }))
-        );
-      }
+  const list = results[3].value as Warehouse[];
+  setWarehouses(list.map((w) => ({ ...w, id: String(w.id) })));
+}
       if (results[4].status === "fulfilled") {
         const j = results[4].value as Record<string, number>;
         setGrPending(toNum(j.pending ?? j.open ?? j.in_progress));

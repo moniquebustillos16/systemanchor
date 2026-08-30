@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { queryKeys } from "../lib/queryClient";
+import { queryClient, queryKeys } from "../lib/queryClient";
 import api from "../api/axios";
+import { getUserWarehouses } from "../api/users";
 
 /**
  * Backward-compatible warehouse list hook.
@@ -115,4 +116,68 @@ export function useWarehouses(options: UseWarehousesOptions = {}) {
     error: query.error,
     refetch: query.refetch,
   };
+}
+
+/** Default list params shared with useWarehouses / prefetch */
+export const DEFAULT_WAREHOUSE_LIST_PARAMS: Record<string, unknown> = {
+  per_page: 200,
+  all: 1,
+};
+
+/**
+ * Imperative warehouse list via shared React Query cache.
+ * Dedupes with useWarehouses() and prefetch.
+ */
+export async function fetchWarehousesCached(
+  params: Record<string, unknown> = DEFAULT_WAREHOUSE_LIST_PARAMS
+): Promise<Record<string, unknown>[]> {
+  const data = await queryClient.fetchQuery({
+    queryKey: queryKeys.warehouses.list(params),
+    queryFn: () => fetchWarehousesRaw(params),
+    staleTime: 60_000,
+  });
+  return extractArr<Record<string, unknown>>(data);
+}
+
+export type UseUserWarehousesOptions = {
+  enabled?: boolean;
+};
+
+/**
+ * Current (or any) user's warehouse assignment scope.
+ * GET /users/:id/warehouses — shared key: queryKeys.userWarehouses(id)
+ */
+export function useUserWarehouses(
+  userId: string | null | undefined,
+  options: UseUserWarehousesOptions = {}
+) {
+  const enabled = options.enabled !== false && !!userId;
+
+  const query = useQuery({
+    queryKey: queryKeys.userWarehouses(userId ?? ""),
+    queryFn: () => getUserWarehouses(String(userId)),
+    enabled,
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    isError: query.isError,
+    error: query.error,
+    refetch: query.refetch,
+  };
+}
+
+/**
+ * Imperative user-warehouse scope via shared React Query cache.
+ */
+export async function fetchUserWarehousesCached(userId: string): Promise<unknown> {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.userWarehouses(userId),
+    queryFn: () => getUserWarehouses(userId),
+    staleTime: 60_000,
+  });
 }

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { queryKeys } from "../lib/queryClient";
+import { queryClient, queryKeys } from "../lib/queryClient";
 import {
   getInventoryList,
   getInventoryStats,
@@ -24,6 +24,28 @@ export type UseInventoryListOptions = {
 function toStrId(v: string | number | null | undefined): string | undefined {
   if (v === null || v === undefined || v === "") return undefined;
   return String(v);
+}
+/* ── Imperative shared cache (Phase 3C) ───────────────────── */
+
+export async function fetchInventoryStatsCached(): Promise<InventoryStats> {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.inventory.stats,
+    queryFn: () => getInventoryStats(),
+    staleTime: 60_000,
+  });
+}
+
+export async function fetchInventoryProductsCached(
+  params: InventoryListParams = { per_page: 200, paginate: false }
+): Promise<Record<string, unknown>[]> {
+  const data = await queryClient.fetchQuery({
+    queryKey: queryKeys.inventory.list(params as Record<string, unknown>),
+    queryFn: () => getInventoryList(params),
+    staleTime: 60_000,
+  });
+  if (Array.isArray(data)) return data as Record<string, unknown>[];
+  const d = data as { data?: Record<string, unknown>[] };
+  return Array.isArray(d?.data) ? d.data : [];
 }
 
 export function useInventoryStats(options: { enabled?: boolean } = {}) {

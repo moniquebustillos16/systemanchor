@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { queryKeys } from "../lib/queryClient";
+import { queryClient, queryKeys } from "../lib/queryClient";
 import { getStockMovements, getProductOptions } from "../api/stockMovements";
 import api from "../api/axios";
+
 
 export type UseStockMovementsListOptions = {
   page?: number;
@@ -20,6 +21,22 @@ function extractArr<T>(json: unknown): T[] {
   const nested = o.data as { data?: unknown } | undefined;
   if (nested && Array.isArray(nested.data)) return nested.data as T[];
   return [];
+}
+export async function fetchStockProductOptionsCached(): Promise<unknown> {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.stockMovements.products,
+    queryFn: async () => {
+      try {
+        return await getProductOptions();
+      } catch {
+        const { data } = await api.get("/inventories", {
+          params: { per_page: 200, paginate: false },
+        });
+        return data;
+      }
+    },
+    staleTime: 5 * 60_000,
+  });
 }
 
 export function useStockMovementsList(options: UseStockMovementsListOptions = {}) {

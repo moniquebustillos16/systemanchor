@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
-import { usePermissions } from "../../hooks/useCurrentUser";
+import { usePermissions, fetchCurrentUserCached } from "../../hooks/useCurrentUser";
+import { fetchUserWarehousesCached } from "../../hooks/useWarehouses";
 import { useInventoryPage } from "../../hooks/useInventory";
 import { invalidateInventory } from "../../lib/invalidate"
 import "../css/Main.css";
@@ -418,32 +419,6 @@ function bootstrapMeta(): {
   return snap.data;
 }
 
-type SharedMe = { entry: { data: any; at: number } | null; inflight: Promise<any> | null };
-function sharedMeStore(): SharedMe {
-  const g = globalThis as unknown as { __saMeCache?: SharedMe };
-  if (!g.__saMeCache) g.__saMeCache = { entry: null, inflight: null };
-  return g.__saMeCache;
-}
-
-async function fetchMeShared(): Promise<any> {
-  const store = sharedMeStore();
-  if (store.entry && Date.now() - store.entry.at < INV_CACHE_TTL) {
-    return store.entry.data;
-  }
-  if (store.inflight) return store.inflight;
-  store.inflight = api
-    .get("/me")
-    .then((res) => {
-      const body = res?.data ?? res;
-      store.entry = { data: body, at: Date.now() };
-      return body;
-    })
-    .finally(() => {
-      store.inflight = null;
-    });
-  return store.inflight;
-}
-
 function extractArr<T>(json: any): T[] {
   if (!json) return [];
   if (Array.isArray(json)) return json;
@@ -602,7 +577,7 @@ function Inventory() {
     let warehouses: Warehouse[] = [];
 
     try {
-      const me = await fetchMeShared();
+      const me = await fetchCurrentUserCached();
       const u = (me as any)?.data ?? (me as any)?.user ?? me;
       userId = u?.id ? String(u.id) : null;
       accessAll = Boolean(u?.access_all_warehouses);
@@ -625,7 +600,7 @@ function Inventory() {
 
     if (userId && warehouses.length === 0) {
       try {
-        const { data: json } = await api.get(`/users/${userId}/warehouses`);
+        const json = await fetchUserWarehousesCached(userId);
 const payload = (json as any)?.data ?? json;
 
 accessAll = Boolean(payload?.access_all_warehouses);
@@ -657,7 +632,7 @@ warehouses = list.map((w: any) => ({
 
     if (warehouses.length === 0 && userId) {
       try {
-        const me = await fetchMeShared();
+        const me = await fetchCurrentUserCached();
         const u = (me as any)?.data ?? (me as any)?.user ?? me;
         if (u?.warehouse_id) {
           warehouses = [
