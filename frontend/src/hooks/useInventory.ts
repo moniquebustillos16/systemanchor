@@ -25,7 +25,8 @@ function toStrId(v: string | number | null | undefined): string | undefined {
   if (v === null || v === undefined || v === "") return undefined;
   return String(v);
 }
-/* ── Imperative shared cache (Phase 3C) ───────────────────── */
+
+/* ── Imperative shared cache ───────────────────── */
 
 export async function fetchInventoryStatsCached(): Promise<InventoryStats> {
   return queryClient.fetchQuery({
@@ -97,7 +98,13 @@ export function useInventoryList(options: UseInventoryListOptions = {}) {
 
   const rows = useMemo(() => {
     const data = query.data as
-      | { data?: Record<string, unknown>[]; current_page?: number; last_page?: number; per_page?: number; total?: number }
+      | {
+          data?: Record<string, unknown>[];
+          current_page?: number;
+          last_page?: number;
+          per_page?: number;
+          total?: number;
+        }
       | Record<string, unknown>[]
       | undefined;
     if (!data) return [];
@@ -157,7 +164,8 @@ export function useInventoryCategories(options: { enabled?: boolean } = {}) {
   const enabled = options.enabled !== false;
 
   return useQuery({
-    queryKey: [...queryKeys.inventory.all, "categories"] as const,
+    // Single source of truth — matches queryKeys.categories in queryClient.ts
+    queryKey: queryKeys.categories,
     queryFn: () => getCategories(),
     enabled,
     placeholderData: (prev) => prev,
@@ -183,7 +191,7 @@ export function useInventoryPage(options: UseInventoryListOptions = {}) {
       (s as { data?: Record<string, unknown> }).data &&
       typeof (s as { data?: unknown }).data === "object" &&
       !Array.isArray((s as { data?: unknown }).data)
-        ? ((s as { data: Record<string, unknown> }).data)
+        ? (s as { data: Record<string, unknown> }).data
         : (s as Record<string, unknown>);
 
     return {
