@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import { useInventoryPage } from "../../hooks/useInventory";
 import { invalidateInventory } from "../../lib/invalidate"
 import "../css/Main.css";
@@ -300,46 +301,6 @@ function normalizeProductImages(p: Product): Product {
   };
 }
 
-/* ── Role permissions (from /auth/me or /user) ─────────────── */
-
-function normPerm(s: string): string {
-  return String(s).trim().toLowerCase().replace(/_/g, ".");
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  if (!perms || perms.length === 0) return false;
-  const set = new Set(perms.map(normPerm));
-  if (set.has("*")) return true;
-  return needed.some((n) => set.has(normPerm(n)));
-}
-
-function namesFromRolePermsPayload(json: unknown): string[] {
-  if (!json) return [];
-  const root = json as Record<string, unknown>;
-  const candidates = [
-    root.data,
-    root.permissions,
-    (root.data as Record<string, unknown> | undefined)?.permissions,
-    (root.data as Record<string, unknown> | undefined)?.data,
-    root,
-  ];
-  for (const c of candidates) {
-    if (!Array.isArray(c)) continue;
-    const names = c
-      .map((p) => {
-        if (typeof p === "string") return p;
-        if (p && typeof p === "object") {
-          const o = p as { name?: string; permission?: string; permission_name?: string };
-          return o.name || o.permission || o.permission_name || null;
-        }
-        return null;
-      })
-      .filter((x): x is string => !!x && x.length > 0);
-    if (names.length > 0) return names;
-  }
-  return [];
-}
-
 function productToForm(p: Product): ProductForm {
   return {
     sku: p.sku ?? "",
@@ -380,10 +341,6 @@ const metaCache: {
 } = { entry: null, inflight: null };
 const listCache = new Map<string, CacheEntry<{ rows: Product[]; total: number; lastPage: number }>>();
 const listInflight = new Map<string, Promise<{ rows: Product[]; total: number; lastPage: number }>>();
-const permsCache: { entry: CacheEntry<string[]> | null; inflight: Promise<string[]> | null } = {
-  entry: null,
-  inflight: null,
-};
 let invMetaBootstrapped = false;
 let invHasShownData = false;
 
@@ -611,25 +568,6 @@ function Inventory() {
   const [deletingCat, setDeletingCat] = useState(false);
 
   const [confirmDelete, setConfirmDelete] = useState<Product | null>(null);
-   const [userPermissions, setUserPermissions] = useState<string[]>(() => {
-    try {
-      if (permsCache.entry?.data?.length) return permsCache.entry.data;
-      const raw = localStorage.getItem("permissions");
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  });
-  const [permsLoaded, setPermsLoaded] = useState(() => {
-    try {
-      if (permsCache.entry) return true;
-      return !!localStorage.getItem("permissions");
-    } catch {
-      return false;
-    }
-  });
 
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
@@ -652,112 +590,8 @@ function Inventory() {
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const fetchUserPermissions = useCallback(async (force = false) => {
-    const finish = (list: string[], persist = true) => {
-      if (persist) permsCache.entry = { data: list, at: Date.now() };
-      setUserPermissions(list);
-      setPermsLoaded(true);
-      try {
-        localStorage.setItem("permissions", JSON.stringify(list));
-      } catch {
-        /* ignore quota */
-      }
-    };
+  const { can, isLoaded: permsLoaded } = usePermissions();
 
-    if (!force && permsCache.entry) {
-      setUserPermissions(permsCache.entry.data);
-      setPermsLoaded(true);
-      if (isFresh(permsCache.entry) && !force) {
-        // still revalidate in background below
-      }
-    } else {
-      try {
-        const raw = localStorage.getItem("permissions");
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
-            setUserPermissions(parsed);
-            setPermsLoaded(true);
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-
-    if (permsCache.inflight && !force) {
-      try {
-        finish(await permsCache.inflight);
-      } catch {
-        setPermsLoaded(true);
-      }
-      return;
-    }
-
-    const work = (async (): Promise<string[]> => {
-  let roleId: string | null = null;
-  let roleName = "";
-
-  try {
-    for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      const u = parsed?.data ?? parsed?.user ?? parsed;
-      roleId = u?.role_id || u?.role?.id || null;
-      roleName = u?.role?.name || u?.role_name || "";
-      if (roleId) break;
-    }
-  } catch {
-    /* ignore */
-  }
-
-  try {
-    const json = await fetchMeShared();
-    const u = (json as any)?.data ?? (json as any)?.user ?? json;
-    roleId = u?.role_id || u?.role?.id || (json as any)?.role_id || roleId;
-    roleName = u?.role?.name || u?.role_name || roleName;
-  } catch {
-    /* ignore */
-  }
-
-  // Admin → full access
-  const normalizedRole = String(roleName)
-    .toLowerCase()
-    .replace(/[_-]+/g, " ")
-    .trim();
-
-  if (
-    ["admin", "administrator", "super admin", "superadmin", "system admin", "system administrator", "root"].includes(
-      normalizedRole
-    )
-  ) {
-    return ["*"];
-  }
-
-  // Normal role → load permissions
-  if (roleId) {
-    try {
-      const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-      const names = namesFromRolePermsPayload(json);
-      return names;
-    } catch {
-      /* fall through */
-    }
-  }
-
-  return [];
-})();
-
-    permsCache.inflight = work;
-    try {
-      finish(await work);
-    } catch {
-      setPermsLoaded(true);
-    } finally {
-      permsCache.inflight = null;
-    }
-  }, []);
 
 
   const fetchUserWarehouseScope = useCallback(async () => {
@@ -857,14 +691,10 @@ warehouses = list.map((w: any) => ({
 }, []);
 
     
-  // Soft revalidate permissions once on enter (uses cache if fresh; single-flight)
-  useEffect(() => {
+    useEffect(() => {
   void fetchUserWarehouseScope();
 }, [fetchUserWarehouseScope]);
 
-useEffect(() => {
-    void fetchUserPermissions();
-  }, [fetchUserPermissions]);
   
 useEffect(() => {
   if (!whScope || whScope.accessAll) return;
@@ -873,24 +703,12 @@ useEffect(() => {
     setPage(1);
   }
 }, [whScope, filterWh]);
-  // Only re-fetch permissions when tab becomes visible AND cache is stale
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible" && !isFresh(permsCache.entry)) {
-        void fetchUserPermissions(true);
-      }
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [fetchUserPermissions]);
-
-  const canView = can(userPermissions, "inventory.view", "inventories.view", "products.view");
-  const canCreate = can(userPermissions, "inventory.create", "inventories.create", "products.create");
-  const canUpdate = can(userPermissions, "inventory.update", "inventories.update", "products.update");
-  const canDelete = can(userPermissions, "inventory.delete", "inventories.delete", "products.delete");
-     const canManageCategories = can(
-    userPermissions,
-    "categories.create",
+  
+  const canView = can("inventory.view", "inventories.view", "products.view");
+  const canCreate = can("inventory.create", "inventories.create", "products.create");
+  const canUpdate = can("inventory.update", "inventories.update", "products.update");
+  const canDelete = can("inventory.delete", "inventories.delete", "products.delete");
+     const canManageCategories = can("categories.create",
     "categories.update",
     "categories.delete",
     "inventory.create",

@@ -7,9 +7,10 @@ import {
   memo,
 } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import api from "../../api/axios";
 import "../css/Sidebar.css";
 import mainLogo from "../../assets/main_logo.png";
+import { usePermissions } from "../../hooks/useCurrentUser";
+import { normPerm } from "../../lib/permissions";
 
 /* ------------------------------------------------------------------ */
 /* Icons (static – never re-create)                                   */
@@ -288,13 +289,6 @@ function writeSavedScroll(top: number) {
 /* Permission gating                                                  */
 /* ------------------------------------------------------------------ */
 
-function normPerm(name: string): string {
-  return String(name || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-}
-
 /**
  * Must stay in sync with Roles.tsx MODULE_CATALOG aliases.
  */
@@ -394,105 +388,6 @@ const VIEW_ACTIONS = new Set([
 
 const FULL_ACCESS = new Set(["*", "admin", "super_admin", "superadmin"]);
 
-function coercePermList(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const p of raw) {
-    if (typeof p === "string") {
-      const n = normPerm(p);
-      if (n) out.push(n);
-    } else if (p && typeof p === "object") {
-      const o = p as Record<string, unknown>;
-      const name = o.name ?? o.permission ?? o.key ?? o.slug ?? o.code;
-      if (typeof name === "string") {
-        const n = normPerm(name);
-        if (n) out.push(n);
-      }
-    }
-  }
-  return out;
-}
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as Record<string, unknown>;
-
-  const candidates: unknown[] = [
-    j.permissions,
-    j.permission_names,
-    (j.data as any)?.permissions,
-    (j.data as any)?.permission_names,
-    (j.user as any)?.permissions,
-    (j.user as any)?.permission_names,
-    (j.user as any)?.role?.permissions,
-    (j.data as any)?.user?.permissions,
-    (j.data as any)?.user?.permission_names,
-    (j.data as any)?.role?.permissions,
-    (j.role as any)?.permissions,
-  ];
-
-  for (const raw of candidates) {
-    const list = coercePermList(raw);
-    if (list.length > 0) return list;
-  }
-
-  if (Array.isArray(json)) {
-    return coercePermList(json);
-  }
-
-  return [];
-}
-
-function isAdminRoleName(name: unknown): boolean {
-  if (typeof name !== "string") return false;
-  const key = name.trim().toLowerCase();
-  return (
-    key === "admin" ||
-    key === "administrator" ||
-    key === "system admin" ||
-    key === "system administrator" ||
-    key === "super admin" ||
-    key === "superadmin" ||
-    key === "root"
-  );
-}
-
-function extractAdminFlag(json: unknown): boolean {
-  if (!json || typeof json !== "object") return false;
-  const j = json as Record<string, unknown>;
-  const data = j.data as Record<string, unknown> | undefined;
-  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
-
-  if (
-    user?.is_admin === true ||
-    user?.isAdmin === true ||
-    data?.is_admin === true
-  ) {
-    return true;
-  }
-
-  const roleName =
-    (user?.role as Record<string, unknown> | undefined)?.name ||
-    user?.role_name ||
-    (data?.role as Record<string, unknown> | undefined)?.name ||
-    (j.role as Record<string, unknown> | undefined)?.name ||
-    j.role_name;
-
-  if (isAdminRoleName(roleName)) return true;
-
-  const perms = extractPermissions(json);
-  if (perms.some((p) => FULL_ACCESS.has(p) || p.endsWith(".*"))) {
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * Show nav item when the user has a VIEW/READ style permission for that module.
- * System items are strictly admin-only.
- * Dashboard is always visible to any authenticated user.
- */
 function canView(perms: string[], itemId: string, isAdmin: boolean): boolean {
   // 1. System section is strictly admin-only
   if (SYSTEM_ITEM_IDS.has(itemId) && !isAdmin) {
@@ -583,66 +478,6 @@ function canView(perms: string[], itemId: string, isAdmin: boolean): boolean {
 }
 
 /* ------------------------------------------------------------------ */
-/* Cache helpers                                                      */
-/* ------------------------------------------------------------------ */
-
-let permsCache: { list: string[]; isAdmin: boolean; at: number } | null = null;
-let permsInflight: Promise<{ list: string[]; isAdmin: boolean }> | null = null;
-const PERMS_TTL_MS = 5 * 60_000;
-
-function isPermsFresh(): boolean {
-  return !!permsCache && Date.now() - permsCache.at < PERMS_TTL_MS;
-}
-
-function clearPermsCache() {
-  permsCache = null;
-  permsInflight = null;
-  const store = sharedMeStore();
-  store.entry = null;
-  store.inflight = null;
-}
-
-type SharedMe = {
-  entry: { data: unknown; at: number } | null;
-  inflight: Promise<unknown> | null;
-};
-
-function sharedMeStore(): SharedMe {
-  const g = globalThis as unknown as { __saMeCache?: SharedMe };
-  if (!g.__saMeCache) g.__saMeCache = { entry: null, inflight: null };
-  return g.__saMeCache;
-}
-
-async function fetchMeShared(force = false): Promise<unknown> {
-  const store = sharedMeStore();
-  if (!force && store.entry && Date.now() - store.entry.at < PERMS_TTL_MS) {
-    return store.entry.data;
-  }
-  if (!force && store.inflight) return store.inflight;
-
-  if (force) {
-    store.entry = null;
-    store.inflight = null;
-  }
-
-  store.inflight = api
-    .get("/me", {
-      timeout: 20_000,
-      params: force ? { _ts: Date.now() } : undefined,
-    })
-    .then((res) => {
-      const body = res?.data ?? res;
-      store.entry = { data: body, at: Date.now() };
-      return body;
-    })
-    .finally(() => {
-      store.inflight = null;
-    });
-
-  return store.inflight;
-}
-
-/* ------------------------------------------------------------------ */
 /* Types                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -665,13 +500,11 @@ function Sidebar({
   const collapsed = controlledCollapsed ?? internalCollapsed;
   const location = useLocation();
 
-  const [userPermissions, setUserPermissions] = useState<string[]>(
-    () => permsCache?.list ?? []
-  );
-  const [isAdmin, setIsAdmin] = useState<boolean>(
-    () => permsCache?.isAdmin ?? false
-  );
-  const [permsLoaded, setPermsLoaded] = useState(() => !!permsCache);
+  const {
+    permissions: userPermissions,
+    isAdmin,
+    isLoaded: permsLoaded,
+  } = usePermissions();
 
   const navRef = useRef<HTMLElement>(null);
   const scrollTopRef = useRef(readSavedScroll());
@@ -734,141 +567,6 @@ function Sidebar({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleSidebar]);
-
-  /* ---- permissions ---- */
-
-  useEffect(() => {
-    if (isPermsFresh()) {
-      setUserPermissions(permsCache!.list);
-      setIsAdmin(permsCache!.isAdmin);
-      setPermsLoaded(true);
-      return;
-    }
-
-    let cancelled = false;
-
-    const apply = (list: string[], admin: boolean) => {
-      if (cancelled) return;
-      const normalized = list.map(normPerm);
-      permsCache = { list: normalized, isAdmin: admin, at: Date.now() };
-      setUserPermissions(normalized);
-      setIsAdmin(admin);
-      setPermsLoaded(true);
-    };
-
-    const loadPerms = async (): Promise<{
-      list: string[];
-      isAdmin: boolean;
-    }> => {
-      try {
-        const json = await fetchMeShared();
-        const admin = extractAdminFlag(json);
-
-        if (admin) {
-          return { list: ["*"], isAdmin: true };
-        }
-
-        const list = extractPermissions(json).map(normPerm);
-        return { list, isAdmin: false };
-      } catch {
-        /* network failed – try local snapshots */
-      }
-
-      for (const key of [
-        "permissions",
-        "user_permissions",
-        "auth_permissions",
-        "user",
-        "auth_user",
-        "authUser",
-        "currentUser",
-        "sa-user",
-      ]) {
-        const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (
-            Array.isArray(parsed) &&
-            parsed.every((x: unknown) => typeof x === "string")
-          ) {
-            return {
-              list: (parsed as string[]).map(normPerm),
-              isAdmin: false,
-            };
-          }
-          if (extractAdminFlag(parsed)) {
-            return { list: ["*"], isAdmin: true };
-          }
-          const list = extractPermissions(parsed).map(normPerm);
-          return { list, isAdmin: false };
-        } catch {
-          /* try next */
-        }
-      }
-
-      // Last resort – keep the app usable
-      return { list: ["*"], isAdmin: true };
-    };
-
-    if (!permsInflight) {
-      permsInflight = loadPerms().finally(() => {
-        permsInflight = null;
-      });
-    }
-
-    permsInflight
-      .then(({ list, isAdmin: admin }) => apply(list, admin))
-      .catch(() => {
-        if (!cancelled) apply(["*"], true);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // After Roles save / logout
-  useEffect(() => {
-    const onRefresh = () => {
-      clearPermsCache();
-      setPermsLoaded(false);
-      setUserPermissions([]);
-      setIsAdmin(false);
-
-      void (async () => {
-        try {
-          const json = await fetchMeShared(true); // force network
-          const admin = extractAdminFlag(json);
-          const list = admin
-            ? ["*"]
-            : extractPermissions(json).map(normPerm);
-
-          permsCache = { list, isAdmin: admin, at: Date.now() };
-          setUserPermissions([...list]);
-          setIsAdmin(admin);
-        } catch {
-          /* keep previous */
-        } finally {
-          setPermsLoaded(true);
-        }
-      })();
-    };
-
-    const onLogout = () => {
-      clearPermsCache();
-      setUserPermissions([]);
-      setIsAdmin(false);
-      setPermsLoaded(false);
-    };
-
-    window.addEventListener("sa-permissions-refresh", onRefresh);
-    window.addEventListener("sa-logout", onLogout);
-    return () => {
-      window.removeEventListener("sa-permissions-refresh", onRefresh);
-      window.removeEventListener("sa-logout", onLogout);
-    };
-  }, []);
 
   /* ---- active route ---- */
 

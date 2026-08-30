@@ -2,51 +2,11 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import { useStockMovementsList } from "../../hooks/useStockMovements";
 import { invalidateStockMovements } from "../../lib/invalidate";
 import "../css/Main.css";
 
-
-/* ── Role permissions ─────────────────────────────────────── */
-
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-
-function normPerm(s: string): string {
-  return String(s).trim().toLowerCase().replace(/_/g, ".");
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  if (!perms || perms.length === 0) return false;
-  const set = new Set(perms.map(normPerm));
-  if (set.has("*") || set.has("admin")) return true;
-  return needed.some((n) => set.has(normPerm(n)));
-}
 
 function extractArr<T>(json: unknown): T[] {
   if (!json) return [];
@@ -342,23 +302,6 @@ function StockMovements() {
 
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-   const [userPermissions, setUserPermissions] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem("permissions");
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  });
-  const [permsLoaded, setPermsLoaded] = useState(() => {
-    try {
-      return !!localStorage.getItem("permissions");
-    } catch {
-      return false;
-    }
-  });
 
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -397,131 +340,15 @@ function StockMovements() {
     setTimeout(() => setToast(null), 3200);
   };
 
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-    };
+  const { can, isLoaded: permsLoaded } = usePermissions();
 
-    const loadRolePerms = async (roleId: string): Promise<string[] | null> => {
-      try {
-        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-        const perms =
-          json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-        if (!Array.isArray(perms)) return null;
-        return perms
-          .map((p: { name?: string } | string) =>
-            typeof p === "string" ? p : p?.name
-          )
-          .filter(Boolean) as string[];
-      } catch {
-        return null;
-      }
-    };
 
-    // 1) localStorage permissions / user (from login)
-    let roleId: string | null = null;
-    try {
-      const rawKeys = [
-        "permissions",
-        "user_permissions",
-        "auth_permissions",
-        "user",
-        "auth_user",
-        "authUser",
-        "currentUser",
-        "sa-user",
-      ];
-      for (const key of rawKeys) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (
-            Array.isArray(parsed) &&
-            parsed.every((x) => typeof x === "string")
-          ) {
-            finish(parsed);
-            return;
-          }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) {
-            finish(list);
-            return;
-          }
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          roleId =
-            u?.role_id ||
-            u?.role?.id ||
-            parsed?.role_id ||
-            roleId;
-        } catch {
-          /* not JSON */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    // 2) role_id stored alone
-    if (!roleId) {
-      roleId =
-        localStorage.getItem("role_id") ||
-        localStorage.getItem("auth_role_id") ||
-        null;
-    }
-
-    // 3) permissions via role endpoint (same as Roles.tsx)
-    if (roleId) {
-      const names = await loadRolePerms(roleId);
-      if (names) {
-        finish(names);
-        return;
-      }
-    }
-
-    // 4) Optional auth endpoints via shared axios client
-    for (const path of ["/user", "/me"]) {
-      try {
-        const { data: json } = await api.get(path);
-        const list = extractPermissions(json);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-        const u = json?.data ?? json?.user ?? json;
-        const rid = u?.role_id || u?.role?.id;
-        if (rid) {
-          const names = await loadRolePerms(String(rid));
-          if (names) {
-            finish(names);
-            return;
-          }
-        }
-        break;
-      } catch (err: any) {
-        if (err.response?.status === 404) continue;
-      }
-    }
-
-    // 5) Dev fallback
-    finish([]);
-  }, []);
-
-  useEffect(() => {
-    fetchUserPermissions();
-  }, [fetchUserPermissions]);
-
-  const canView = can(
-    userPermissions,
-    "movements.view",
+  const canView = can("movements.view",
     "stock_movements.view",
     "stock-movements.view",
     
   );
-  const canCreate = can(
-    userPermissions,
-    "movements.create",
+  const canCreate = can("movements.create",
     "stock_movements.create",
     "stock-movements.create",
    

@@ -5,19 +5,11 @@ import api from "../../api/axios";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { useShipments } from "../../hooks/useOrders";
 import { invalidateShipments } from "../../lib/invalidate";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Orders.css";
 
 /* ── Types ─────────────────────────────────────────────────── */
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
+ 
 
 type Customer = { id: string; name: string };
 type Warehouse = { id: string; code: string; name?: string };
@@ -126,68 +118,6 @@ const emptyForm = (): ShipForm => ({
 });
 
 /* ── Permission helpers ────────────────────────────────────── */
-function norm(s: string): string {
-  return String(s || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-}
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-
-  return [];
-}
-
-function isAdminPayload(json: unknown): boolean {
-  if (!json || typeof json !== "object") return false;
-  const j = json as Record<string, unknown>;
-  const data = j.data as Record<string, unknown> | undefined;
-  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
-  if (user?.is_admin === true || user?.isAdmin === true) return true;
-  const roleName = String(
-    (user?.role as { name?: string } | undefined)?.name ||
-      user?.role_name ||
-      (data?.role as { name?: string } | undefined)?.name ||
-      ""
-  ).toLowerCase();
-  return (
-    roleName === "admin" ||
-    roleName === "administrator" ||
-    roleName === "system admin" ||
-    roleName === "system administrator" ||
-    roleName === "super admin" ||
-    roleName === "superadmin"
-  );
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  const normalized = perms.map(norm);
-  if (
-    normalized.includes("*") ||
-    normalized.includes("admin") ||
-    normalized.includes("super_admin") ||
-    normalized.includes("superadmin")
-  ) {
-    return true;
-  }
-  return needed.map(norm).some((n) => normalized.includes(n));
-}
 /* ── Domain helpers ────────────────────────────────────────── */
 function getItems(json: unknown): unknown[] {
   if (!json) return [];
@@ -316,8 +246,6 @@ function Shipping() {
   const [formError, setFormError] = useState<string | null>(null);
   const [deliveringId, setDeliveringId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
 
   const { rows: whRows, refetch: refetchWarehouses } = useWarehouses({
     enabled: true,
@@ -374,76 +302,12 @@ function Shipping() {
   );
 
   /* ── Permissions ─────────────────────────────────────────── */
-    const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-    };
+  const { can, isLoaded: permsLoaded } = usePermissions();
 
-    // 1) /me first
-    try {
-      const { data: json } = await api.get("/me");
-      if (json) {
-        if (isAdminPayload(json)) {
-          finish(["*"]);
-          return;
-        }
-        const list = extractPermissions(json);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-      }
-    } catch {
-      /* fall through */
-    }
 
-    // 2) localStorage fallback
-    for (const key of [
-      "permissions",
-      "user_permissions",
-      "auth_permissions",
-      "user",
-      "auth_user",
-      "authUser",
-      "currentUser",
-      "sa-user",
-    ]) {
-      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw);
-        if (isAdminPayload(parsed)) {
-          finish(["*"]);
-          return;
-        }
-        if (
-          Array.isArray(parsed) &&
-          parsed.every((x: unknown) => typeof x === "string")
-        ) {
-          finish(parsed as string[]);
-          return;
-        }
-        const list = extractPermissions(parsed);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-      } catch {
-        /* next */
-      }
-    }
-
-    finish(["*"]);
-  }, []);
-
-  useEffect(() => {
-    void fetchUserPermissions();
-  }, [fetchUserPermissions]);
-
-  const canView = can(userPermissions, "shipping.view", "shipments.view");
-  const canCreate = can(userPermissions, "shipping.create", "shipments.create");
-  const canUpdate = can(userPermissions, "shipping.update", "shipments.update");
+  const canView = can("shipping.view", "shipments.view");
+  const canCreate = can("shipping.create", "shipments.create");
+  const canUpdate = can("shipping.update", "shipments.update");
 
   /* ── Debounced search ────────────────────────────────────── */
   useEffect(() => {

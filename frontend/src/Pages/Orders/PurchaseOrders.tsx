@@ -5,114 +5,13 @@ import api from "../../api/axios";
 import { usePurchaseOrders } from "../../hooks/useOrders";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidatePurchaseOrders } from "../../lib/invalidate";
+import { usePermissions } from "../../hooks/useCurrentUser";
+import { extractAdminFlag } from "../../lib/permissions";
 import "../css/Orders.css";
 
 
 
 
-/* ── Role permissions ─────────────────────────────────────── */
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
-function norm(s: string): string {
-  return String(s || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-}
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-
-  return [];
-}
-
-function isAdminPayload(json: unknown): boolean {
-  if (!json || typeof json !== "object") return false;
-  const j = json as Record<string, unknown>;
-  const data = j.data as Record<string, unknown> | undefined;
-  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
-  if (user?.is_admin === true || user?.isAdmin === true) return true;
-  const roleName = String(
-    (user?.role as { name?: string } | undefined)?.name ||
-      user?.role_name ||
-      (data?.role as { name?: string } | undefined)?.name ||
-      ""
-  ).toLowerCase();
-  return (
-    roleName === "admin" ||
-    roleName === "administrator" ||
-    roleName === "system admin" ||
-    roleName === "system administrator" ||
-    roleName === "super admin" ||
-    roleName === "superadmin"
-  );
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  if (!perms || perms.length === 0) return false;
-  const normalized = perms.map(norm);
-  // Inventory-style: wildcard = full access
-  if (
-    normalized.includes("*") ||
-    normalized.includes("admin") ||
-    normalized.includes("super_admin") ||
-    normalized.includes("superadmin")
-  ) {
-    return true;
-  }
-  return needed.map(norm).some((n) => normalized.includes(n));
-}
-
-/** Parse permission names from /roles/:id/permissions (same as Inventory) */
-function namesFromRolePermsPayload(json: unknown): string[] {
-  if (!json) return [];
-  const root = json as Record<string, unknown>;
-  const candidates = [
-    root.data,
-    root.permissions,
-    (root.data as Record<string, unknown> | undefined)?.permissions,
-    (root.data as Record<string, unknown> | undefined)?.data,
-    root,
-  ];
-  for (const c of candidates) {
-    if (!Array.isArray(c)) continue;
-    const names = c
-      .map((p) => {
-        if (typeof p === "string") return p;
-        if (p && typeof p === "object") {
-          const o = p as { name?: string; permission?: string; permission_name?: string };
-          return o.name || o.permission || o.permission_name || null;
-        }
-        return null;
-      })
-      .filter((x): x is string => !!x && x.length > 0);
-    if (names.length > 0) return names;
-  }
-  return [];
-}
 const svg = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -730,160 +629,16 @@ function PurchaseOrders() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
 
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
 
   const showToast = (type: string, title: string, msg: string) => {
     setToast({ type, title, msg });
     setTimeout(() => setToast(null), 3200);
   };
 
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-      try {
-        localStorage.setItem("permissions", JSON.stringify(list));
-      } catch {
-        /* ignore */
-      }
-    };
+  const { can, isLoaded: permsLoaded } = usePermissions();
 
-    // Optimistic: use cached permissions from login immediately (same idea as Inventory)
-    try {
-      const raw = localStorage.getItem("permissions");
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
-          setUserPermissions(parsed as string[]);
-          setPermsLoaded(true);
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    let roleId: string | null = null;
-    let roleName = "";
-
-    try {
-      for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          roleId = u?.role_id || u?.role?.id || null;
-          roleName = u?.role?.name || u?.role_name || "";
-          if (roleId) break;
-        } catch {
-          /* next */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      const { data: json } = await api.get("/me");
-      if (json) {
-        if (isAdminPayload(json)) {
-          finish(["*"]);
-          return;
-        }
-        const u = (json as any)?.data ?? (json as any)?.user ?? json;
-        roleId = u?.role_id || u?.role?.id || (json as any)?.role_id || roleId;
-        roleName = u?.role?.name || u?.role_name || roleName;
-
-        const list = extractPermissions(json);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-      }
-    } catch {
-      /* fall through */
-    }
-
-    // Admin role → full access (Inventory pattern)
-    const normalizedRole = String(roleName)
-      .toLowerCase()
-      .replace(/[_-]+/g, " ")
-      .trim();
-    if (
-      [
-        "admin",
-        "administrator",
-        "super admin",
-        "superadmin",
-        "system admin",
-        "system administrator",
-        "root",
-      ].includes(normalizedRole)
-    ) {
-      finish(["*"]);
-      return;
-    }
-
-    // Normal role → load permissions from role endpoint (Inventory pattern)
-    if (roleId) {
-      try {
-        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-        const names = namesFromRolePermsPayload(json);
-        finish(names);
-        return;
-      } catch {
-        /* fall through */
-      }
-    }
-
-    // localStorage fallback arrays / payloads
-    for (const key of [
-      "permissions",
-      "user_permissions",
-      "auth_permissions",
-      "user",
-      "auth_user",
-      "authUser",
-      "currentUser",
-      "sa-user",
-    ]) {
-      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw);
-        if (isAdminPayload(parsed)) {
-          finish(["*"]);
-          return;
-        }
-        if (
-          Array.isArray(parsed) &&
-          parsed.every((x: unknown) => typeof x === "string")
-        ) {
-          finish(parsed as string[]);
-          return;
-        }
-        const list = extractPermissions(parsed);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-      } catch {
-        /* next */
-      }
-    }
-
-    // No permissions → restricted (do NOT grant * by default)
-    finish([]);
-  }, []);
-
-  useEffect(() => {
-    fetchUserPermissions();
-  }, [fetchUserPermissions]);
    // Module permissions (same pattern as Inventory: inventory.view → purchase_orders.view)
-  const canView = can(
-    userPermissions,
-    "purchase_orders.view",
+  const canView = can("purchase_orders.view",
     "purchase-orders.view",
     "purchaseorders.view",
     "orders.view",
@@ -893,9 +648,7 @@ function PurchaseOrders() {
     "shipments.view",
     "shipment.view"
   );
-  const canCreate = can(
-    userPermissions,
-    "purchase_orders.create",
+  const canCreate = can("purchase_orders.create",
     "purchase-orders.create",
     "purchaseorders.create",
     "orders.create",
@@ -904,9 +657,7 @@ function PurchaseOrders() {
     "shipments.create",
     "shipment.create"
   );
-  const canUpdate = can(
-    userPermissions,
-    "purchase_orders.update",
+  const canUpdate = can("purchase_orders.update",
     "purchase-orders.update",
     "purchaseorders.update",
     "orders.update",
@@ -936,7 +687,7 @@ function PurchaseOrders() {
         userId = u?.id ? String(u.id) : userId;
         accessAll = Boolean(u?.access_all_warehouses) || accessAll;
         roleName = String(u?.role?.name ?? u?.role_name ?? roleName);
-        if (isAdminPayload(parsed) || isAdminPayload(u)) accessAll = true;
+        if (extractAdminFlag(parsed) || extractAdminFlag(u)) accessAll = true;
 
         const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
         if (Array.isArray(fromMe) && fromMe.length > 0) {
@@ -1003,7 +754,7 @@ function PurchaseOrders() {
         const u = (me as any)?.data ?? (me as any)?.user ?? me;
         userId = u?.id ? String(u.id) : userId;
         if (Boolean(u?.access_all_warehouses)) accessAll = true;
-        if (isAdminPayload(me) || isAdminPayload(u)) accessAll = true;
+        if (extractAdminFlag(me) || extractAdminFlag(u)) accessAll = true;
         const r2 = String(u?.role?.name ?? u?.role_name ?? "")
           .toLowerCase()
           .replace(/[_-]+/g, " ")

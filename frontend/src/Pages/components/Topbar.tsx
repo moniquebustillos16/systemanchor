@@ -891,7 +891,7 @@ function Topbar({
     el?.scrollIntoView({ block: "nearest" });
   }, [activeIndex]);
 
-  const handleLogout = () => {
+    const handleLogout = () => {
     setUserOpen(false);
     notifsCache.entry = null;
     notifsCache.inflight = null;
@@ -899,11 +899,15 @@ function Topbar({
     unreadCache.inflight = null;
     unreadCache.lastKnown = -1;
     topbarBootstrapStarted = false;
+    window.dispatchEvent(new Event("sa-logout"));
     if (onLogout) onLogout();
     else {
       localStorage.removeItem("sa-auth");
       localStorage.removeItem("token");
       localStorage.removeItem("auth_token");
+      localStorage.removeItem("user");
+      sessionStorage.removeItem("token");
+      sessionStorage.removeItem("user");
       navigate("/");
     }
   };

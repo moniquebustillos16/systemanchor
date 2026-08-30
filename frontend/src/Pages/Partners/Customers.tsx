@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {  useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
-import api from "../../api/axios";
 import { useCustomers } from "../../hooks/usePartners";
 import {
   createCustomer,
@@ -9,40 +8,8 @@ import {
   deleteCustomer,
 } from "../../api/partners";
 import { invalidateCustomers } from "../../lib/invalidate";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Partners.css";
-
-/* ── Role permissions ─────────────────────────────────────── */
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin"))
-    return true;
-  return needed.some((n) => perms.includes(n));
-}
 
 const svg = {
   viewBox: "0 0 24 24",
@@ -111,8 +78,6 @@ function Customers() {
     title: string;
     msg: string;
   } | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Customer | null>(null);
@@ -169,76 +134,11 @@ function Customers() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-    };
-    try {
-      for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (
-            Array.isArray(parsed) &&
-            parsed.every((x: unknown) => typeof x === "string")
-          ) {
-            finish(parsed as string[]);
-            return;
-          }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) {
-            finish(list);
-            return;
-          }
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          const rid = u?.role_id || u?.role?.id;
-          if (rid) {
-            try {
-              const { data: json } = await api.get(`/roles/${rid}/permissions`);
-              const perms =
-                json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-              if (Array.isArray(perms)) {
-                finish(
-                  perms
-                    .map((p: { name?: string } | string) =>
-                      typeof p === "string" ? p : p?.name
-                    )
-                    .filter(Boolean) as string[]
-                );
-                return;
-              }
-            } catch {
-              /* */
-            }
-          }
-        } catch {
-          /* */
-        }
-      }
-    } catch {
-      /* */
-    }
-    try {
-      const { data: json } = await api.get("/me");
-      const list = extractPermissions(json);
-      if (list.length > 0) {
-        finish(list);
-        return;
-      }
-    } catch {
-      /* */
-    }
-    finish(["*"]);
-  }, []);
-  useEffect(() => {
-    void fetchUserPermissions();
-  }, [fetchUserPermissions]);
+  const { can, isLoaded: permsLoaded } = usePermissions();
 
-  const canView = can(userPermissions, "customers.view");
-  const canCreate = can(userPermissions, "customers.create");
-  const canUpdate = can(userPermissions, "customers.update");
+  const canView = can("customers.view");
+  const canCreate = can("customers.create");
+  const canUpdate = can("customers.update");
 
   const stats = useMemo(() => {
     const active = customers.filter((c) => c.status === "active").length;

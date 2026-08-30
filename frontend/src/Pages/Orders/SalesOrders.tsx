@@ -5,80 +5,10 @@ import api from "../../api/axios";
 import { useSalesOrders } from "../../hooks/useOrders";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidateSalesOrders } from "../../lib/invalidate";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Orders.css";
 
 
-
-
-/* ── Role permissions ─────────────────────────────────────── */
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
-function norm(s: string): string {
-  return String(s || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-}
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  return [];
-}
-
-function isAdminPayload(json: unknown): boolean {
-  if (!json || typeof json !== "object") return false;
-  const j = json as Record<string, unknown>;
-  const data = j.data as Record<string, unknown> | undefined;
-  const user = (j.user || data?.user) as Record<string, unknown> | undefined;
-  if (user?.is_admin === true || user?.isAdmin === true) return true;
-  const roleName = String(
-    (user?.role as { name?: string } | undefined)?.name ||
-      user?.role_name ||
-      (data?.role as { name?: string } | undefined)?.name ||
-      ""
-  ).toLowerCase();
-  return (
-    roleName === "admin" ||
-    roleName === "administrator" ||
-    roleName === "system admin" ||
-    roleName === "system administrator" ||
-    roleName === "super admin" ||
-    roleName === "superadmin"
-  );
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  const normalized = perms.map(norm);
-  if (
-    normalized.includes("*") ||
-    normalized.includes("admin") ||
-    normalized.includes("super_admin") ||
-    normalized.includes("superadmin")
-  ) {
-    return true;
-  }
-  return needed.map(norm).some((n) => normalized.includes(n));
-}
 const svg = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -423,83 +353,25 @@ function SalesOrders() {
   const [viewOrder, setViewOrder] = useState<SalesOrder | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
 
   const showToast = (type: string, title: string, msg: string) => {
     setToast({ type, title, msg });
     setTimeout(() => setToast(null), 3200);
   };
 
-    const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-    };
-
-    // 1) /me first
-    try {
-      const { data: json } = await api.get("/me");
-      if (json) {
-        if (isAdminPayload(json)) {
-          finish(["*"]);
-          return;
-        }
-        const list = extractPermissions(json);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-      }
-    } catch {
-      /* fall through */
-    }
-
-    // 2) localStorage only if /me empty/failed
-    for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
-      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw);
-        if (isAdminPayload(parsed)) {
-          finish(["*"]);
-          return;
-        }
-        if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
-          finish(parsed as string[]);
-          return;
-        }
-        const list = extractPermissions(parsed);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-      } catch {
-        /* next */
-      }
-    }
-
-    finish(["*"]);
-  }, []);
-  useEffect(() => { fetchUserPermissions(); }, [fetchUserPermissions]);
-    const canView = can(
-    userPermissions,
-    "sales_orders.view",
+  const { can, isLoaded: permsLoaded } = usePermissions();
+    const canView = can("sales_orders.view",
     "sales-orders.view",
     "sales_order.view",
     "so.view",
     "orders.view"
   );
-  const canCreate = can(
-    userPermissions,
-    "sales_orders.create",
+  const canCreate = can("sales_orders.create",
     "sales-orders.create",
     "sales_order.create",
     "so.create"
   );
-  const canUpdate = can(
-    userPermissions,
-    "sales_orders.update",
+  const canUpdate = can("sales_orders.update",
     "sales-orders.update",
     "sales_order.update",
     "so.update"
