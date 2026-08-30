@@ -1,0 +1,783 @@
+diff --git a/frontend/src/lib/auth.ts b/frontend/src/lib/auth.ts
+new file mode 100644
+index 0000000..e327b01
+--- /dev/null
++++ b/frontend/src/lib/auth.ts
+@@ -0,0 +1,31 @@
++/**
++ * Single source of truth for reading/clearing the auth token.
++ *
++ * Previously this same "check 5 different storage keys" logic was copy-
++ * pasted in 6 different files (api/axios.ts, hooks/useCurrentUser.ts,
++ * hooks/useProfile.ts, Pages/components/RequirePermission.tsx,
++ * Pages/components/Topbar.tsx). Only "token" is ever actually written on
++ * login (see App.tsx) — the other keys (auth_token, sa-auth, access_token)
++ * were dead reads left over from earlier iterations. Consolidating here so
++ * there's exactly one place to update if the storage strategy ever changes.
++ */
++
++const TOKEN_KEY = "token";
++const USER_KEY = "user";
++
++export function getAuthToken(): string | null {
++  if (typeof window === "undefined") return null;
++  return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || null;
++}
++
++export function setAuthToken(token: string, persist: boolean): void {
++  const store = persist ? localStorage : sessionStorage;
++  store.setItem(TOKEN_KEY, token);
++}
++
++export function clearAuthToken(): void {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USER_KEY);
++  sessionStorage.removeItem(TOKEN_KEY);
++  sessionStorage.removeItem(USER_KEY);
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 536fe31..59f183b 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -2,6 +2,8 @@ import { useNavigate } from "react-router-dom";
+ import { useState } from "react";
+ import api from "./api/axios";
+ import mainLogo from "./assets/main_logo.png";
++import { schedulePrefetch } from "./lib/prefetch";
++import { setAuthToken } from "./lib/auth";
+ import "./index.css";
+ 
+ function App() {
+@@ -28,16 +30,13 @@ function App() {
+ 
+       const { token, user } = response.data;
+ 
+-      if (remember) {
+-        localStorage.setItem("token", token);
+-        localStorage.setItem("user", JSON.stringify(user));
+-      } else {
+-        sessionStorage.setItem("token", token);
+-        sessionStorage.setItem("user", JSON.stringify(user));
+-      }
++      setAuthToken(token, remember);
++      const userStore = remember ? localStorage : sessionStorage;
++      userStore.setItem("user", JSON.stringify(user));
+ 
+       window.dispatchEvent(new Event("sa-auth-changed"));
+       window.dispatchEvent(new Event("sa-permissions-refresh"));
++      schedulePrefetch();
+       navigate("/dashboard");
+     } catch (error: any) {
+       if (error.response) {
+diff --git a/frontend/src/Pages/components/Header/Profile.tsx b/frontend/src/Pages/components/Header/Profile.tsx
+index 3c2464e..d597a8d 100644
+--- a/frontend/src/Pages/components/Header/Profile.tsx
++++ b/frontend/src/Pages/components/Header/Profile.tsx
+@@ -9,6 +9,7 @@ import {
+   type ProfileSession,
+   type ProfileActivityItem,
+ } from "../../../hooks/useProfile";
++import { clearAuthToken } from "../../../lib/auth";
+ import "./Profile.css";
+ 
+ /* ===================== ICONS ===================== */
+@@ -283,9 +284,7 @@ function Profile() {
+   }, []);
+ 
+   const handleAuthFailure = useCallback(() => {
+-    localStorage.removeItem("token");
+-    localStorage.removeItem("auth_token");
+-    localStorage.removeItem("sa-auth");
++    clearAuthToken();
+     navigate("/");
+   }, [navigate]);
+ 
+diff --git a/frontend/src/Pages/components/RequirePermission.tsx b/frontend/src/Pages/components/RequirePermission.tsx
+index ea97a0d..7413229 100644
+--- a/frontend/src/Pages/components/RequirePermission.tsx
++++ b/frontend/src/Pages/components/RequirePermission.tsx
+@@ -1,24 +1,13 @@
+ import { Navigate } from "react-router-dom";
+ import type { ReactNode } from "react";
+ import { usePermissions } from "../../hooks/useCurrentUser";
++import { getAuthToken } from "../../lib/auth";
+ import {
+   ADMIN_ONLY_PATHS,
+   AUTH_ONLY_PATHS,
+   ROUTE_VIEW,
+ } from "../../lib/routePermissions";
+ 
+-function getAuthToken(): string | null {
+-  if (typeof window === "undefined") return null;
+-  return (
+-    localStorage.getItem("token") ||
+-    sessionStorage.getItem("token") ||
+-    localStorage.getItem("auth_token") ||
+-    localStorage.getItem("sa-auth") ||
+-    localStorage.getItem("access_token") ||
+-    null
+-  );
+-}
+-
+ type Props = {
+   path: string;
+   children: ReactNode;
+diff --git a/frontend/src/Pages/components/Topbar.tsx b/frontend/src/Pages/components/Topbar.tsx
+index c928343..7dd3a70 100644
+--- a/frontend/src/Pages/components/Topbar.tsx
++++ b/frontend/src/Pages/components/Topbar.tsx
+@@ -10,6 +10,7 @@ import {
+ } from "react";
+ import { useNavigate } from "react-router-dom";
+ import api from "../../api/axios";
++import { getAuthToken, clearAuthToken } from "../../lib/auth";
+ import { useProfile } from "../../hooks/useProfile";
+ import "../css/Topbar.css";
+ 
+@@ -313,14 +314,6 @@ function applyTheme(theme: "light" | "dark" | "system") {
+   return resolved;
+ }
+ 
+-function getAuthToken(): string | null {
+-  return (
+-    localStorage.getItem("sa-auth") ||
+-    localStorage.getItem("token") ||
+-    localStorage.getItem("auth_token")
+-  );
+-}
+-
+ function isCanceled(err: unknown): boolean {
+   const e = err as any;
+   return e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError";
+@@ -902,12 +895,7 @@ function Topbar({
+     window.dispatchEvent(new Event("sa-logout"));
+     if (onLogout) onLogout();
+     else {
+-      localStorage.removeItem("sa-auth");
+-      localStorage.removeItem("token");
+-      localStorage.removeItem("auth_token");
+-      localStorage.removeItem("user");
+-      sessionStorage.removeItem("token");
+-      sessionStorage.removeItem("user");
++      clearAuthToken();
+       navigate("/");
+     }
+   };
+diff --git a/frontend/src/api/auth.ts b/frontend/src/api/auth.ts
+index b704f71..e38b2fb 100644
+--- a/frontend/src/api/auth.ts
++++ b/frontend/src/api/auth.ts
+@@ -1,5 +1,6 @@
+ import api from "./axios";
+ import { extractData } from "./types";
++import { clearAuthToken } from "../lib/auth";
+ 
+ export type AuthUser = {
+   id: string;
+@@ -57,13 +58,7 @@ export async function logout(): Promise<void> {
+   try {
+     await api.post("/logout");
+   } finally {
+-    localStorage.removeItem("token");
+-    localStorage.removeItem("user");
+-    localStorage.removeItem("sa-auth");
+-    localStorage.removeItem("auth_token");
+-    localStorage.removeItem("access_token");
+-    sessionStorage.removeItem("token");
+-    sessionStorage.removeItem("user");
++    clearAuthToken();
+   }
+ }
+ 
+diff --git a/frontend/src/api/axios.ts b/frontend/src/api/axios.ts
+index b2e71a4..27b8361 100644
+--- a/frontend/src/api/axios.ts
++++ b/frontend/src/api/axios.ts
+@@ -1,17 +1,17 @@
+ import axios from "axios";
++import { getAuthToken, clearAuthToken } from "../lib/auth";
+ 
+ const api = axios.create({
+   baseURL: import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api",
++  // Default timeout for every request. Individual calls can still override
++  // this by passing their own `timeout` in the request config if a specific
++  // endpoint is known to be slow (e.g. large report generation).
++  timeout: 15_000,
+ });
+ 
+ // Attach token on every request
+ api.interceptors.request.use((config) => {
+-  const token =
+-    localStorage.getItem("token") ||
+-    sessionStorage.getItem("token") ||
+-    localStorage.getItem("auth_token") ||
+-    localStorage.getItem("sa-auth") ||
+-    localStorage.getItem("access_token");
++  const token = getAuthToken();
+ 
+   if (token) {
+     config.headers.Authorization = `Bearer ${token}`;
+@@ -25,10 +25,7 @@ api.interceptors.response.use(
+   (response) => response,
+   (error) => {
+     if (error.response?.status === 401) {
+-      localStorage.removeItem("token");
+-      localStorage.removeItem("user");
+-      sessionStorage.removeItem("token");
+-      sessionStorage.removeItem("user");
++      clearAuthToken();
+ 
+       if (window.location.pathname !== "/") {
+         window.location.href = "/";
+diff --git a/frontend/src/hooks/useCurrentUser.ts b/frontend/src/hooks/useCurrentUser.ts
+index 65d4e27..6f5557d 100644
+--- a/frontend/src/hooks/useCurrentUser.ts
++++ b/frontend/src/hooks/useCurrentUser.ts
+@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo } from "react";
+ import { useQuery, useQueryClient } from "@tanstack/react-query";
+ import { getMe, type AuthUser } from "../api/auth";
+ import { queryClient, queryKeys } from "../lib/queryClient";
++import { getAuthToken } from "../lib/auth";
+ import {
+   hasAnyPermission,
+   resolvePermissions,
+@@ -9,18 +10,6 @@ import {
+   type ResolvedPermissions,
+ } from "../lib/permissions";
+ 
+-function getAuthToken(): string | null {
+-  if (typeof window === "undefined") return null;
+-  return (
+-    localStorage.getItem("token") ||
+-    sessionStorage.getItem("token") ||
+-    localStorage.getItem("auth_token") ||
+-    localStorage.getItem("sa-auth") ||
+-    localStorage.getItem("access_token") ||
+-    null
+-  );
+-}
+-
+ /**
+  * Load current user via GET /me (canonical).
+  * On network failure, attempt the same localStorage/sessionStorage
+diff --git a/frontend/src/hooks/useDashboard.ts b/frontend/src/hooks/useDashboard.ts
+index 7a112ab..a407a49 100644
+--- a/frontend/src/hooks/useDashboard.ts
++++ b/frontend/src/hooks/useDashboard.ts
+@@ -444,9 +444,20 @@ async function fetchDashboardData(range: string): Promise<DashboardViewModel> {
+     ) {
+       return mapUnifiedDashboard(payload as Record<string, unknown>);
+     }
++    // Unified endpoint responded but with an unrecognized shape — safe to
++    // assume it's not deployed yet on this backend, fall back once.
+     return fetchDashboardLegacy(range);
+-  } catch {
+-    return fetchDashboardLegacy(range);
++  } catch (err: unknown) {
++    // Only fall back to the slow 12-request legacy path when the unified
++    // endpoint truly doesn't exist (404/501). For everything else — a
++    // timeout, a 500, a network blip — rethrow so React Query's built-in
++    // retry (see queryClient.ts: retry: 1) retries the SAME single request
++    // instead of silently tripling the number of API calls.
++    const status = (err as { response?: { status?: number } } | undefined)?.response?.status;
++    if (status === 404 || status === 501) {
++      return fetchDashboardLegacy(range);
++    }
++    throw err;
+   }
+ }
+ 
+diff --git a/frontend/src/hooks/useProfile.ts b/frontend/src/hooks/useProfile.ts
+index 0628be9..afb3b56 100644
+--- a/frontend/src/hooks/useProfile.ts
++++ b/frontend/src/hooks/useProfile.ts
+@@ -20,6 +20,7 @@ import {
+   type ProfileSession,
+   type ProfileActivityItem,
+ } from "../api/profile";
++import { getAuthToken } from "../lib/auth";
+ 
+ export const DEFAULT_SETTINGS: UserSettings = {
+   language: "English",
+@@ -33,17 +34,6 @@ export const DEFAULT_SETTINGS: UserSettings = {
+   digest_frequency: "daily",
+ };
+ 
+-function getAuthToken(): string | null {
+-  if (typeof window === "undefined") return null;
+-  return (
+-    localStorage.getItem("sa-auth") ||
+-    localStorage.getItem("token") ||
+-    localStorage.getItem("auth_token") ||
+-    sessionStorage.getItem("token") ||
+-    null
+-  );
+-}
+-
+ export function normalizeSettings(raw: unknown): UserSettings {
+   const s = (raw && typeof raw === "object" ? raw : {}) as Partial<UserSettings>;
+   return {
+diff --git a/frontend/src/lib/auth.ts b/frontend/src/lib/auth.ts
+new file mode 100644
+index 0000000..e327b01
+--- /dev/null
++++ b/frontend/src/lib/auth.ts
+@@ -0,0 +1,31 @@
++/**
++ * Single source of truth for reading/clearing the auth token.
++ *
++ * Previously this same "check 5 different storage keys" logic was copy-
++ * pasted in 6 different files (api/axios.ts, hooks/useCurrentUser.ts,
++ * hooks/useProfile.ts, Pages/components/RequirePermission.tsx,
++ * Pages/components/Topbar.tsx). Only "token" is ever actually written on
++ * login (see App.tsx) — the other keys (auth_token, sa-auth, access_token)
++ * were dead reads left over from earlier iterations. Consolidating here so
++ * there's exactly one place to update if the storage strategy ever changes.
++ */
++
++const TOKEN_KEY = "token";
++const USER_KEY = "user";
++
++export function getAuthToken(): string | null {
++  if (typeof window === "undefined") return null;
++  return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || null;
++}
++
++export function setAuthToken(token: string, persist: boolean): void {
++  const store = persist ? localStorage : sessionStorage;
++  store.setItem(TOKEN_KEY, token);
++}
++
++export function clearAuthToken(): void {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USER_KEY);
++  sessionStorage.removeItem(TOKEN_KEY);
++  sessionStorage.removeItem(USER_KEY);
++}
+diff --git a/frontend/src/lib/prefetch.ts b/frontend/src/lib/prefetch.ts
+index 6223f50..57fdf94 100644
+--- a/frontend/src/lib/prefetch.ts
++++ b/frontend/src/lib/prefetch.ts
+@@ -1,355 +1,84 @@
+ import { queryClient, queryKeys } from "./queryClient";
++import { resolvePermissionsFromStorage, hasAnyPermission } from "./permissions";
++import { ROUTE_VIEW } from "./routePermissions";
+ 
+ /**
+- * Background-warm TanStack Query cache for high-traffic modules.
+- * Safe to call multiple times — React Query dedupes in-flight requests.
++ * Background-warm the TanStack Query cache right after login, for the
++ * pages people land on most: Dashboard and Inventory.
++ *
++ * Kept deliberately small — this used to prefetch ~15 modules (orders,
++ * warehouses, users, roles, permissions, etc.) unconditionally, which
++ * fired a burst of requests for pages a given user often can't even see.
++ * If you need to warm more modules, add them here ONE at a time and gate
++ * each behind the same permission check used below, so we never fetch
++ * data for a page the current user isn't allowed to open.
+  */
+ export async function prefetchAppData(): Promise<void> {
+-  const tasks: Promise<unknown>[] = [];
+-
+-  // ── Inventory (list + stats) ─────────────────────────────
+-  const invListParams = {
+-    page: 1,
+-    per_page: 15,
+-    sort: "updated_at",
+-    dir: "desc",
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.inventory.list(invListParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/inventories", { params: invListParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.inventory.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/inventories/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Stock movements ──────────────────────────────────────
+-  const stockParams = {
+-    page: 1,
+-    per_page: 15,
+-    sort: "movement_date",
+-    dir: "desc",
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.stockMovements.list(stockParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/stock-movements", { params: stockParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Purchase orders ──────────────────────────────────────
+-  const poParams = {
+-    page: 1,
+-    per_page: 15,
+-    sort: "order_date",
+-    dir: "desc",
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.purchaseOrders.list(poParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/purchase-orders", { params: poParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.purchaseOrders.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/purchase-orders/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Sales orders ─────────────────────────────────────────
+-  const soParams = {
+-    page: 1,
+-    per_page: 15,
+-    sort: "order_date",
+-    dir: "desc",
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.salesOrders.list(soParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/sales-orders", { params: soParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.salesOrders.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/sales-orders/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Warehouses ───────────────────────────────────────────
+-  const whParams = { per_page: 200, all: 1 };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.warehouses.list(whParams),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/warehouses", { params: whParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Goods receipts (Receiving) ───────────────────────────
+-  const grParams = {
+-    page: 1,
+-    per_page: 15,
+-    sort: "date",
+-    dir: "desc",
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.goodsReceipts.list(grParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/goods-receipts", { params: grParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.goodsReceipts.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/goods-receipts/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Shipments ────────────────────────────────────────────
+-  const shipParams = {
+-    page: 1,
+-    per_page: 15,
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.shipments.list(shipParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/shipments", { params: shipParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.shipments.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/shipments/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Returns (RMA) ────────────────────────────────────────
+-  const retParams = {
+-    page: 1,
+-    per_page: 15,
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.returns.list(retParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/returns", { params: retParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.returns.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/returns/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Partners: Customers ──────────────────────────────────
+-  const customerParams = {
+-    page: 1,
+-    per_page: 100,
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.customers.list(customerParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/customers", { params: customerParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── Partners: Suppliers ──────────────────────────────────
+-  const supplierParams = {
+-    page: 1,
+-    per_page: 100,
+-  };
++  const perms = resolvePermissionsFromStorage();
++  const list = perms?.list ?? [];
++  const isAdmin = perms?.isAdmin ?? false;
+ 
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.suppliers.list(supplierParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/suppliers", { params: supplierParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
++  const canView = (path: keyof typeof ROUTE_VIEW) =>
++    hasAnyPermission(list, isAdmin, ...ROUTE_VIEW[path]);
+ 
+-  // ── System: Users (list + stats) ─────────────────────────
+-  // Match useUsers default: page 1, per_page 200, no filters
+-  const userListParams = {
+-    page: 1,
+-    per_page: 200,
+-    sort: "name",
+-    dir: "asc",
+-  };
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.users.list(userListParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/users", { params: userListParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.users.stats,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/users/stats");
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
+-
+-  // ── System: Roles (for Users form / filters) ─────────────
+-    // ── System: Roles + Permissions catalog ──────────────────
+-  const roleListParams = {
+-    per_page: 200,
+-    all: 1,
+-    sort: "name",
+-    dir: "asc",
+-    with_counts: 1,
+-  };
++  const tasks: Promise<unknown>[] = [];
+ 
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.roles.list(roleListParams as Record<string, unknown>),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/roles", { params: roleListParams });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
++  // Dashboard — nearly everyone lands here first after login.
++  if (canView("/dashboard")) {
++    tasks.push(
++      queryClient.prefetchQuery({
++        queryKey: queryKeys.dashboard("7m"),
++        queryFn: async () => {
++          const { default: api } = await import("../api/axios");
++          const { data } = await api.get("/dashboard", { params: { range: "7m" } });
++          return data;
++        },
++        staleTime: 60_000,
++      })
++    );
++  }
+ 
+-  tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.permissions.list({ per_page: 500, all: 1 }),
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data } = await api.get("/permissions", {
+-          params: { per_page: 500, all: 1 },
+-        });
+-        return data;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
++  // Inventory list + stats — the other most-visited page.
++  if (canView("/products")) {
++    const invListParams = { page: 1, per_page: 15, sort: "updated_at", dir: "desc" };
+ 
++    tasks.push(
++      queryClient.prefetchQuery({
++        queryKey: queryKeys.inventory.list(invListParams as Record<string, unknown>),
++        queryFn: async () => {
++          const { default: api } = await import("../api/axios");
++          const { data } = await api.get("/inventories", { params: invListParams });
++          return data;
++        },
++        staleTime: 60_000,
++      })
++    );
+ 
+     tasks.push(
+-    queryClient.prefetchQuery({
+-      queryKey: queryKeys.profile.me,
+-      queryFn: async () => {
+-        const { default: api } = await import("../api/axios");
+-        const { data: json } = await api.get("/profile");
+-        return json?.data ?? json;
+-      },
+-      staleTime: 60_000,
+-    })
+-  );
++      queryClient.prefetchQuery({
++        queryKey: queryKeys.inventory.stats,
++        queryFn: async () => {
++          const { default: api } = await import("../api/axios");
++          const { data } = await api.get("/inventories/stats");
++          return data;
++        },
++        staleTime: 60_000,
++      })
++    );
++  }
++
++  // Fire-and-forget: log failures for visibility, but never block on them
++  // or let one failed prefetch stop the others (they already run in
++  // parallel via Promise.allSettled below).
++  const results = await Promise.allSettled(tasks);
++  results.forEach((r) => {
++    if (r.status === "rejected") {
++      console.warn("[prefetch] a background prefetch failed (non-fatal):", r.reason);
++    }
++  });
+ }
+ 
+-/** Idle-friendly wrapper — waits a tick so Dashboard paint wins. */
++/** Idle-friendly wrapper — waits a tick so the first paint wins. */
+ export function schedulePrefetch(delayMs = 800): void {
+   if (typeof window === "undefined") return;
+ 

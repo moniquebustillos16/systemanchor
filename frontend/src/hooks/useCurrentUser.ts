@@ -2,24 +2,13 @@ import { useCallback, useEffect, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getMe, type AuthUser } from "../api/auth";
 import { queryClient, queryKeys } from "../lib/queryClient";
+import { getAuthToken } from "../lib/auth";
 import {
   hasAnyPermission,
   resolvePermissions,
   resolvePermissionsFromStorage,
   type ResolvedPermissions,
 } from "../lib/permissions";
-
-function getAuthToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return (
-    localStorage.getItem("token") ||
-    sessionStorage.getItem("token") ||
-    localStorage.getItem("auth_token") ||
-    localStorage.getItem("sa-auth") ||
-    localStorage.getItem("access_token") ||
-    null
-  );
-}
 
 /**
  * Load current user via GET /me (canonical).

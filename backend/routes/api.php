@@ -97,10 +97,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     */
 
     Route::get('/user-warehouses', [UserWarehouseController::class, 'index'])
-        ->middleware('permission:users.view');
+        ->middleware('permission:warehouses.view');
 
     Route::get('/user-warehouses/{id}', [UserWarehouseController::class, 'show'])
-        ->middleware('permission:users.view');
+        ->middleware('permission:warehouses.view');
 
     Route::post('/user-warehouses', [UserWarehouseController::class, 'store'])
         ->middleware('permission:users.update');

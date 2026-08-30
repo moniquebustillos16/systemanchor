@@ -1,17 +1,17 @@
 import axios from "axios";
+import { getAuthToken, clearAuthToken } from "../lib/auth";
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api",
+  // Default timeout for every request. Individual calls can still override
+  // this by passing their own `timeout` in the request config if a specific
+  // endpoint is known to be slow (e.g. large report generation).
+  timeout: 15_000,
 });
 
 // Attach token on every request
 api.interceptors.request.use((config) => {
-  const token =
-    localStorage.getItem("token") ||
-    sessionStorage.getItem("token") ||
-    localStorage.getItem("auth_token") ||
-    localStorage.getItem("sa-auth") ||
-    localStorage.getItem("access_token");
+  const token = getAuthToken();
 
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -25,10 +25,7 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
-      sessionStorage.removeItem("token");
-      sessionStorage.removeItem("user");
+      clearAuthToken();
 
       if (window.location.pathname !== "/") {
         window.location.href = "/";
