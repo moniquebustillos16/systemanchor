@@ -1,23 +1,12 @@
 import { Navigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { getAuthToken } from "../../lib/auth";
 import {
   ADMIN_ONLY_PATHS,
   AUTH_ONLY_PATHS,
   ROUTE_VIEW,
 } from "../../lib/routePermissions";
-
-function getAuthToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return (
-    localStorage.getItem("token") ||
-    sessionStorage.getItem("token") ||
-    localStorage.getItem("auth_token") ||
-    localStorage.getItem("sa-auth") ||
-    localStorage.getItem("access_token") ||
-    null
-  );
-}
 
 type Props = {
   path: string;

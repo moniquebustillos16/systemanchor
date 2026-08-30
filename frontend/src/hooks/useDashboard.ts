@@ -444,9 +444,20 @@ async function fetchDashboardData(range: string): Promise<DashboardViewModel> {
     ) {
       return mapUnifiedDashboard(payload as Record<string, unknown>);
     }
+    // Unified endpoint responded but with an unrecognized shape — safe to
+    // assume it's not deployed yet on this backend, fall back once.
     return fetchDashboardLegacy(range);
-  } catch {
-    return fetchDashboardLegacy(range);
+  } catch (err: unknown) {
+    // Only fall back to the slow 12-request legacy path when the unified
+    // endpoint truly doesn't exist (404/501). For everything else — a
+    // timeout, a 500, a network blip — rethrow so React Query's built-in
+    // retry (see queryClient.ts: retry: 1) retries the SAME single request
+    // instead of silently tripling the number of API calls.
+    const status = (err as { response?: { status?: number } } | undefined)?.response?.status;
+    if (status === 404 || status === 501) {
+      return fetchDashboardLegacy(range);
+    }
+    throw err;
   }
 }
 

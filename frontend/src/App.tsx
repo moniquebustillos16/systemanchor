@@ -2,6 +2,8 @@ import { useNavigate } from "react-router-dom";
 import { useState } from "react";
 import api from "./api/axios";
 import mainLogo from "./assets/main_logo.png";
+import { schedulePrefetch } from "./lib/prefetch";
+import { setAuthToken } from "./lib/auth";
 import "./index.css";
 
 function App() {
@@ -28,16 +30,13 @@ function App() {
 
       const { token, user } = response.data;
 
-      if (remember) {
-        localStorage.setItem("token", token);
-        localStorage.setItem("user", JSON.stringify(user));
-      } else {
-        sessionStorage.setItem("token", token);
-        sessionStorage.setItem("user", JSON.stringify(user));
-      }
+      setAuthToken(token, remember);
+      const userStore = remember ? localStorage : sessionStorage;
+      userStore.setItem("user", JSON.stringify(user));
 
       window.dispatchEvent(new Event("sa-auth-changed"));
       window.dispatchEvent(new Event("sa-permissions-refresh"));
+      schedulePrefetch();
       navigate("/dashboard");
     } catch (error: any) {
       if (error.response) {

@@ -1,5 +1,6 @@
 import api from "./axios";
 import { extractData } from "./types";
+import { clearAuthToken } from "../lib/auth";
 
 export type AuthUser = {
   id: string;
@@ -57,13 +58,7 @@ export async function logout(): Promise<void> {
   try {
     await api.post("/logout");
   } finally {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    localStorage.removeItem("sa-auth");
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("access_token");
-    sessionStorage.removeItem("token");
-    sessionStorage.removeItem("user");
+    clearAuthToken();
   }
 }
 

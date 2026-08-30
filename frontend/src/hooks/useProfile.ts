@@ -20,6 +20,7 @@ import {
   type ProfileSession,
   type ProfileActivityItem,
 } from "../api/profile";
+import { getAuthToken } from "../lib/auth";
 
 export const DEFAULT_SETTINGS: UserSettings = {
   language: "English",
@@ -32,17 +33,6 @@ export const DEFAULT_SETTINGS: UserSettings = {
   order_alerts: true,
   digest_frequency: "daily",
 };
-
-function getAuthToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return (
-    localStorage.getItem("sa-auth") ||
-    localStorage.getItem("token") ||
-    localStorage.getItem("auth_token") ||
-    sessionStorage.getItem("token") ||
-    null
-  );
-}
 
 export function normalizeSettings(raw: unknown): UserSettings {
   const s = (raw && typeof raw === "object" ? raw : {}) as Partial<UserSettings>;
