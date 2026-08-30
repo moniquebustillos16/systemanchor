@@ -107,7 +107,18 @@ export async function invalidateRoles() {
     queryClient.invalidateQueries({ queryKey: queryKeys.permissions.all }),
     // Users page role filter / form may show role names
     queryClient.invalidateQueries({ queryKey: queryKeys.users.all }),
+    // Current user's effective permissions may have changed
+    queryClient.invalidateQueries({ queryKey: queryKeys.me }),
   ]);
+}
+
+/** After login / logout / token change — refresh auth user cache */
+export async function invalidateCurrentUser() {
+  await queryClient.invalidateQueries({ queryKey: queryKeys.me });
+}
+
+export function clearCurrentUser() {
+  queryClient.removeQueries({ queryKey: queryKeys.me });
 }
 
 export async function invalidateProfile() {

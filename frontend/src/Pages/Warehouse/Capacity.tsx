@@ -1,22 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
-import api from "../../api/axios";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidateWarehouses } from "../../lib/invalidate";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Warehouse.css";
 
 /* ── Types ─────────────────────────────────────────────────── */
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
+
 
 type Warehouse = {
   id: string | number;
@@ -50,34 +41,6 @@ type ToastState = {
 };
 
 /* ── Permission helpers ────────────────────────────────────── */
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-
-  return [];
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  if (perms.includes("*") || perms.includes("admin") || perms.includes("Admin")) {
-    return true;
-  }
-  return needed.some((n) => perms.includes(n));
-}
-
 /* ── Domain helpers ────────────────────────────────────────── */
 function toNumber(value: number | string | undefined | null): number {
   if (typeof value === "number" && !Number.isNaN(value)) return value;
@@ -144,8 +107,6 @@ const IconWarehouse = () => (
 function Capacity() {
   const [sortBy, setSortBy] = useState<"pct" | "code" | "capacity">("pct");
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
 
   const {
     rows: whRows,
@@ -167,74 +128,9 @@ function Capacity() {
   );
 
   /* ── Permissions ─────────────────────────────────────────── */
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-    };
+  const { can, isLoaded: permsLoaded } = usePermissions();
 
-    try {
-      for (const key of ["permissions", "user", "auth_user", "sa-user"]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.every((x: unknown) => typeof x === "string")) {
-            finish(parsed as string[]);
-            return;
-          }
-          const list = extractPermissions(parsed);
-          if (list.length > 0) {
-            finish(list);
-            return;
-          }
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          const rid = u?.role_id || u?.role?.id;
-          if (rid) {
-            try {
-              const { data: json } = await api.get(`/roles/${rid}/permissions`);
-              const perms = json?.data?.permissions ?? json?.permissions ?? json?.data ?? [];
-              if (Array.isArray(perms)) {
-                finish(
-                  perms
-                    .map((p: { name?: string } | string) =>
-                      typeof p === "string" ? p : p?.name
-                    )
-                    .filter(Boolean) as string[]
-                );
-                return;
-              }
-            } catch {
-              /* ignore */
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      const { data: json } = await api.get("/me");
-      const list = extractPermissions(json);
-      if (list.length > 0) {
-        finish(list);
-        return;
-      }
-    } catch {
-      /* ignore */
-    }
-
-    finish(["*"]);
-  }, []);
-
-  useEffect(() => {
-    void fetchUserPermissions();
-  }, [fetchUserPermissions]);
-
-  const canView = can(userPermissions, "capacity.view", "warehouses.view");
+  const canView = can("capacity.view", "warehouses.view");
 
   /* ── Derived rows & stats ────────────────────────────────── */
   const list: CapRow[] = useMemo(() => {

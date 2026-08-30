@@ -37,6 +37,7 @@ function App() {
       }
 
       window.dispatchEvent(new Event("sa-auth-changed"));
+      window.dispatchEvent(new Event("sa-permissions-refresh"));
       navigate("/dashboard");
     } catch (error: any) {
       if (error.response) {

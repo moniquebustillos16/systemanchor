@@ -19,6 +19,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
     $middleware->alias([
         'permission' => PermissionMiddleware::class,
+        'warehouse.access' => \App\Http\Middleware\WarehouseAccessMiddleware::class,
     ]);
 
     $middleware->redirectGuestsTo(function ($request) {

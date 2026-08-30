@@ -80,11 +80,22 @@ class User extends Authenticatable
     // WAREHOUSES
     // =====================================================
 
+    /**
+     * Primary/default warehouse.
+     *
+     * This is kept for compatibility with the existing
+     * warehouse_id column on the users table.
+     */
     public function warehouse(): BelongsTo
     {
         return $this->belongsTo(Warehouse::class, 'warehouse_id');
     }
 
+    /**
+     * Warehouses assigned to this user.
+     *
+     * The user_warehouses table contains the assignments.
+     */
     public function warehouses(): BelongsToMany
     {
         return $this->belongsToMany(
@@ -96,9 +107,68 @@ class User extends Authenticatable
         );
     }
 
+    /**
+     * Direct relationship to user_warehouses records.
+     */
     public function userWarehouses(): HasMany
     {
         return $this->hasMany(UserWarehouse::class);
+    }
+
+    /**
+     * Check whether this user has been given access
+     * to every warehouse.
+     *
+     * This value should be controlled by an administrator.
+     */
+    public function canAccessAllWarehouses(): bool
+    {
+        return $this->access_all_warehouses === true;
+    }
+
+    /**
+     * Check whether this user can access a specific warehouse.
+     *
+     * Rules:
+     *
+     * 1. If access_all_warehouses = true,
+     *    the user can access any warehouse.
+     *
+     * 2. Otherwise, the warehouse must be assigned
+     *    to the user through user_warehouses.
+     */
+    public function canAccessWarehouse(string $warehouseId): bool
+    {
+        // Administrator has granted access to all warehouses.
+        if ($this->canAccessAllWarehouses()) {
+            return true;
+        }
+
+        // Otherwise, check the user's assigned warehouses.
+        return $this->warehouses()
+            ->where('warehouses.id', $warehouseId)
+            ->exists();
+    }
+
+    /**
+     * Get the IDs of all warehouses this user can access.
+     *
+     * If access_all_warehouses is true:
+     *     return every warehouse ID.
+     *
+     * Otherwise:
+     *     return only the IDs from user_warehouses.
+     */
+    public function accessibleWarehouseIds()
+    {
+        // User has access to every warehouse.
+        if ($this->canAccessAllWarehouses()) {
+            return Warehouse::query()->pluck('id');
+        }
+
+        // User only has access to assigned warehouses.
+        return $this->warehouses()
+            ->pluck('warehouses.id');
     }
 
     // =====================================================
@@ -110,4 +180,3 @@ class User extends Authenticatable
         return $this->hasOne(UserSetting::class);
     }
 }
-

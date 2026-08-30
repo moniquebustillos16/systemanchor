@@ -18,8 +18,9 @@ import {
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { usePermissions } from "../../hooks/useCurrentUser";
+import { hasAnyPermission } from "../../lib/permissions";
 import { useDashboard } from "../../hooks/useDashboard";
-import { schedulePrefetch } from "../../lib/prefetch";
 import "../css/Main.css";
 
 /* ===================== ICONS ===================== */
@@ -736,54 +737,6 @@ function PipelineChart({
 
 /* ===================== ROLE PERMISSIONS ===================== */
 
-type AuthPayload = {
-  permissions?: string[];
-  data?: { permissions?: string[]; user?: { permissions?: string[] } };
-  user?: {
-    permissions?: string[];
-    role_id?: string;
-    role?: { id?: string; permissions?: { name: string }[] };
-  };
-  role_id?: string;
-};
-
-function extractPermissions(json: unknown): string[] {
-  if (!json || typeof json !== "object") return [];
-  const j = json as AuthPayload;
-  if (Array.isArray(j.permissions)) return j.permissions.map(String);
-  if (Array.isArray(j.data?.permissions)) return j.data!.permissions!.map(String);
-  if (Array.isArray(j.user?.permissions)) return j.user!.permissions!.map(String);
-  const rolePerms = j.user?.role?.permissions;
-  if (Array.isArray(rolePerms)) {
-    return rolePerms
-      .map((p) => (typeof p === "string" ? p : p?.name))
-      .filter(Boolean) as string[];
-  }
-  const du = (j as { data?: { user?: { permissions?: string[] } } }).data?.user;
-  if (Array.isArray(du?.permissions)) return du!.permissions!.map(String);
-  const nested = (j as { data?: { permissions?: unknown } }).data?.permissions;
-  if (Array.isArray(nested)) {
-    return nested
-      .map((p) => (typeof p === "string" ? p : (p as { name?: string })?.name))
-      .filter(Boolean) as string[];
-  }
-  return [];
-}
-
-function normPerm(s: string): string {
-  return String(s)
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_")
-    .replace(/_/g, ".");
-}
-
-function can(perms: string[], ...needed: string[]): boolean {
-  if (!perms || perms.length === 0) return false;
-  const set = new Set(perms.map(normPerm));
-  if (set.has("*") || set.has("admin") || set.has("administrator")) return true;
-  return needed.some((n) => set.has(normPerm(n)));
-}
 
 const PATH_VIEW: Record<string, string[]> = {
   "/dashboard": [
@@ -862,10 +815,10 @@ const PATH_VIEW: Record<string, string[]> = {
   "/reports": ["reports.view", "report.view", "analytics.view"],
 };
 
-function canPath(perms: string[], path: string): boolean {
+function canPath(perms: string[], path: string, isAdmin = false): boolean {
   const needed = PATH_VIEW[path];
   if (!needed) return true;
-  return can(perms, ...needed);
+  return hasAnyPermission(perms, isAdmin, ...needed);
 }
 
 type Warehouse = {
@@ -1128,8 +1081,6 @@ function Dashboard() {
   const [trendRange, setTrendRange] = useState("7m");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [usingUnified, setUsingUnified] = useState(false);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-  const [permsLoaded, setPermsLoaded] = useState(false);
 
   /* ── TanStack Query (Phase 4) ─────────────────────────────── */
   const {
@@ -1196,193 +1147,17 @@ function Dashboard() {
     () => (Array.isArray(boot?.activityFeed) ? boot!.activityFeed : [])
   );
 
-  const fetchUserPermissions = useCallback(async () => {
-    const finish = (list: string[]) => {
-      setUserPermissions(list);
-      setPermsLoaded(true);
-      try {
-        localStorage.setItem("permissions", JSON.stringify(list));
-      } catch {
-        /* quota */
-      }
-    };
+  const { permissions: userPermissions, isLoaded: permsLoaded, isAdmin} = usePermissions();
 
-    const loadRolePerms = async (roleId: string): Promise<string[] | null> => {
-      try {
-        const { data: json } = await api.get(`/roles/${roleId}/permissions`);
-        const perms =
-          json?.data?.permissions ??
-          json?.permissions ??
-          json?.data ??
-          [];
-        if (!Array.isArray(perms)) return [];
-        return perms
-          .map((p: { name?: string } | string) =>
-            typeof p === "string" ? p : p?.name
-          )
-          .filter(Boolean) as string[];
-      } catch {
-        return null;
-      }
-    };
-
-    let roleId: string | null = null;
-    let rolePermsResolved = false;
-
-    try {
-      const rawKeys = ["user", "auth_user", "authUser", "currentUser", "sa-user"];
-      for (const key of rawKeys) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          const u = parsed?.data ?? parsed?.user ?? parsed;
-          roleId = u?.role_id || u?.role?.id || parsed?.role_id || roleId;
-        } catch {
-          /* not JSON */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-    if (!roleId) {
-      roleId =
-        localStorage.getItem("role_id") ||
-        localStorage.getItem("auth_role_id") ||
-        null;
-    }
-
-    try {
-      const g = globalThis as unknown as {
-        __saMeCache?: { entry: { data: unknown; at: number } | null };
-      };
-      const entry = g.__saMeCache?.entry;
-      if (entry && Date.now() - entry.at < 60_000) {
-        const u =
-          (entry.data as AuthPayload)?.user ??
-          (entry.data as AuthPayload)?.data ??
-          entry.data;
-        const rid =
-          (u as { role_id?: string; role?: { id?: string } })?.role_id ||
-          (u as { role?: { id?: string } })?.role?.id;
-        if (rid) roleId = String(rid);
-      }
-    } catch {
-      /* ignore */
-    }
-
-    if (roleId) {
-      const names = await loadRolePerms(roleId);
-      if (names !== null) {
-        rolePermsResolved = true;
-        finish(names);
-        return;
-      }
-    }
-
-    for (const path of ["/me", "/user"]) {
-      try {
-        const { data: json } = await api.get(path);
-        try {
-          const g = globalThis as unknown as {
-            __saMeCache?: { entry: unknown; inflight: unknown };
-          };
-          if (!g.__saMeCache) g.__saMeCache = { entry: null, inflight: null };
-          g.__saMeCache.entry = { data: json, at: Date.now() };
-        } catch {
-          /* ignore */
-        }
-        const u = (json as AuthPayload)?.data ?? (json as AuthPayload)?.user ?? json;
-        const rid =
-          (u as { role_id?: string; role?: { id?: string } })?.role_id ||
-          (u as { role?: { id?: string } })?.role?.id;
-        if (rid) {
-          const names = await loadRolePerms(String(rid));
-          if (names !== null) {
-            rolePermsResolved = true;
-            finish(names);
-            return;
-          }
-        }
-        const list = extractPermissions(json);
-        if (list.length > 0) {
-          finish(list);
-          return;
-        }
-        break;
-      } catch (err: unknown) {
-        const status = (err as { response?: { status?: number } })?.response?.status;
-        if (status === 404) continue;
-      }
-    }
-
-    try {
-      for (const key of ["permissions", "user_permissions", "auth_permissions"]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (
-            Array.isArray(parsed) &&
-            parsed.every((x: unknown) => typeof x === "string") &&
-            parsed.length > 0
-          ) {
-            if (rolePermsResolved && parsed.length === 1 && parsed[0] === "*") continue;
-            finish(parsed as string[]);
-            return;
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    if (!rolePermsResolved) {
-      finish(["dashboard.view"]);
-    } else {
-      finish([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchUserPermissions();
-    const onRefresh = () => {
-      try {
-        for (const key of ["permissions", "user_permissions", "auth_permissions"]) {
-          localStorage.removeItem(key);
-          sessionStorage.removeItem(key);
-        }
-        const g = globalThis as unknown as {
-          __saMeCache?: { entry: unknown; inflight: unknown };
-        };
-        if (g.__saMeCache) {
-          g.__saMeCache.entry = null;
-          g.__saMeCache.inflight = null;
-        }
-      } catch {
-        /* ignore */
-      }
-      useEffect(() => {
-    schedulePrefetch(800);
-  }, []);
-      setPermsLoaded(false);
-      setUserPermissions([]);
-      fetchUserPermissions();
-    };
-    window.addEventListener("sa-permissions-refresh", onRefresh);
-    return () => window.removeEventListener("sa-permissions-refresh", onRefresh);
-  }, [fetchUserPermissions]);
 
   const canViewPath = useCallback(
-    (path: string) => !permsLoaded || canPath(userPermissions, path),
-    [userPermissions, permsLoaded]
+    (path: string) => !permsLoaded || canPath(userPermissions, path, isAdmin),
+    [userPermissions, permsLoaded, isAdmin]
   );
 
   const canAccessDashboard = useMemo(
-    () => !permsLoaded || canPath(userPermissions, "/dashboard"),
-    [userPermissions, permsLoaded]
+    () => !permsLoaded || canPath(userPermissions, "/dashboard", isAdmin),
+    [userPermissions, permsLoaded, isAdmin]
   );
 
   const go = useCallback(
