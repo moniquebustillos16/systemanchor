@@ -21,6 +21,9 @@ class SalesOrderController extends Controller
         $query = SalesOrder::with(['customer:id,name', 'warehouse:id,code,name'])
             ->whereNull('deleted_at');
 
+        // Non–access-all users only see SOs for their assigned warehouses
+        $this->applyWarehouseScope($query, $request);
+
         if ($search = $request->query('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('so_number', 'ilike', "%{$search}%")
@@ -52,37 +55,36 @@ class SalesOrderController extends Controller
     }
 
     /**
-     * One aggregated query + short cache (same pattern as InventoryController::stats).
+     * Scoped stats for non–access-all users; global cache only for full-access users.
      */
-    public function stats()
+    public function stats(Request $request)
     {
-        $payload = Cache::remember('sales_orders:stats', self::STATS_CACHE_TTL, function () {
-            $row = SalesOrder::query()
-                ->whereNull('deleted_at')
-                ->selectRaw("
-                    COUNT(*) as all_count,
-                    COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as pending,
-                    COALESCE(SUM(CASE WHEN status IN ('completed','shipped') THEN 1 ELSE 0 END), 0) as done,
-                    COALESCE(SUM(total), 0) as total_value
-                ")
-                ->first();
+        $user = $request->user();
+        $allowed = $this->allowedWarehouseIds($user);
 
-            return [
-                'all'         => (int) ($row->all_count ?? 0),
-                'pending'     => (int) ($row->pending ?? 0),
-                'done'        => (int) ($row->done ?? 0),
-                'total_value' => (float) ($row->total_value ?? 0),
-            ];
+        if ($allowed === null) {
+            $payload = Cache::remember('sales_orders:stats', self::STATS_CACHE_TTL, function () {
+                return $this->computeStats(null);
+            });
+
+            return response()->json($payload);
+        }
+
+        $cacheKey = 'sales_orders:stats:user:' . $user->id;
+        $payload = Cache::remember($cacheKey, self::STATS_CACHE_TTL, function () use ($allowed) {
+            return $this->computeStats($allowed);
         });
 
         return response()->json($payload);
     }
 
-    public function show(string $id)
+    public function show(Request $request, string $id)
     {
         $so = SalesOrder::with(['customer', 'warehouse'])
             ->whereNull('deleted_at')
             ->findOrFail($id);
+
+        $this->assertCanAccessSalesOrder($request->user(), $so);
 
         return response()->json($so);
     }
@@ -104,6 +106,18 @@ class SalesOrderController extends Controller
             ])],
         ]);
 
+        $warehouseId = $validated['warehouse_id'] ?? null;
+        if ($warehouseId !== null) {
+            $this->assertCanAccessWarehouseId($request->user(), (string) $warehouseId);
+        } else {
+            $allowed = $this->allowedWarehouseIds($request->user());
+            if (is_array($allowed)) {
+                return response()->json([
+                    'message' => 'warehouse_id is required for your account.',
+                ], 422);
+            }
+        }
+
         $soNumber = $validated['so_number'] ?? null;
         if (empty($soNumber)) {
             $soNumber = $this->generateSoNumber();
@@ -123,7 +137,7 @@ class SalesOrderController extends Controller
         ]);
 
         $so->load(['customer:id,name', 'warehouse:id,code,name']);
-        Cache::forget('sales_orders:stats');
+        $this->forgetStatsCache($request->user());
 
         try {
             $this->notifyAll(
@@ -145,6 +159,8 @@ class SalesOrderController extends Controller
     public function update(Request $request, string $id)
     {
         $so = SalesOrder::whereNull('deleted_at')->findOrFail($id);
+        $this->assertCanAccessSalesOrder($request->user(), $so);
+
         $oldStatus = $so->status;
 
         $validated = $request->validate([
@@ -161,6 +177,10 @@ class SalesOrderController extends Controller
             ])],
         ]);
 
+        if (array_key_exists('warehouse_id', $validated) && $validated['warehouse_id'] !== null) {
+            $this->assertCanAccessWarehouseId($request->user(), (string) $validated['warehouse_id']);
+        }
+
         if (array_key_exists('items', $validated)) {
             $validated['items'] = (int) max(1, round((float) $validated['items']));
         }
@@ -170,7 +190,7 @@ class SalesOrderController extends Controller
 
         $so->update($validated);
         $so->load(['customer:id,name', 'warehouse:id,code,name']);
-        Cache::forget('sales_orders:stats');
+        $this->forgetStatsCache($request->user());
 
         if (isset($validated['status']) && $validated['status'] !== $oldStatus) {
             $type = in_array($validated['status'], ['completed', 'shipped'], true)
@@ -195,13 +215,151 @@ class SalesOrderController extends Controller
         ]);
     }
 
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
         $so = SalesOrder::whereNull('deleted_at')->findOrFail($id);
+        $this->assertCanAccessSalesOrder($request->user(), $so);
+
         $so->delete();
-        Cache::forget('sales_orders:stats');
+        $this->forgetStatsCache($request->user());
 
         return response()->json(['message' => 'Sales order deleted']);
+    }
+
+    /* ─────────────────────────────────────────────
+     |  WAREHOUSE SCOPE
+     ───────────────────────────────────────────── */
+
+    /**
+     * null  = access all warehouses
+     * array = only these warehouse UUIDs
+     *
+     * @return list<string>|null
+     */
+    private function allowedWarehouseIds(?User $user): ?array
+    {
+        if (!$user) {
+            return [];
+        }
+
+        if (method_exists($user, 'canAccessAllWarehouses') && $user->canAccessAllWarehouses()) {
+            return null;
+        }
+
+        if (!empty($user->access_all_warehouses)) {
+            return null;
+        }
+
+        $ids = [];
+
+        if (method_exists($user, 'warehouses')) {
+            $ids = $user->warehouses()
+                ->pluck('warehouses.id')
+                ->map(fn ($id) => (string) $id)
+                ->all();
+        }
+
+        if (!empty($user->warehouse_id)) {
+            $ids[] = (string) $user->warehouse_id;
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    private function applyWarehouseScope($query, Request $request): void
+    {
+        $allowed = $this->allowedWarehouseIds($request->user());
+
+        if ($allowed === null) {
+            return;
+        }
+
+        if ($allowed === []) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        if ($request->filled('warehouse_id') && $request->warehouse_id !== 'all') {
+            $requested = (string) $request->warehouse_id;
+            if (!in_array($requested, $allowed, true)) {
+                abort(403, 'You do not have access to this warehouse.');
+            }
+            return;
+        }
+
+        $query->whereIn('warehouse_id', $allowed);
+    }
+
+    private function assertCanAccessSalesOrder(?User $user, SalesOrder $so): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        $wid = $so->warehouse_id !== null ? (string) $so->warehouse_id : null;
+
+        if ($wid === null || !in_array($wid, $allowed, true)) {
+            abort(403, 'You do not have access to this sales order warehouse.');
+        }
+    }
+
+    private function assertCanAccessWarehouseId(?User $user, string $warehouseId): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        if (!in_array($warehouseId, $allowed, true)) {
+            abort(403, 'You do not have access to this warehouse.');
+        }
+    }
+
+    /**
+     * @param  list<string>|null  $allowedWarehouseIds
+     */
+    private function computeStats(?array $allowedWarehouseIds): array
+    {
+        $query = SalesOrder::query()->whereNull('deleted_at');
+
+        if (is_array($allowedWarehouseIds)) {
+            if ($allowedWarehouseIds === []) {
+                return [
+                    'all'         => 0,
+                    'pending'     => 0,
+                    'done'        => 0,
+                    'total_value' => 0.0,
+                ];
+            }
+            $query->whereIn('warehouse_id', $allowedWarehouseIds);
+        }
+
+        $row = $query
+            ->selectRaw("
+                COUNT(*) as all_count,
+                COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as pending,
+                COALESCE(SUM(CASE WHEN status IN ('completed','shipped') THEN 1 ELSE 0 END), 0) as done,
+                COALESCE(SUM(total), 0) as total_value
+            ")
+            ->first();
+
+        return [
+            'all'         => (int) ($row->all_count ?? 0),
+            'pending'     => (int) ($row->pending ?? 0),
+            'done'        => (int) ($row->done ?? 0),
+            'total_value' => (float) ($row->total_value ?? 0),
+        ];
+    }
+
+    private function forgetStatsCache(?User $user): void
+    {
+        Cache::forget('sales_orders:stats');
+        if ($user) {
+            Cache::forget('sales_orders:stats:user:' . $user->id);
+        }
     }
 
     private function generateSoNumber(): string

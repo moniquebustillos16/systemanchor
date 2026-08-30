@@ -599,12 +599,15 @@ function buildGroups(perms: Permission[]): PermGroup[] {
 
 function warehousesFromUsers(
   users: RoleUser[],
-  allWarehouses: Warehouse[]
+  allWarehouses: Warehouse[] | unknown
 ): Warehouse[] {
+  const list: Warehouse[] = Array.isArray(allWarehouses)
+    ? (allWarehouses as Warehouse[])
+    : [];
   if (users.some((u) => u.access_all_warehouses)) {
-    return allWarehouses.length > 0 ? allWarehouses : [];
+    return list.length > 0 ? list : [];
   }
-  const index = new Map(allWarehouses.map((w) => [w.id, w]));
+  const index = new Map(list.map((w) => [w.id, w]));
   const seen = new Map<string, Warehouse>();
   for (const u of users) {
     if (Array.isArray(u.warehouses)) {
@@ -788,7 +791,9 @@ function Roles() {
 
   const roles = rolesQ.rows as Role[];
   const permissions = permsQ.rows as Permission[];
-  const allWarehouses = warehousesQ.rows as Warehouse[];
+  const allWarehouses: Warehouse[] = Array.isArray(warehousesQ.rows)
+    ? (warehousesQ.rows as Warehouse[])
+    : [];
 
   const loading = rolesQ.isLoading && roles.length === 0;
   const error =

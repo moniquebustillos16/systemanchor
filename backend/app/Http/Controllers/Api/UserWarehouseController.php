@@ -154,68 +154,103 @@ class UserWarehouseController extends Controller
     {
         $auth = request()->user();
 
-    $isSelf = $auth && (string) $auth->id === (string) $userId;
-    $isAdmin = $auth?->role && strcasecmp((string) $auth->role->name, 'Admin') === 0;
-    $canManageUsers = $auth && method_exists($auth, 'hasPermission')
-        && $auth->hasPermission('users.view');
+        $isSelf = $auth && (string) $auth->id === (string) $userId;
 
-    if (!$isSelf && !$isAdmin && !$canManageUsers) {
-        return response()->json([
-            'message' => 'You do not have permission to perform this action.',
-        ], 403);
-    }
-        $cacheKey = "user:{$userId}:warehouses";
+        $isAdmin = false;
+        try {
+            $roleName = (string) (optional($auth?->role)->name ?? '');
+            $isAdmin = $roleName !== '' && strcasecmp($roleName, 'Admin') === 0;
+            if (!$isAdmin && $auth && !empty($auth->access_all_warehouses)) {
+                $isAdmin = true;
+            }
+        } catch (\Throwable $e) {
+            $isAdmin = false;
+        }
 
-        $payload = Cache::remember($cacheKey, self::CACHE_TTL, function () use ($userId) {
+        $canManageUsers = false;
+        try {
+            if ($auth && method_exists($auth, 'hasPermission')) {
+                $canManageUsers = (bool) $auth->hasPermission('users.view');
+            }
+        } catch (\Throwable $e) {
+            $canManageUsers = false;
+        }
+
+        if (!$isSelf && !$isAdmin && !$canManageUsers) {
+            return response()->json([
+                'message' => 'You do not have permission to perform this action.',
+            ], 403);
+        }
+
+        try {
             $user = User::query()
                 ->with(['role:id,name'])
-                ->whereNull('deleted_at')
+                ->when(
+                    Schema::hasColumn('users', 'deleted_at'),
+                    fn ($q) => $q->whereNull('deleted_at')
+                )
                 ->findOrFail($userId);
 
             $accessAll = (bool) ($user->access_all_warehouses ?? false);
 
-            // Admin role → treat as full warehouse access (same as access_all_warehouses)
-            $roleName = strtolower(preg_replace('/[\s_-]+/', '', (string) ($user->role->name ?? $user->role_name ?? '')));
+            $roleName = strtolower(preg_replace('/[\s_-]+/', '', (string) (optional($user->role)->name ?? '')));
             if (in_array($roleName, ['admin', 'administrator', 'superadmin', 'superadministrator', 'systemadmin', 'root', 'owner'], true)) {
                 $accessAll = true;
             }
 
             if ($accessAll) {
-                $q = Warehouse::query()->orderBy('name');
+                $q = Warehouse::query()->orderBy('code');
                 if (Schema::hasColumn('warehouses', 'deleted_at')) {
                     $q->whereNull('deleted_at');
                 }
                 $warehouses = $q->get(['id', 'code', 'name', 'location', 'status']);
             } else {
-                // Non-admin → only assigned warehouses
+                // Keep select simple — avoid ambiguous pivot/select issues
                 $warehouses = $user->warehouses()
-                    ->select([
-                        'warehouses.id',
-                        'warehouses.code',
-                        'warehouses.name',
-                        'warehouses.location',
-                        'warehouses.status',
-                    ])
-                    ->orderBy('warehouses.name')
-                    ->get();
+                    ->orderBy('warehouses.code')
+                    ->get(['warehouses.id', 'warehouses.code', 'warehouses.name', 'warehouses.location', 'warehouses.status']);
 
-                // Also include primary warehouse if set
                 if (!empty($user->warehouse_id)) {
-                    $primary = Warehouse::find($user->warehouse_id);
+                    $primary = Warehouse::query()->find($user->warehouse_id);
                     if ($primary && !$warehouses->contains('id', $primary->id)) {
                         $warehouses = $warehouses->prepend($primary);
                     }
                 }
             }
 
-            return [
-                'user_id'               => $user->id,
-                'access_all_warehouses' => $accessAll,
-                'warehouses'            => $warehouses->values(),
-            ];
-        });
+            // Always return plain arrays (safe to cache / JSON)
+            $list = $warehouses->map(function ($w) {
+                return [
+                    'id'       => (string) $w->id,
+                    'code'     => (string) ($w->code ?? ''),
+                    'name'     => $w->name !== null ? (string) $w->name : null,
+                    'location' => $w->location ?? null,
+                    'status'   => $w->status ?? null,
+                ];
+            })->values()->all();
 
-        return response()->json(['data' => $payload]);
+            $payload = [
+                'user_id'               => (string) $user->id,
+                'access_all_warehouses' => $accessAll,
+                'warehouses'            => $list,
+            ];
+
+            try {
+                Cache::put("user:{$userId}:warehouses", $payload, self::CACHE_TTL);
+            } catch (\Throwable $e) {
+                /* ignore cache failures */
+            }
+
+            return response()->json(['data' => $payload]);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json(['message' => 'User not found'], 404);
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json([
+                'message' => 'Failed to load user warehouses',
+                'error'   => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
     }
 
     public function destroy(string $id)

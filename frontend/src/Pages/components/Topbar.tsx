@@ -12,6 +12,7 @@ import { useNavigate } from "react-router-dom";
 import api from "../../api/axios";
 import { getAuthToken, clearAuthToken } from "../../lib/auth";
 import { useProfile } from "../../hooks/useProfile";
+import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Topbar.css";
 
 /* ===================== ICONS ===================== */
@@ -443,6 +444,16 @@ function Topbar({
   syncProfile = true,
 }: TopbarProps = {}) {
   const navigate = useNavigate();
+  const { isAdmin, can } = usePermissions();
+  const canCompanySettings =
+    isAdmin ||
+    can(
+      "settings.view",
+      "setting.view",
+      "config.view",
+      "company.view",
+      "system.view"
+    );
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchHit[]>([]);
   const [showResults, setShowResults] = useState(false);
@@ -1197,16 +1208,18 @@ function Topbar({
             >
               <IconUser /> Profile Settings
             </div>
-            <div
-              className="dropdown-item"
-              onClick={() => {
-                setUserOpen(false);
-                navigate("/company-settings");
-              }}
-              role="menuitem"
-            >
-              <IconSettings /> Company Settings
-            </div>
+            {canCompanySettings && (
+              <div
+                className="dropdown-item"
+                onClick={() => {
+                  setUserOpen(false);
+                  navigate("/company-settings");
+                }}
+                role="menuitem"
+              >
+                <IconSettings /> Company Settings
+              </div>
+            )}
             <div className="dropdown-divider" />
             <div className="dropdown-item dropdown-item--danger" onClick={handleLogout} role="menuitem">
               <IconLogout /> Sign Out

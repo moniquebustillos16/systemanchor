@@ -21,6 +21,9 @@ class PurchaseOrderController extends Controller
         $query = PurchaseOrder::with(['supplier:id,name', 'warehouse:id,code,name'])
             ->whereNull('deleted_at');
 
+        // Non–access-all users only see POs for assigned warehouses
+        $this->applyWarehouseScope($query, $request);
+
         if ($search = $request->query('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('po_number', 'ilike', "%{$search}%")
@@ -51,41 +54,38 @@ class PurchaseOrderController extends Controller
         }
 
         $perPage = min((int) $request->query('per_page', 15), 100);
+
         return response()->json($query->paginate($perPage));
     }
 
-    /**
-     * One aggregated query + short cache (same pattern as InventoryController::stats).
-     */
-    public function stats()
+    public function stats(Request $request)
     {
-        $payload = Cache::remember('purchase_orders:stats', self::STATS_CACHE_TTL, function () {
-            $row = PurchaseOrder::query()
-                ->whereNull('deleted_at')
-                ->selectRaw("
-                    COUNT(*) as all_count,
-                    COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as pending,
-                    COALESCE(SUM(CASE WHEN status IN ('completed','received','shipped') THEN 1 ELSE 0 END), 0) as done,
-                    COALESCE(SUM(total), 0) as total_value
-                ")
-                ->first();
+        $user = $request->user();
+        $allowed = $this->allowedWarehouseIds($user);
 
-            return [
-                'all'         => (int) ($row->all_count ?? 0),
-                'pending'     => (int) ($row->pending ?? 0),
-                'done'        => (int) ($row->done ?? 0),
-                'total_value' => (float) ($row->total_value ?? 0),
-            ];
+        if ($allowed === null) {
+            $payload = Cache::remember('purchase_orders:stats', self::STATS_CACHE_TTL, function () {
+                return $this->computeStats(null);
+            });
+
+            return response()->json($payload);
+        }
+
+        $cacheKey = 'purchase_orders:stats:user:' . $user->id;
+        $payload = Cache::remember($cacheKey, self::STATS_CACHE_TTL, function () use ($allowed) {
+            return $this->computeStats($allowed);
         });
 
         return response()->json($payload);
     }
 
-    public function show(string $id)
+    public function show(Request $request, string $id)
     {
         $po = PurchaseOrder::with(['supplier', 'warehouse'])
             ->whereNull('deleted_at')
             ->findOrFail($id);
+
+        $this->assertCanAccessPurchaseOrder($request->user(), $po);
 
         return response()->json($po);
     }
@@ -108,7 +108,18 @@ class PurchaseOrderController extends Controller
             ])],
         ]);
 
-        // Always generate a unique PO number when the client doesn't send one
+        $warehouseId = $validated['warehouse_id'] ?? null;
+        if ($warehouseId !== null) {
+            $this->assertCanAccessWarehouseId($request->user(), (string) $warehouseId);
+        } else {
+            $allowed = $this->allowedWarehouseIds($request->user());
+            if (is_array($allowed)) {
+                return response()->json([
+                    'message' => 'warehouse_id is required for your account.',
+                ], 422);
+            }
+        }
+
         $poNumber = $validated['po_number'] ?? null;
         if (empty($poNumber)) {
             $poNumber = $this->generatePoNumber();
@@ -129,9 +140,8 @@ class PurchaseOrderController extends Controller
         ]);
 
         $po->load(['supplier:id,name', 'warehouse:id,code,name']);
-        Cache::forget('purchase_orders:stats');
+        $this->forgetStatsCache($request->user());
 
-        // Never let notification failure turn a successful create into a 500
         try {
             $this->notifyAll(
                 'info',
@@ -152,6 +162,8 @@ class PurchaseOrderController extends Controller
     public function update(Request $request, string $id)
     {
         $po = PurchaseOrder::whereNull('deleted_at')->findOrFail($id);
+        $this->assertCanAccessPurchaseOrder($request->user(), $po);
+
         $oldStatus = $po->status;
 
         $validated = $request->validate([
@@ -168,6 +180,10 @@ class PurchaseOrderController extends Controller
             ])],
         ]);
 
+        if (array_key_exists('warehouse_id', $validated) && $validated['warehouse_id'] !== null) {
+            $this->assertCanAccessWarehouseId($request->user(), (string) $validated['warehouse_id']);
+        }
+
         if (array_key_exists('items', $validated)) {
             $validated['items'] = (int) max(1, round((float) $validated['items']));
         }
@@ -177,7 +193,7 @@ class PurchaseOrderController extends Controller
 
         $po->update($validated);
         $po->load(['supplier:id,name', 'warehouse:id,code,name']);
-        Cache::forget('purchase_orders:stats');
+        $this->forgetStatsCache($request->user());
 
         if (isset($validated['status']) && $validated['status'] !== $oldStatus) {
             $type = in_array($validated['status'], ['completed', 'received'], true)
@@ -202,16 +218,150 @@ class PurchaseOrderController extends Controller
         ]);
     }
 
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
         $po = PurchaseOrder::whereNull('deleted_at')->findOrFail($id);
+        $this->assertCanAccessPurchaseOrder($request->user(), $po);
+
         $po->delete();
-        Cache::forget('purchase_orders:stats');
+        $this->forgetStatsCache($request->user());
 
         return response()->json(['message' => 'Purchase order deleted']);
     }
 
-    /** Generate a unique PO-YYYYMMDD-XXXX style number */
+    /* ─────────────────────────────────────────────
+     |  WAREHOUSE SCOPE
+     ───────────────────────────────────────────── */
+
+    /**
+     * @return list<string>|null  null = all warehouses
+     */
+    private function allowedWarehouseIds(?User $user): ?array
+    {
+        if (!$user) {
+            return [];
+        }
+
+        if (method_exists($user, 'canAccessAllWarehouses') && $user->canAccessAllWarehouses()) {
+            return null;
+        }
+
+        if (!empty($user->access_all_warehouses)) {
+            return null;
+        }
+
+        $ids = [];
+
+        if (method_exists($user, 'warehouses')) {
+            $ids = $user->warehouses()
+                ->pluck('warehouses.id')
+                ->map(fn ($id) => (string) $id)
+                ->all();
+        }
+
+        if (!empty($user->warehouse_id)) {
+            $ids[] = (string) $user->warehouse_id;
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    private function applyWarehouseScope($query, Request $request): void
+    {
+        $allowed = $this->allowedWarehouseIds($request->user());
+
+        if ($allowed === null) {
+            return;
+        }
+
+        if ($allowed === []) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        if ($request->filled('warehouse_id') && $request->warehouse_id !== 'all') {
+            $requested = (string) $request->warehouse_id;
+            if (!in_array($requested, $allowed, true)) {
+                abort(403, 'You do not have access to this warehouse.');
+            }
+            return;
+        }
+
+        $query->whereIn('warehouse_id', $allowed);
+    }
+
+    private function assertCanAccessPurchaseOrder(?User $user, PurchaseOrder $po): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        $wid = $po->warehouse_id !== null ? (string) $po->warehouse_id : null;
+
+        if ($wid === null || !in_array($wid, $allowed, true)) {
+            abort(403, 'You do not have access to this purchase order warehouse.');
+        }
+    }
+
+    private function assertCanAccessWarehouseId(?User $user, string $warehouseId): void
+    {
+        $allowed = $this->allowedWarehouseIds($user);
+
+        if ($allowed === null) {
+            return;
+        }
+
+        if (!in_array($warehouseId, $allowed, true)) {
+            abort(403, 'You do not have access to this warehouse.');
+        }
+    }
+
+    /**
+     * @param  list<string>|null  $allowedWarehouseIds
+     */
+    private function computeStats(?array $allowedWarehouseIds): array
+    {
+        $query = PurchaseOrder::query()->whereNull('deleted_at');
+
+        if (is_array($allowedWarehouseIds)) {
+            if ($allowedWarehouseIds === []) {
+                return [
+                    'all'         => 0,
+                    'pending'     => 0,
+                    'done'        => 0,
+                    'total_value' => 0.0,
+                ];
+            }
+            $query->whereIn('warehouse_id', $allowedWarehouseIds);
+        }
+
+        $row = $query
+            ->selectRaw("
+                COUNT(*) as all_count,
+                COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END), 0) as pending,
+                COALESCE(SUM(CASE WHEN status IN ('completed','received','shipped') THEN 1 ELSE 0 END), 0) as done,
+                COALESCE(SUM(total), 0) as total_value
+            ")
+            ->first();
+
+        return [
+            'all'         => (int) ($row->all_count ?? 0),
+            'pending'     => (int) ($row->pending ?? 0),
+            'done'        => (int) ($row->done ?? 0),
+            'total_value' => (float) ($row->total_value ?? 0),
+        ];
+    }
+
+    private function forgetStatsCache(?User $user): void
+    {
+        Cache::forget('purchase_orders:stats');
+        if ($user) {
+            Cache::forget('purchase_orders:stats:user:' . $user->id);
+        }
+    }
+
     private function generatePoNumber(): string
     {
         $prefix = 'PO-' . now()->format('Ymd') . '-';
@@ -221,7 +371,6 @@ class PurchaseOrderController extends Controller
                 return $candidate;
             }
         }
-        // ultra-rare fallback
         return $prefix . strtoupper(Str::random(8));
     }
 

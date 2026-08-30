@@ -234,20 +234,25 @@ function Returns() {
   const [closingId, setClosingId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
+  // Sales Orders pattern: warehouse dropdown from useWarehouses (API scopes non-admins)
   const { rows: whRows, refetch: refetchWarehouses } = useWarehouses({
     enabled: true,
+    perPage: 200,
   });
 
   const warehouses: Warehouse[] = useMemo(
     () =>
-      (whRows ?? []).map((w) => {
-        const row = asRecord(w);
-        return {
-          id: String(row.id),
-          code: String(row.code ?? row.name ?? row.id),
-          name: row.name != null ? String(row.name) : undefined,
-        };
-      }),
+      (whRows ?? [])
+        .map((w) => {
+          const row = asRecord(w);
+          return {
+            id: String(row.id ?? ""),
+            code: String(row.code ?? row.name ?? row.id ?? ""),
+            name: row.name != null ? String(row.name) : undefined,
+          };
+        })
+        .filter((w) => w.id)
+        .sort((a, b) => (a.code || "").localeCompare(b.code || "")),
     [whRows]
   );
 
@@ -1106,13 +1111,20 @@ function Returns() {
                       setForm((f) => ({ ...f, warehouse_id: e.target.value }))
                     }
                     disabled={saving}
+                    required={warehouses.length > 0}
                   >
-                    <option value="">— None —</option>
-                    {warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name ? `${w.code} — ${w.name}` : w.code}
-                      </option>
-                    ))}
+                    {warehouses.length === 0 ? (
+                      <option value="">— No warehouses —</option>
+                    ) : (
+                      <>
+                        <option value="">— Select warehouse —</option>
+                        {warehouses.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name ? `${w.code} — ${w.name}` : w.code}
+                          </option>
+                        ))}
+                      </>
+                    )}
                   </select>
                 </div>
 

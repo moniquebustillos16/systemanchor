@@ -12,21 +12,93 @@ use Illuminate\Validation\Rule;
 
 class ReturnController extends Controller
 {
+    /**
+     * null  = access all warehouses
+     * array = restricted to these warehouse ids (may be empty)
+     */
+    private function allowedWarehouseIds(Request $request): ?array
+    {
+        /** @var \App\Models\User|null $user */
+        $user = $request->user();
+        if (!$user) {
+            return [];
+        }
+
+        // Prefer explicit all-access flag (do NOT use accessibleWarehouseIds() for admins —
+        // that method returns every warehouse id as a Collection, not null).
+        if (method_exists($user, 'canAccessAllWarehouses') && $user->canAccessAllWarehouses()) {
+            return null;
+        }
+
+        // Assigned warehouses only
+        try {
+            $ids = $user->warehouses()->pluck('warehouses.id');
+        } catch (\Throwable $e) {
+            $ids = collect();
+        }
+
+        // Normalize Collection / array → string[]
+        if ($ids instanceof \Illuminate\Support\Collection) {
+            $list = $ids->map(fn ($id) => (string) $id)->filter()->values()->all();
+        } elseif (is_array($ids)) {
+            $list = array_values(array_unique(array_map('strval', $ids)));
+        } else {
+            $list = [];
+        }
+
+        // Include primary warehouse_id if set
+        if (!empty($user->warehouse_id)) {
+            $list[] = (string) $user->warehouse_id;
+            $list = array_values(array_unique($list));
+        }
+
+        return $list;
+    }
+
+
+    private function assertWarehouseAllowed(Request $request, ?string $warehouseId, string $action = 'access'): void
+    {
+        $allowed = $this->allowedWarehouseIds($request);
+        if ($allowed === null) {
+            return;
+        }
+
+        if ($warehouseId === null || $warehouseId === '') {
+            abort(403, "A warehouse is required to {$action} this return.");
+        }
+
+        if (!in_array((string) $warehouseId, $allowed, true)) {
+            abort(403, 'You do not have access to this warehouse.');
+        }
+    }
+
+    private function applyWarehouseScope($query, Request $request)
+    {
+        $allowed = $this->allowedWarehouseIds($request);
+        if ($allowed === null) {
+            return $query;
+        }
+
+        if ($allowed === []) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->whereIn('warehouse_id', $allowed);
+    }
+
     public function index(Request $request)
     {
         $query = ReturnModel::with(['salesOrder.customer', 'warehouse'])
             ->orderByDesc('created_at');
 
+        $query = $this->applyWarehouseScope($query, $request);
+
         if ($search = $request->query('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('return_number', 'ilike', "%{$search}%")
                   ->orWhere('reason', 'ilike', "%{$search}%")
-                  ->orWhere('disposition', 'ilike', "%{$search}%")
                   ->orWhereHas('salesOrder', function ($so) use ($search) {
                       $so->where('so_number', 'ilike', "%{$search}%");
-                  })
-                  ->orWhereHas('salesOrder.customer', function ($c) use ($search) {
-                      $c->where('name', 'ilike', "%{$search}%");
                   });
             });
         }
@@ -37,23 +109,36 @@ class ReturnController extends Controller
             }
         }
 
+        if ($request->filled('warehouse_id') && $request->warehouse_id !== 'all') {
+            $wid = (string) $request->warehouse_id;
+            $allowed = $this->allowedWarehouseIds($request);
+            if (is_array($allowed) && !in_array($wid, $allowed, true)) {
+                abort(403, 'Warehouse not assigned to this user.');
+            }
+            $query->where('warehouse_id', $wid);
+        }
+
         return response()->json($query->paginate(20));
     }
 
-    public function stats()
+    public function stats(Request $request)
     {
+        $base = $this->applyWarehouseScope(ReturnModel::query(), $request);
+
         return response()->json([
-            'all'    => ReturnModel::count(),
-            'open'   => ReturnModel::whereIn('status', ['pending', 'processing'])->count(),
-            'closed' => ReturnModel::where('status', 'completed')->count(),
-            'items'  => (int) ReturnModel::sum('items'),
+            'all'    => (clone $base)->count(),
+            'open'   => (clone $base)->whereIn('status', ['pending', 'processing'])->count(),
+            'closed' => (clone $base)->where('status', 'completed')->count(),
+            'items'  => (int) (clone $base)->sum('items'),
         ]);
     }
 
-    public function show(string $id)
+    public function show(Request $request, string $id)
     {
         $return = ReturnModel::with(['salesOrder.customer', 'warehouse'])
             ->findOrFail($id);
+
+        $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'view');
 
         return response()->json($return);
     }
@@ -69,6 +154,14 @@ class ReturnController extends Controller
             'date'           => ['required', 'date'],
             'status'         => ['nullable', Rule::in(['pending', 'processing', 'completed'])],
         ]);
+
+        $allowed = $this->allowedWarehouseIds($request);
+        if (is_array($allowed)) {
+            if (empty($data['warehouse_id'])) {
+                abort(403, 'A warehouse is required to create a return.');
+            }
+            $this->assertWarehouseAllowed($request, (string) $data['warehouse_id'], 'create');
+        }
 
         $last = ReturnModel::withTrashed()->orderByDesc('created_at')->first();
         $seq  = $last ? ((int) Str::after($last->return_number, 'RT-')) + 1 : 100;
@@ -91,6 +184,8 @@ class ReturnController extends Controller
     public function update(Request $request, string $id)
     {
         $return = ReturnModel::findOrFail($id);
+        $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'update');
+
         $oldStatus = $return->status;
 
         $data = $request->validate([
@@ -102,6 +197,10 @@ class ReturnController extends Controller
             'date'           => ['sometimes', 'date'],
             'status'         => ['sometimes', Rule::in(['pending', 'processing', 'completed'])],
         ]);
+
+        if (array_key_exists('warehouse_id', $data) && $data['warehouse_id']) {
+            $this->assertWarehouseAllowed($request, (string) $data['warehouse_id'], 'update');
+        }
 
         $return->update($data);
         $return = $return->fresh()->load(['salesOrder.customer', 'warehouse']);
@@ -119,9 +218,10 @@ class ReturnController extends Controller
         return response()->json($return);
     }
 
-    public function complete(string $id)
+    public function complete(Request $request, string $id)
     {
         $return = ReturnModel::findOrFail($id);
+        $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'update');
 
         if ($return->status === 'completed') {
             return response()->json(['message' => 'RMA already closed'], 422);
@@ -140,9 +240,10 @@ class ReturnController extends Controller
         return response()->json($return);
     }
 
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
         $return = ReturnModel::findOrFail($id);
+        $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'delete');
         $return->delete();
 
         return response()->json(null, 204);
