@@ -17,12 +17,9 @@ import {
 } from "recharts";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
-import api from "../../api/axios";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import { hasAnyPermission } from "../../lib/permissions";
 import { useDashboard } from "../../hooks/useDashboard";
-import { useQuery } from "@tanstack/react-query";
-import { queryKeys } from "../../lib/queryClient";
 
 import "../css/Main.css";
 
@@ -977,108 +974,6 @@ function normMoveType(t: unknown): string {
   return String(t ?? "").trim().toUpperCase();
 }
 
-function buildSeriesFromMovements(
-  moves: Record<string, unknown>[],
-  priceByProduct: Map<string, number>,
-  range: string,
-  invValueFallback: number
-): {
-  labels: string[];
-  trend: number[];
-  stockIn: number[];
-  stockOut: number[];
-} {
-  const now = new Date();
-  const monthsBack = range === "3m" ? 3 : range === "1y" ? 12 : 7;
-
-  const keys: string[] = [];
-  const labels: string[] = [];
-  for (let i = monthsBack - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    keys.push(key);
-    labels.push(
-      ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]
-    );
-  }
-
-  const netByMonth = new Map<string, number>();
-  const inByMonth = new Map<string, number>();
-  const outByMonth = new Map<string, number>();
-  keys.forEach((k) => {
-    netByMonth.set(k, 0);
-    inByMonth.set(k, 0);
-    outByMonth.set(k, 0);
-  });
-
-  for (const m of moves) {
-    const rawDate = String(m.movement_date ?? m.date ?? "");
-    if (!rawDate) continue;
-    const dt = new Date(rawDate);
-    if (Number.isNaN(dt.getTime())) continue;
-    const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
-    if (!netByMonth.has(key)) continue;
-
-    const type = normMoveType(m.type);
-    const qty = Number(m.qty ?? 0);
-    const product = m.product as { id?: string; price?: number } | undefined;
-    const pid = String(m.product_id ?? product?.id ?? "");
-    const price =
-      Number(product?.price) || (pid ? priceByProduct.get(pid) : undefined) || 0;
-    const value = qty * (price || 0);
-
-    if (type === "IN") {
-      inByMonth.set(key, (inByMonth.get(key) || 0) + 1);
-      netByMonth.set(key, (netByMonth.get(key) || 0) + (price ? value : Math.abs(qty)));
-    } else if (type === "OUT") {
-      outByMonth.set(key, (outByMonth.get(key) || 0) + 1);
-      netByMonth.set(key, (netByMonth.get(key) || 0) - (price ? value : Math.abs(qty)));
-    } else if (type === "ADJUSTMENT") {
-      netByMonth.set(key, (netByMonth.get(key) || 0) + (price ? qty * price : qty));
-    }
-  }
-
-  const nets = keys.map((k) => netByMonth.get(k) || 0);
-  const trend: number[] = new Array(keys.length).fill(0);
-  const totalNet = nets.reduce((a, b) => a + b, 0);
-  let running = invValueFallback > 0 ? invValueFallback - totalNet : 0;
-  for (let i = 0; i < keys.length; i++) {
-    running += nets[i];
-    trend[i] = Math.max(0, Math.round(running));
-  }
-
-  const hasMoves = moves.some((m) => {
-    const rawDate = String(m.movement_date ?? m.date ?? "");
-    if (!rawDate) return false;
-    const dt = new Date(rawDate);
-    if (Number.isNaN(dt.getTime())) return false;
-    const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
-    return netByMonth.has(key);
-  });
-
-  if (!hasMoves && invValueFallback > 0) {
-    const factors =
-      range === "3m"
-        ? [0.88, 0.94, 1]
-        : range === "1y"
-          ? [0.7, 0.75, 0.78, 0.85, 0.9, 0.88, 0.95, 0.92, 0.96, 0.98, 0.97, 1]
-          : [0.75, 0.82, 0.78, 0.9, 0.95, 0.92, 1];
-    return {
-      labels: labels.slice(-factors.length),
-      trend: factors.map((f) => Math.round(invValueFallback * f)),
-      stockIn: factors.map((_, i) => 5 + (i % 3)),
-      stockOut: factors.map((_, i) => 4 + (i % 2)),
-    };
-  }
-
-  return {
-    labels,
-    trend,
-    stockIn: keys.map((k) => inByMonth.get(k) || 0),
-    stockOut: keys.map((k) => outByMonth.get(k) || 0),
-  };
-}
-
 function Dashboard() {
   const navigate = useNavigate();
   const [trendRange, setTrendRange] = useState("7m");
@@ -1170,85 +1065,6 @@ function Dashboard() {
     [canViewPath, navigate]
   );
 
-  /* Stock-movements enrich: TanStack Query (only when unified dashboard lacks series) */
-  const needEnrich =
-    !!dash && (!dash.serverTrend?.length || !dash.usingUnified);
-
-  const enrichQuery = useQuery({
-    queryKey: [...queryKeys.stockMovements.all, "dashboard-enrich", trendRange] as const,
-    queryFn: async () => {
-      const movRes = await api.get("/stock-movements", { params: { per_page: 60 } }).then((r) => r.data);
-      return (Array.isArray(movRes) ? movRes : movRes?.data ?? []) as Record<string, unknown>[];
-    },
-    enabled: needEnrich,
-    staleTime: 60_000,
-    placeholderData: (prev) => prev,
-  });
-
-  useEffect(() => {
-    if (!needEnrich || !enrichQuery.data) return;
-    const moves = enrichQuery.data;
-    const priceByProduct = new Map<string, number>();
-    const series = buildSeriesFromMovements(moves, priceByProduct, trendRange, dash?.invValue ?? 0);
-    setServerTrend(series.trend);
-    setServerTrendLabels(series.labels);
-    setServerStockIn(series.stockIn);
-    setServerStockOut(series.stockOut);
-    if (moves.length) {
-      const mapped = moves.slice(0, 8).map((m) => ({
-        id: String(m.id ?? ""),
-        type: normMoveType(m.type),
-        qty: Number(m.qty ?? 0),
-        product: String(
-          (m.product as { name?: string; sku?: string })?.name ??
-            (m.product as { sku?: string })?.sku ??
-            "—"
-        ),
-        sku: (m.product as { sku?: string })?.sku,
-        from: String((m.from_warehouse as { code?: string })?.code ?? m.from ?? "—"),
-        to: String((m.to_warehouse as { code?: string })?.code ?? m.to ?? "—"),
-        reference: m.reference ? String(m.reference) : undefined,
-        date: String(m.movement_date ?? m.date ?? "").slice(0, 10),
-        status: String(m.status ?? "posted"),
-      }));
-      setRecentMoves(mapped);
-
-      let inCnt = 0;
-      let outCnt = 0;
-      let todayCnt = 0;
-      const today = new Date().toISOString().slice(0, 10);
-      for (const m of moves) {
-        const t = normMoveType(m.type);
-        if (t === "IN") inCnt++;
-        else if (t === "OUT") outCnt++;
-        const d = String(m.movement_date ?? m.date ?? "").slice(0, 10);
-        if (d === today) todayCnt++;
-      }
-      setMoveStats({
-        today: todayCnt,
-        this_week: moves.length,
-        in: inCnt,
-        out: outCnt,
-      });
-
-      setActivityFeed(
-        mapped.slice(0, 6).map((m) => ({
-          kind: "move",
-          color:
-            m.type === "IN"
-              ? "#5A9A6E"
-              : m.type === "OUT"
-                ? "#B85C4A"
-                : m.type === "TRANSFER"
-                  ? "#9A6B45"
-                  : "#C49A5A",
-          text: `${m.type} · qty ${m.qty}${m.reference ? ` · ${m.reference}` : ""}`,
-          time: m.date || "recently",
-          path: "/stock-movements",
-        }))
-      );
-    }
-  }, [needEnrich, enrichQuery.data, trendRange, dash?.invValue]);
 
   /* Phase 4: TanStack Query → local UI state */
   useEffect(() => {
@@ -1310,12 +1126,76 @@ function Dashboard() {
     setReceiptStats((dash.receiptStats ?? {}) as OpsStats);
     setReturnStats((dash.returnStats ?? {}) as OpsStats);
 
+    // recent movements from unified /dashboard only (no secondary stock-movements fetch)
+    const rawMoves = Array.isArray(dash.recentMoves) ? dash.recentMoves : [];
+    if (rawMoves.length) {
+      setRecentMoves(
+        rawMoves.slice(0, 8).map((m) => {
+          const row = m as Record<string, unknown>;
+          // DashboardController::recentMovements returns product/from/to as strings
+          const productField = row.product;
+          const productName =
+            typeof productField === "string"
+              ? productField
+              : String(
+                  (productField as { name?: string; sku?: string } | undefined)?.name ??
+                    (productField as { sku?: string } | undefined)?.sku ??
+                    row.product_name ??
+                    "—"
+                );
+          const sku =
+            typeof productField === "object" && productField && "sku" in productField
+              ? String((productField as { sku?: string }).sku ?? "")
+              : row.sku != null
+                ? String(row.sku)
+                : undefined;
+          return {
+            id: String(row.id ?? ""),
+            type: normMoveType(row.type),
+            qty: Number(row.qty ?? 0),
+            product: productName,
+            sku: sku || undefined,
+            from: String(
+              (row.from_warehouse as { code?: string } | undefined)?.code ??
+                row.from ??
+                "—"
+            ),
+            to: String(
+              (row.to_warehouse as { code?: string } | undefined)?.code ??
+                row.to ??
+                "—"
+            ),
+            reference: row.reference != null ? String(row.reference) : undefined,
+            date: String(row.movement_date ?? row.date ?? "").slice(0, 10),
+            status: String(row.status ?? "posted"),
+          };
+        })
+      );
+    }
+
     if (dash.serverTrend?.length) setServerTrend(dash.serverTrend);
     if (dash.serverTrendLabels?.length) setServerTrendLabels(dash.serverTrendLabels);
     if (dash.serverStockIn?.length) setServerStockIn(dash.serverStockIn);
     if (dash.serverStockOut?.length) setServerStockOut(dash.serverStockOut);
 
     setUsingUnified(!!dash.usingUnified);
+
+    const rawFeed = Array.isArray(dash.activityFeed) ? dash.activityFeed : [];
+    if (rawFeed.length) {
+      setActivityFeed(
+        rawFeed.slice(0, 12).map((a) => {
+          const row = a as Record<string, unknown>;
+          return {
+            kind: String(row.kind ?? "info"),
+            color: String(row.color ?? "#9A6B45"),
+            text: String(row.text ?? row.title ?? row.msg ?? "Activity"),
+            time: String(row.time ?? row.at ?? row.created_at ?? ""),
+            path: String(row.path ?? "/dashboard"),
+          } satisfies ActivityItem;
+        })
+      );
+    }
+
     setLastUpdated(dataUpdatedAt ? new Date(dataUpdatedAt) : new Date());
     setLoading(false);
 
@@ -2163,7 +2043,7 @@ function Dashboard() {
               <div className="card-header">
                 <span className="card-title">Live activity</span>
                 <span className="dash-chart-meta">
-                  {usingUnified ? "Unified API" : "Legacy"}
+                  "Live"
                 </span>
               </div>
               <div

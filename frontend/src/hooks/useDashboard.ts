@@ -2,8 +2,6 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { queryKeys } from "../lib/queryClient";
 import { getDashboard, type DashboardRange } from "../api/dashboard";
-import api from "../api/axios";
-import { extractArray } from "../api/types";
 
 export type DashWarehouse = {
   id: string;
@@ -92,54 +90,46 @@ export function mapUnifiedDashboard(payload: Record<string, unknown>): Dashboard
     const r = asRecord(w);
     return {
       id: String(r.id ?? ""),
-      code: String(r.code ?? ""),
+      code: String(r.code ?? r.name ?? r.id ?? ""),
       name: r.name != null ? String(r.name) : undefined,
       location: r.location != null ? String(r.location) : undefined,
-      capacity: num(r.capacity),
-      utilized: num(r.utilized),
+      capacity: r.capacity != null ? num(r.capacity) : undefined,
+      utilized: r.utilized != null ? num(r.utilized) : undefined,
       status: r.status != null ? String(r.status) : undefined,
     };
   });
 
-  const categories = (Array.isArray(payload.category_mix) ? payload.category_mix : [])
-    .slice(0, 6)
-    .map((c, i) => {
-      const r = asRecord(c);
-      return {
-        label: String(r.label ?? r.name ?? "—"),
-        value: num(r.value ?? r.count ?? r.product_count ?? 1),
-        color: String(r.color ?? CAT_COLORS[i % CAT_COLORS.length]),
-      };
-    });
+  const categories = (
+    Array.isArray(payload.category_mix) ? payload.category_mix : []
+  ).map((c, i) => {
+    const r = asRecord(c);
+    return {
+      label: String(r.label ?? r.name ?? "Other"),
+      value: num(r.value ?? r.count ?? r.cnt, 0),
+      color: String(r.color ?? CAT_COLORS[i % CAT_COLORS.length]),
+    };
+  });
 
-  const pipelineRaw = Array.isArray(payload.pipeline) ? payload.pipeline : [];
-  const pipeline =
-    pipelineRaw.length > 0
-      ? pipelineRaw.map((p) => {
-          const r = asRecord(p);
-          return {
-            label: String(r.label ?? ""),
-            count: num(r.count),
-            color: String(r.color ?? "#C49A5A"),
-          };
-        })
-      : [
-          { label: "Open SO", count: num(so.pending), color: "#C49A5A" },
-          { label: "Done SO", count: num(so.done), color: "#5A9A6E" },
-          { label: "All SO", count: num(so.all), color: "#9A6B45" },
-          { label: "Open PO", count: num(po.pending), color: "#6B9B7A" },
-          { label: "All PO", count: num(po.all), color: "#A89880" },
-        ];
+  const pipeline = (
+    Array.isArray(payload.pipeline) ? payload.pipeline : []
+  ).map((p) => {
+    const r = asRecord(p);
+    return {
+      label: String(r.label ?? ""),
+      count: num(r.count),
+      color: String(r.color ?? "#9A6B45"),
+    };
+  });
 
   const recentOrders: DashOrderRow[] = (
     Array.isArray(payload.recent_orders) ? payload.recent_orders : []
   ).map((o) => {
     const r = asRecord(o);
-    const kind = String(r.kind ?? r.type ?? "SO").toUpperCase() === "PO" ? "PO" : "SO";
+    const kindRaw = String(r.kind ?? r.type ?? "SO").toUpperCase();
     return {
-      id: String(r.id ?? r.so_number ?? r.po_number ?? "—"),
-      kind,
-      party: String(r.party ?? r.customer_name ?? r.supplier_name ?? "—"),
+      id: String(r.id ?? ""),
+      kind: kindRaw === "PO" ? "PO" : "SO",
+      party: String(r.party ?? r.customer ?? r.supplier ?? r.name ?? "—"),
       total: num(r.total),
       status: String(r.status ?? "pending"),
       date: String(r.date ?? r.order_date ?? "").slice(0, 10),
@@ -204,261 +194,20 @@ export function mapUnifiedDashboard(payload: Record<string, unknown>): Dashboard
   };
 }
 
-async function fetchDashboardLegacy(range: string): Promise<DashboardViewModel> {
-  const unwrap = (v: unknown): Record<string, number> => {
-    const raw = v as Record<string, unknown>;
-    if (raw?.data && typeof raw.data === "object" && !Array.isArray(raw.data)) {
-      return raw.data as Record<string, number>;
-    }
-    return (raw ?? {}) as Record<string, number>;
-  };
-
-  const kpi = await Promise.allSettled([
-    api.get("/inventories/stats").then((r) => r.data),
-    api.get("/sales-orders/stats").then((r) => r.data),
-    api.get("/purchase-orders/stats").then((r) => r.data),
-  ]);
-
-  let invValue = 0,
-    lowStock = 0,
-    outStock = 0,
-    skuCount = 0;
-  let soPending = 0,
-    soAll = 0,
-    soDone = 0,
-    soValue = 0;
-  let poPending = 0,
-    poAll = 0,
-    poValue = 0;
-
-  if (kpi[0].status === "fulfilled") {
-    const j = unwrap(kpi[0].value);
-    invValue = num(j.inventory_value ?? j.total_value);
-    lowStock = num(j.low_stock ?? j.low);
-    outStock = num(j.out_of_stock ?? j.out);
-    skuCount = num(j.total_products ?? j.products ?? j.count);
-  }
-  if (kpi[1].status === "fulfilled") {
-    const j = unwrap(kpi[1].value);
-    soAll = num(j.all);
-    soPending = num(j.pending);
-    soDone = num(j.done);
-    soValue = num(j.total_value);
-  }
-  if (kpi[2].status === "fulfilled") {
-    const j = unwrap(kpi[2].value);
-    poAll = num(j.all ?? j.total);
-    poPending = num(j.pending);
-    poValue = num(j.total_value);
-  }
-
-  const batchA = await Promise.allSettled([
-    api.get("/warehouses", { params: { per_page: 30, all: 1 } }).then((r) => r.data),
-    api
-      .get("/sales-orders", { params: { per_page: 5, sort: "order_date", dir: "desc" } })
-      .then((r) => r.data),
-    api
-      .get("/purchase-orders", { params: { per_page: 3, sort: "order_date", dir: "desc" } })
-      .then((r) => r.data),
-  ]);
-
-  const warehouses: DashWarehouse[] =
-    batchA[0].status === "fulfilled"
-      ? extractArray<DashWarehouse>(batchA[0].value).map((w) => ({
-          id: String(w.id),
-          code: String(w.code ?? ""),
-          name: w.name,
-          location: w.location,
-          capacity: num(w.capacity),
-          utilized: num(w.utilized),
-          status: w.status,
-        }))
-      : [];
-
-  const soList =
-    batchA[1].status === "fulfilled" ? extractArray<Record<string, unknown>>(batchA[1].value) : [];
-  const poList =
-    batchA[2].status === "fulfilled" ? extractArray<Record<string, unknown>>(batchA[2].value) : [];
-
-  const recentOrders: DashOrderRow[] = [
-    ...soList.slice(0, 4).map((o) => ({
-      id: String(o.so_number ?? o.id ?? "SO"),
-      kind: "SO" as const,
-      party: String((o.customer as { name?: string })?.name ?? "—"),
-      total: num(o.total),
-      status: String(o.status ?? "pending"),
-      date: String(o.order_date ?? "").slice(0, 10),
-    })),
-    ...poList.slice(0, 2).map((o) => ({
-      id: String(o.po_number ?? o.id ?? "PO"),
-      kind: "PO" as const,
-      party: String((o.supplier as { name?: string })?.name ?? "—"),
-      total: num(o.total),
-      status: String(o.status ?? "pending"),
-      date: String(o.order_date ?? "").slice(0, 10),
-    })),
-  ];
-
-  const batchB = await Promise.allSettled([
-    api.get("/inventories", { params: { per_page: 8, status: "low-stock" } }).then((r) => r.data),
-    api.get("/inventories", { params: { per_page: 5, status: "out-of-stock" } }).then((r) => r.data),
-    api.get("/categories", { params: { per_page: 12 } }).then((r) => r.data),
-    api.get("/cycle-counts/stats").then((r) => r.data).catch(() => null),
-    api.get("/goods-receipts/stats").then((r) => r.data).catch(() => null),
-    api.get("/returns/stats").then((r) => r.data).catch(() => null),
-  ]);
-
-  const lowList =
-    batchB[0].status === "fulfilled"
-      ? extractArray<Record<string, unknown>>(batchB[0].value)
-      : [];
-  const oosList =
-    batchB[1].status === "fulfilled"
-      ? extractArray<Record<string, unknown>>(batchB[1].value)
-      : [];
-
-  const alerts: DashAlertItem[] = [];
-  for (const p of oosList) {
-    alerts.push({
-      type: "danger",
-      title: "Out of stock",
-      msg: `${String(p.name ?? p.sku ?? "SKU")} · 0 units`,
-      path: "/products",
-      sku: p.sku != null ? String(p.sku) : undefined,
-    });
-  }
-  for (const p of lowList) {
-    alerts.push({
-      type: "warning",
-      title: "Low stock",
-      msg: `${String(p.name ?? p.sku ?? "SKU")} · ${p.qty ?? "?"} remaining`,
-      path: "/products",
-      sku: p.sku != null ? String(p.sku) : undefined,
-    });
-  }
-
-  let categories: DashboardViewModel["categories"] = [];
-  if (batchB[2].status === "fulfilled") {
-    categories = extractArray<Record<string, unknown>>(batchB[2].value)
-      .slice(0, 6)
-      .map((c, i) => ({
-        label: String(c.name ?? c.label ?? "—"),
-        value: num(c.product_count ?? c.count ?? c.value ?? 1),
-        color: CAT_COLORS[i % CAT_COLORS.length],
-      }));
-  }
-
-  let serverTrendLabels: string[] | null = null;
-  let serverStockIn: number[] | null = null;
-  let serverStockOut: number[] | null = null;
-  try {
-    const movRes = await api
-      .get("/stock-movements", { params: { per_page: 60 } })
-      .then((r) => r.data);
-    const moves = extractArray<Record<string, unknown>>(movRes);
-    const monthsBack = range === "3m" ? 3 : range === "1y" ? 12 : 7;
-    const now = new Date();
-    const labels: string[] = [];
-    const keys: string[] = [];
-    for (let i = monthsBack - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      keys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-      labels.push(
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
-          d.getMonth()
-        ]
-      );
-    }
-    const inBy = new Map(keys.map((k) => [k, 0]));
-    const outBy = new Map(keys.map((k) => [k, 0]));
-    for (const m of moves) {
-      const dt = new Date(String(m.movement_date ?? m.date ?? ""));
-      if (Number.isNaN(dt.getTime())) continue;
-      const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
-      if (!inBy.has(key)) continue;
-      const t = String(m.type ?? "").toUpperCase();
-      if (t === "IN" || t === "RECEIPT") inBy.set(key, (inBy.get(key) || 0) + 1);
-      if (t === "OUT" || t === "ISSUE") outBy.set(key, (outBy.get(key) || 0) + 1);
-    }
-    serverTrendLabels = labels;
-    serverStockIn = keys.map((k) => inBy.get(k) || 0);
-    serverStockOut = keys.map((k) => outBy.get(k) || 0);
-  } catch {
-    /* optional */
-  }
-
-  return {
-    invValue,
-    lowStock,
-    outStock,
-    skuCount,
-    soPending,
-    soAll,
-    soDone,
-    poPending,
-    poAll,
-    soValue,
-    poValue,
-    warehouses,
-    recentOrders,
-    alerts,
-    categories,
-    pipeline: [
-      { label: "Open SO", count: soPending, color: "#C49A5A" },
-      { label: "Done SO", count: soDone, color: "#5A9A6E" },
-      { label: "All SO", count: soAll, color: "#9A6B45" },
-      { label: "Open PO", count: poPending, color: "#6B9B7A" },
-      { label: "All PO", count: poAll, color: "#A89880" },
-    ],
-    moveStats: {},
-    cycleStats:
-      batchB[3].status === "fulfilled" && batchB[3].value
-        ? (batchB[3].value as DashOpsStats)
-        : {},
-    receiptStats:
-      batchB[4].status === "fulfilled" && batchB[4].value
-        ? (batchB[4].value as DashOpsStats)
-        : {},
-    returnStats:
-      batchB[5].status === "fulfilled" && batchB[5].value
-        ? (batchB[5].value as DashOpsStats)
-        : {},
-    recentMoves: [],
-    activityFeed: [],
-    serverTrend: null,
-    serverTrendLabels,
-    serverStockIn,
-    serverStockOut,
-    usingUnified: false,
-    generatedAt: new Date().toISOString(),
-  };
-}
-
 async function fetchDashboardData(range: string): Promise<DashboardViewModel> {
-  try {
-    const payload = await getDashboard(range as DashboardRange);
-    if (
-      payload &&
-      typeof payload === "object" &&
-      ("inventory_value" in payload || "total_products" in payload)
-    ) {
-      return mapUnifiedDashboard(payload as Record<string, unknown>);
-    }
-    // Unified endpoint responded but with an unrecognized shape — safe to
-    // assume it's not deployed yet on this backend, fall back once.
-    return fetchDashboardLegacy(range);
-  } catch (err: unknown) {
-    // Only fall back to the slow 12-request legacy path when the unified
-    // endpoint truly doesn't exist (404/501). For everything else — a
-    // timeout, a 500, a network blip — rethrow so React Query's built-in
-    // retry (see queryClient.ts: retry: 1) retries the SAME single request
-    // instead of silently tripling the number of API calls.
-    const status = (err as { response?: { status?: number } } | undefined)?.response?.status;
-    if (status === 404 || status === 501) {
-      return fetchDashboardLegacy(range);
-    }
-    throw err;
+  const payload = await getDashboard(range as DashboardRange);
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Dashboard API returned an empty payload");
   }
+  // Canonical contract: DashboardController index fields
+  if (
+    !("inventory_value" in payload) &&
+    !("total_products" in payload) &&
+    !("sales_orders" in payload)
+  ) {
+    throw new Error("Dashboard API returned an unrecognized payload shape");
+  }
+  return mapUnifiedDashboard(payload as Record<string, unknown>);
 }
 
 export function useDashboard(options: { range?: string; enabled?: boolean } = {}) {
@@ -469,6 +218,7 @@ export function useDashboard(options: { range?: string; enabled?: boolean } = {}
     queryKey: queryKeys.dashboard(range),
     queryFn: () => fetchDashboardData(range),
     enabled,
+    staleTime: 60_000,
     placeholderData: (prev) => prev,
   });
 
