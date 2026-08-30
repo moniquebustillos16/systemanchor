@@ -21,6 +21,9 @@ import api from "../../api/axios";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import { hasAnyPermission } from "../../lib/permissions";
 import { useDashboard } from "../../hooks/useDashboard";
+import { useQuery } from "@tanstack/react-query";
+import { queryKeys } from "../../lib/queryClient";
+
 import "../css/Main.css";
 
 /* ===================== ICONS ===================== */
@@ -1167,74 +1170,85 @@ function Dashboard() {
     [canViewPath, navigate]
   );
 
-  const enrichChartsFromMovements = useCallback(async (range: string, invValFallback = 0) => {
-    try {
+  /* Stock-movements enrich: TanStack Query (only when unified dashboard lacks series) */
+  const needEnrich =
+    !!dash && (!dash.serverTrend?.length || !dash.usingUnified);
+
+  const enrichQuery = useQuery({
+    queryKey: [...queryKeys.stockMovements.all, "dashboard-enrich", trendRange] as const,
+    queryFn: async () => {
       const movRes = await api.get("/stock-movements", { params: { per_page: 60 } }).then((r) => r.data);
-      const moves = (Array.isArray(movRes) ? movRes : movRes?.data ?? []) as Record<string, unknown>[];
-      const priceByProduct = new Map<string, number>();
-      const series = buildSeriesFromMovements(moves, priceByProduct, range, invValFallback);
-      setServerTrend(series.trend);
-      setServerTrendLabels(series.labels);
-      setServerStockIn(series.stockIn);
-      setServerStockOut(series.stockOut);
-      if (moves.length) {
-        const mapped = moves.slice(0, 8).map((m) => ({
-          id: String(m.id ?? ""),
-          type: normMoveType(m.type),
-          qty: Number(m.qty ?? 0),
-          product: String(
-            (m.product as { name?: string; sku?: string })?.name ??
-              (m.product as { sku?: string })?.sku ??
-              "—"
-          ),
-          sku: (m.product as { sku?: string })?.sku,
-          from: String((m.from_warehouse as { code?: string })?.code ?? m.from ?? "—"),
-          to: String((m.to_warehouse as { code?: string })?.code ?? m.to ?? "—"),
-          reference: m.reference ? String(m.reference) : undefined,
-          date: String(m.movement_date ?? m.date ?? "").slice(0, 10),
-          status: String(m.status ?? "posted"),
-        }));
-        setRecentMoves(mapped);
+      return (Array.isArray(movRes) ? movRes : movRes?.data ?? []) as Record<string, unknown>[];
+    },
+    enabled: needEnrich,
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  });
 
-        let inCnt = 0;
-        let outCnt = 0;
-        let todayCnt = 0;
-        const today = new Date().toISOString().slice(0, 10);
-        for (const m of moves) {
-          const t = normMoveType(m.type);
-          if (t === "IN") inCnt++;
-          else if (t === "OUT") outCnt++;
-          const d = String(m.movement_date ?? m.date ?? "").slice(0, 10);
-          if (d === today) todayCnt++;
-        }
-        setMoveStats({
-          today: todayCnt,
-          this_week: moves.length,
-          in: inCnt,
-          out: outCnt,
-        });
+  useEffect(() => {
+    if (!needEnrich || !enrichQuery.data) return;
+    const moves = enrichQuery.data;
+    const priceByProduct = new Map<string, number>();
+    const series = buildSeriesFromMovements(moves, priceByProduct, trendRange, dash?.invValue ?? 0);
+    setServerTrend(series.trend);
+    setServerTrendLabels(series.labels);
+    setServerStockIn(series.stockIn);
+    setServerStockOut(series.stockOut);
+    if (moves.length) {
+      const mapped = moves.slice(0, 8).map((m) => ({
+        id: String(m.id ?? ""),
+        type: normMoveType(m.type),
+        qty: Number(m.qty ?? 0),
+        product: String(
+          (m.product as { name?: string; sku?: string })?.name ??
+            (m.product as { sku?: string })?.sku ??
+            "—"
+        ),
+        sku: (m.product as { sku?: string })?.sku,
+        from: String((m.from_warehouse as { code?: string })?.code ?? m.from ?? "—"),
+        to: String((m.to_warehouse as { code?: string })?.code ?? m.to ?? "—"),
+        reference: m.reference ? String(m.reference) : undefined,
+        date: String(m.movement_date ?? m.date ?? "").slice(0, 10),
+        status: String(m.status ?? "posted"),
+      }));
+      setRecentMoves(mapped);
 
-        setActivityFeed(
-          mapped.slice(0, 6).map((m) => ({
-            kind: "move",
-            color:
-              m.type === "IN"
-                ? "#5A9A6E"
-                : m.type === "OUT"
-                  ? "#B85C4A"
-                  : m.type === "TRANSFER"
-                    ? "#9A6B45"
-                    : "#C49A5A",
-            text: `${m.type} · qty ${m.qty}${m.reference ? ` · ${m.reference}` : ""}`,
-            time: m.date || "recently",
-            path: "/stock-movements",
-          }))
-        );
+      let inCnt = 0;
+      let outCnt = 0;
+      let todayCnt = 0;
+      const today = new Date().toISOString().slice(0, 10);
+      for (const m of moves) {
+        const t = normMoveType(m.type);
+        if (t === "IN") inCnt++;
+        else if (t === "OUT") outCnt++;
+        const d = String(m.movement_date ?? m.date ?? "").slice(0, 10);
+        if (d === today) todayCnt++;
       }
-    } catch (e) {
-      console.warn("[Dashboard] enrichChartsFromMovements failed", e);
+      setMoveStats({
+        today: todayCnt,
+        this_week: moves.length,
+        in: inCnt,
+        out: outCnt,
+      });
+
+      setActivityFeed(
+        mapped.slice(0, 6).map((m) => ({
+          kind: "move",
+          color:
+            m.type === "IN"
+              ? "#5A9A6E"
+              : m.type === "OUT"
+                ? "#B85C4A"
+                : m.type === "TRANSFER"
+                  ? "#9A6B45"
+                  : "#C49A5A",
+          text: `${m.type} · qty ${m.qty}${m.reference ? ` · ${m.reference}` : ""}`,
+          time: m.date || "recently",
+          path: "/stock-movements",
+        }))
+      );
     }
-  }, []);
+  }, [needEnrich, enrichQuery.data, trendRange, dash?.invValue]);
 
   /* Phase 4: TanStack Query → local UI state */
   useEffect(() => {
@@ -1305,10 +1319,7 @@ function Dashboard() {
     setLastUpdated(dataUpdatedAt ? new Date(dataUpdatedAt) : new Date());
     setLoading(false);
 
-    if (!dash.serverTrend?.length || !dash.usingUnified) {
-      void enrichChartsFromMovements(trendRange, dash.invValue).catch(() => undefined);
-    }
-  }, [dash, dataUpdatedAt, trendRange, enrichChartsFromMovements]);
+  }, [dash, dataUpdatedAt]);
 
   useEffect(() => {
     if (dash) {

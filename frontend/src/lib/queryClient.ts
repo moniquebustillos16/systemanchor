@@ -11,7 +11,8 @@ export const queryClient = new QueryClient({
       retry: 1,
       refetchOnWindowFocus: true,
       refetchOnReconnect: true,
-      refetchOnMount: true,
+      // Was: true — caused remount/refetch even right after login prefetch
+      refetchOnMount: false,
     },
     mutations: {
       retry: 0,

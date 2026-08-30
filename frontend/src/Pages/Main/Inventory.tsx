@@ -4,8 +4,12 @@ import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { usePermissions, fetchCurrentUserCached } from "../../hooks/useCurrentUser";
 import { fetchUserWarehousesCached } from "../../hooks/useWarehouses";
-import { useInventoryPage } from "../../hooks/useInventory";
-import { invalidateInventory } from "../../lib/invalidate"
+import { useInventoryPage, useInventoryCategories } from "../../hooks/useInventory";
+import { useQuery } from "@tanstack/react-query";
+import { queryClient, queryKeys } from "../../lib/queryClient";
+import { getWarehouses } from "../../api/warehouses";
+import { getSuppliers } from "../../api/partners";
+import { invalidateInventory } from "../../lib/invalidate";
 import "../css/Main.css";
 
 const svg = {
@@ -326,23 +330,8 @@ type UserWarehouseScope = {
   warehouses: Warehouse[];
 };
 /* ── Module cache (survives Strict Mode remounts) ─────────────── */
-const INV_CACHE_TTL = 60_000;
-const SS_LIST_KEY = "inv:lastList";
-const SS_STATS_KEY = "inv:lastStats";
-const SS_META_KEY = "inv:lastMeta";
+/* List/stats owned by TanStack Query (useInventoryPage). Detail cache only for View/Edit. */
 
-type CacheEntry<T> = { data: T; at: number; key?: string };
-const statsCache: { entry: CacheEntry<Stats> | null; inflight: Promise<Stats> | null } = {
-  entry: null,
-  inflight: null,
-};
-const metaCache: {
-  entry: CacheEntry<{ categories: Category[]; warehouses: Warehouse[]; suppliers: Supplier[] }> | null;
-  inflight: Promise<{ categories: Category[]; warehouses: Warehouse[]; suppliers: Supplier[] }> | null;
-} = { entry: null, inflight: null };
-const listCache = new Map<string, CacheEntry<{ rows: Product[]; total: number; lastPage: number }>>();
-const listInflight = new Map<string, Promise<{ rows: Product[]; total: number; lastPage: number }>>();
-let invMetaBootstrapped = false;
 let invHasShownData = false;
 
 /** Cache full product (with images) so View/Edit don't refetch the same id. */
@@ -367,65 +356,6 @@ function setCachedDetail(p: Product) {
   });
 }
 
-function isFresh<T>(e: CacheEntry<T> | null | undefined): e is CacheEntry<T> {
-  return !!e && Date.now() - e.at < INV_CACHE_TTL;
-}
-
-function readSS<T>(key: string): T | null {
-  try {
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return null;
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function writeSS(key: string, value: unknown) {
-  try {
-    sessionStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* quota */
-  }
-}
-
-/** Bootstrap list from sessionStorage for instant first paint on revisit */
-function bootstrapList(): { rows: Product[]; total: number; lastPage: number } | null {
-  const snap = readSS<{ rows: Product[]; total: number; lastPage: number; at: number }>(SS_LIST_KEY);
-  if (!snap?.rows?.length) return null;
-  // Accept up to 10 min old for instant paint
-  if (Date.now() - (snap.at || 0) > 10 * 60_000) return null;
-  return { rows: snap.rows, total: snap.total, lastPage: snap.lastPage || 1 };
-}
-
-function bootstrapStats(): Stats | null {
-  const snap = readSS<{ data: Stats; at: number }>(SS_STATS_KEY);
-  if (!snap?.data) return null;
-  if (Date.now() - (snap.at || 0) > 10 * 60_000) return null;
-  return snap.data;
-}
-
-function bootstrapMeta(): {
-  categories: Category[];
-  warehouses: Warehouse[];
-  suppliers: Supplier[];
-} | null {
-  const snap = readSS<{
-    data: { categories: Category[]; warehouses: Warehouse[]; suppliers: Supplier[] };
-    at: number;
-  }>(SS_META_KEY);
-  if (!snap?.data) return null;
-  if (Date.now() - (snap.at || 0) > 30 * 60_000) return null;
-  return snap.data;
-}
-
-function extractArr<T>(json: any): T[] {
-  if (!json) return [];
-  if (Array.isArray(json)) return json;
-  if (Array.isArray(json.data)) return json.data;
-  if (Array.isArray(json.data?.data)) return json.data.data;
-  return [];
-}
 
 function Inventory() {
   const [tab, setTab] = useState<Tab>("products");
@@ -473,35 +403,56 @@ function Inventory() {
   dir: sortAsc ? "asc" : "desc",
 });
     
-  const [products, setProducts] = useState<Product[]>(() => {
-    if (listCache.size) {
-      const first = listCache.values().next().value;
-      if (first?.data?.rows?.length) return first.data.rows;
-    }
-    return bootstrapList()?.rows ?? [];
-  });
-  const [stats, setStats] = useState<Stats | null>(
-    () => statsCache.entry?.data ?? bootstrapStats()
-  );
-  const [loading, setLoading] = useState(() => {
-    if (listCache.size) return false;
-    return !(bootstrapList()?.rows?.length);
-  });
+  const [products, setProducts] = useState<Product[]>([]);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [total, setTotal] = useState(() => bootstrapList()?.total ?? 0);
-  const [lastPage, setLastPage] = useState(() => bootstrapList()?.lastPage ?? 1);
+  const [total, setTotal] = useState(0);
+  const [lastPage, setLastPage] = useState(1);
 
-  const bootMeta = bootstrapMeta();
-  const [allCategories, setAllCategories] = useState<Category[]>(
-    () => metaCache.entry?.data.categories ?? bootMeta?.categories ?? []
-  );
-  const [allWarehouses, setAllWarehouses] = useState<Warehouse[]>(
-    () => metaCache.entry?.data.warehouses ?? bootMeta?.warehouses ?? []
-  );
-  const [allSuppliers, setAllSuppliers] = useState<Supplier[]>(
-    () => metaCache.entry?.data.suppliers ?? bootMeta?.suppliers ?? []
-  );
-  const [metaLoading, setMetaLoading] = useState(false);
+  // Filter meta via TanStack Query (single source of truth)
+  const categoriesQuery = useInventoryCategories({ enabled: true });
+  const warehousesQuery = useQuery({
+    queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
+    queryFn: () => getWarehouses({ per_page: 200, all: 1 }),
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  });
+  const suppliersQuery = useQuery({
+    queryKey: queryKeys.suppliers.list({ per_page: 100 }),
+    queryFn: () => getSuppliers({ per_page: 100 }),
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const allCategories: Category[] = useMemo(() => {
+    const raw = categoriesQuery.data ?? [];
+    return (Array.isArray(raw) ? raw : []).map((c: any) => ({
+      id: String(c.id),
+      name: String(c.name ?? ""),
+    }));
+  }, [categoriesQuery.data]);
+
+    const allWarehouses: Warehouse[] = useMemo(() => {
+    const raw = warehousesQuery.data as any;
+    const arr = Array.isArray(raw) ? raw : raw?.data ?? raw?.data?.data ?? [];
+    return (arr as any[]).map((w) => ({
+      id: String(w.id),
+      name: String(w.name ?? w.code ?? ""),
+      code: w.code != null ? String(w.code) : "",
+    }));
+  }, [warehousesQuery.data]);
+
+  const allSuppliers: Supplier[] = useMemo(() => {
+    const raw = suppliersQuery.data as any;
+    const arr = Array.isArray(raw) ? raw : raw?.data ?? raw?.data?.data ?? [];
+    return (arr as any[])
+      .map((s) => ({ id: String(s.id), name: String(s.name ?? "") }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [suppliersQuery.data]);
+
+  const metaLoading =
+    categoriesQuery.isLoading || warehousesQuery.isLoading || suppliersQuery.isLoading;
   const warehousesForFilter = useMemo(() => {
   // Still loading scope → show whatever we have from allWarehouses
   if (!whScope) return allWarehouses;
@@ -693,7 +644,7 @@ useEffect(() => {
   // Once we have shown any data this session, never use full-page loader again
   // (same idea as Dashboard: loading && !lastUpdated)
     const hasDataRef = useRef(
-    products.length > 0 || total > 0 || !!statsCache.entry || !!bootstrapList()
+    products.length > 0 || total > 0 || !!stats
   );
 
   useEffect(() => {
@@ -709,7 +660,7 @@ useEffect(() => {
   }
   if (
     !invHasShownData &&
-    (listCache.size > 0 || !!statsCache.entry || !!bootstrapList())
+    (products.length > 0 || !!stats)
   ) {
     invHasShownData = true;
   }
@@ -720,320 +671,10 @@ useEffect(() => {
     products.length === 0 &&
     invLoading;
 
-  const fetchMeta = useCallback(async (force = false) => {
-    if (!force && isFresh(metaCache.entry)) {
-      const m = metaCache.entry.data;
-      setAllCategories(m.categories);
-      setAllWarehouses(m.warehouses);
-      setAllSuppliers(m.suppliers);
-      return;
-    }
-    if (!force && metaCache.entry) {
-      const m = metaCache.entry.data;
-      setAllCategories(m.categories);
-      setAllWarehouses(m.warehouses);
-      setAllSuppliers(m.suppliers);
-    }
-    if (metaCache.inflight && !force) {
-      try {
-        const m = await metaCache.inflight;
-        setAllCategories(m.categories);
-        setAllWarehouses(m.warehouses);
-        setAllSuppliers(m.suppliers);
-      } catch { /* owner handles */ }
-      return;
-    }
+    /* ── List + stats: TanStack Query only (useInventoryPage). Meta: Query hooks above. ── */
 
-    setMetaLoading(true);
-    const work = (async () => {
-      const loadWarehouses = async (): Promise<Warehouse[]> => {
-        // Only real endpoints — /locations/warehouses returns 404
-        const paths = [
-          "/warehouses?paginate=false&per_page=100",
-          "/warehouses?all=1&per_page=100",
-          "/warehouses",
-        ];
-        for (const path of paths) {
-          try {
-            const { data: json } = await api.get(path, { timeout: 12000 });
-            const list = extractArr<Warehouse>(json)
-              .map((w) => ({
-                id: String(w.id),
-                code: w.code ?? "",
-                name: w.name,
-              }))
-              .filter((w) => w.id)
-              .sort((a, b) => (a.code || a.name || "").localeCompare(b.code || b.name || ""));
-            if (list.length > 0) return list;
-            if (json != null) return list;
-          } catch {
-            /* try next path */
-          }
-        }
-        return [];
-      };
+  /* Meta loaded via useInventoryCategories / warehousesQuery / suppliersQuery */
 
-      // Categories first (usually fast) — paint filter options ASAP
-      const catRes = await api.get("/categories").then((r) => r.data).catch(() => null);
-      const categories = extractArr<Category>(catRes)
-        .map((c) => ({ id: String(c.id), name: c.name }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-      setAllCategories(categories);
-
-      // Warehouses + suppliers are slow — load in parallel after categories
-      const [warehouses, supRes] = await Promise.all([
-        loadWarehouses(),
-        api.get("/suppliers", { params: { per_page: 100 }, timeout: 12000 }).then((r) => r.data).catch(() => null),
-      ]);
-      const suppliers = extractArr<Supplier>(supRes)
-        .map((s) => ({ id: String(s.id), name: s.name }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-
-      return { categories, warehouses, suppliers };
-    })();
-
-    metaCache.inflight = work;
-    try {
-      const m = await work;
-      metaCache.entry = { data: m, at: Date.now() };
-      setAllCategories(m.categories);
-      setAllWarehouses(m.warehouses);
-      setAllSuppliers(m.suppliers);
-      writeSS(SS_META_KEY, { data: m, at: Date.now() });
-    } catch (e) {
-      console.error("[Inventory] meta fetch failed:", e);
-    } finally {
-      metaCache.inflight = null;
-      setMetaLoading(false);
-    }
-  }, []);
-
-  const bustListCaches = useCallback(() => {
-    listCache.clear();
-    statsCache.entry = null;
-  }, []);
-
-  const refreshStatsBg = useCallback(() => {
-    statsCache.entry = null;
-    api
-      .get("/inventories/stats")
-      .then((r) => {
-        const s = r.data as Stats;
-        statsCache.entry = { data: s, at: Date.now() };
-        setStats(s);
-      })
-      .catch(() => {});
-  }, []);
-
-  /** Abort previous in-flight list when filters change */
-  const listAbortRef = useRef<AbortController | null>(null);
-
-  /**
-   * Fast list fetch strategy:
-   * 1. Paint any cached rows immediately (even stale) — no blank screen.
-   * 2. Phase A: fetch WITHOUT with_images (fast text/numbers) → paint ASAP.
-   * 3. Phase B: background fetch WITH with_images → merge thumbnails by id.
-   * 4. Stats run in parallel, never block the table.
-   */
-  const fetchInventory = useCallback(async (force = false) => {
-    setError(null);
-
-    const baseParams: Record<string, string | number | boolean> = {
-      per_page: pageSize,
-      page,
-      sort: sortKey === "status" ? "sku" : sortKey,
-      dir: sortAsc ? "asc" : "desc",
-      paginate: true,
-    };
-    if (debouncedSearch.trim()) baseParams.search = debouncedSearch.trim();
-    if (filterCat !== "all") baseParams.category_id = filterCat;
-    if (filterWh !== "all") baseParams.warehouse_id = filterWh;
-    if (filterStatus !== "all") baseParams.status = filterStatus;
-
-    // Cache key ignores with_images so fast + image passes share one entry
-    const cacheKey = JSON.stringify(baseParams);
-    const cached = listCache.get(cacheKey);
-
-    // Instant paint from cache (fresh or stale)
-    if (cached) {
-      setProducts(cached.data.rows);
-      setTotal(cached.data.total);
-      setLastPage(cached.data.lastPage);
-      setLoading(false);
-      if (!force && isFresh(cached)) {
-        // Still refresh stats in background if needed
-        if (!isFresh(statsCache.entry)) refreshStatsBg();
-        return;
-      }
-    } else {
-      setProducts((prev) => {
-        if (prev.length === 0) setLoading(true);
-        return prev;
-      });
-    }
-
-    if (!force && isFresh(statsCache.entry)) {
-      setStats(statsCache.entry.data);
-    }
-
-    // Coalesce identical in-flight requests
-    if (!force && listInflight.has(cacheKey)) {
-      try {
-        const result = await listInflight.get(cacheKey)!;
-        setProducts(result.rows);
-        setTotal(result.total);
-        setLastPage(result.lastPage);
-      } catch {
-        /* owner */
-      }
-      setLoading(false);
-      return;
-    }
-
-    // Cancel previous list request when filters/page change
-    listAbortRef.current?.abort();
-    const ac = new AbortController();
-    listAbortRef.current = ac;
-
-    const parseList = (listJson: any): { rows: Product[]; total: number; lastPage: number } => {
-      const body = listJson;
-      const rawRows: Product[] = Array.isArray(body) ? body : body?.data ?? [];
-      const rows = rawRows.map((p) => normalizeProductImages(p));
-      const totalCount = Array.isArray(body) ? rows.length : body?.total ?? rows.length;
-      const pages = Array.isArray(body) ? 1 : body?.last_page ?? 1;
-      return { rows, total: totalCount, lastPage: pages };
-    };
-
-    // Phase A — fast list (no images)
-    const fastPromise = (async () => {
-      const { data: listJson } = await api.get("/inventories", {
-        params: { ...baseParams, with_images: false },
-        signal: ac.signal,
-      });
-      return parseList(listJson);
-    })();
-
-    listInflight.set(cacheKey, fastPromise);
-
-    // Stats in parallel (non-blocking for table)
-    const statsPromise = (async () => {
-      if (!force && statsCache.inflight) return statsCache.inflight;
-      if (!force && isFresh(statsCache.entry)) return statsCache.entry!.data;
-      const p = api.get("/inventories/stats").then((r) => r.data as Stats);
-      statsCache.inflight = p;
-      try {
-        const s = await p;
-        statsCache.entry = { data: s, at: Date.now() };
-        return s;
-      } finally {
-        statsCache.inflight = null;
-      }
-    })();
-
-    try {
-      const listResult = await fastPromise;
-      if (ac.signal.aborted) return;
-
-      listCache.set(cacheKey, { data: listResult, at: Date.now(), key: cacheKey });
-      setProducts(listResult.rows);
-      setTotal(listResult.total);
-      setLastPage(listResult.lastPage);
-      setLoading(false);
-      writeSS(SS_LIST_KEY, {
-        rows: listResult.rows,
-        total: listResult.total,
-        lastPage: listResult.lastPage,
-        at: Date.now(),
-      });
-
-      // Stats resolve independently
-      void statsPromise
-        .then((s) => {
-          if (s && !ac.signal.aborted) {
-            setStats(s);
-            writeSS(SS_STATS_KEY, { data: s, at: Date.now() });
-          }
-        })
-        .catch(() => {});
-
-      // Phase B — enrich with images in background (does not block UI)
-      void (async () => {
-        try {
-          const { data: imgJson } = await api.get("/inventories", {
-            params: { ...baseParams, with_images: true },
-            signal: ac.signal,
-          });
-          if (ac.signal.aborted) return;
-          const withImgs = parseList(imgJson);
-          const byId = new Map(withImgs.rows.map((r) => [r.id, r]));
-
-          setProducts((prev) =>
-            prev.map((p) => {
-              const full = byId.get(p.id);
-              if (!full) return p;
-              return {
-                ...p,
-                images: full.images ?? p.images,
-                primary_image: full.primary_image ?? p.primary_image,
-              };
-            })
-          );
-
-          // Update cache with image-enriched rows
-          listCache.set(cacheKey, {
-            data: {
-              rows: withImgs.rows,
-              total: withImgs.total,
-              lastPage: withImgs.lastPage,
-            },
-            at: Date.now(),
-            key: cacheKey,
-          });
-          writeSS(SS_LIST_KEY, {
-            rows: withImgs.rows,
-            total: withImgs.total,
-            lastPage: withImgs.lastPage,
-            at: Date.now(),
-          });
-        } catch {
-          /* images are optional — table already visible */
-        }
-      })();
-    } catch (e: any) {
-      if (e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || ac.signal.aborted) {
-        return;
-      }
-      console.error("[Inventory] fetch failed:", e);
-      if (!cached) {
-        setError(e instanceof Error ? e.message : "Failed to load inventory");
-        setProducts([]);
-        setTotal(0);
-        setLastPage(1);
-      }
-    } finally {
-      listInflight.delete(cacheKey);
-      setLoading(false);
-    }
-  }, [page, debouncedSearch, filterCat, filterWh, filterStatus, sortKey, sortAsc, refreshStatsBg]);
-
-  useEffect(() => {
-    if (!invMetaBootstrapped) {
-      invMetaBootstrapped = true;
-      void fetchMeta();
-    } else if (metaCache.entry) {
-      setAllCategories(metaCache.entry.data.categories);
-      setAllWarehouses(metaCache.entry.data.warehouses);
-      setAllSuppliers(metaCache.entry.data.suppliers);
-    } else {
-      void fetchMeta();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-    /* Phase 5: TanStack Query owns list + stats (old fetchInventory mount disabled) */
-  // useEffect(() => {
-  //   void fetchInventory();
-  // }, [fetchInventory]);
 
   useEffect(() => {
     if (!list.rows) return;
@@ -1308,47 +949,21 @@ useEffect(() => {
     }
     setCatSaving(true);
     setCatError(null);
-
     const editing = editingCategory;
-    const prevCategories = allCategories;
-
-    // Optimistic UI: update local list + close modal immediately
-    if (editing) {
-      setAllCategories((prev) =>
-        prev.map((c) => (c.id === editing.id ? { ...c, name } : c))
-      );
-      showToast("success", "Category updated", `"${name}" has been saved.`);
-    } else {
-      const tempId = `temp-cat-${Date.now()}`;
-      setAllCategories((prev) =>
-        [...prev, { id: tempId, name }].sort((a, b) => a.name.localeCompare(b.name))
-      );
-      showToast("success", "Category created", `"${name}" is now available.`);
-    }
-    setCatModalOpen(false);
-    setCatName("");
-    setEditingCategory(null);
-    setCatSaving(false);
 
     try {
       if (editing) {
         await api.put(`/categories/${editing.id}`, { name });
+        showToast("success", "Category updated", `"${name}" has been saved.`);
       } else {
-        const { data } = await api.post("/categories", { name });
-        const body = data?.data ?? data;
-        const realId = body?.id ? String(body.id) : null;
-        if (realId) {
-          setAllCategories((prev) =>
-            prev
-              .map((c) => (c.id.startsWith("temp-cat-") && c.name === name ? { id: realId, name } : c))
-              .sort((a, b) => a.name.localeCompare(b.name))
-          );
-        }
+        await api.post("/categories", { name });
+        showToast("success", "Category created", `"${name}" is now available.`);
       }
-      metaCache.entry = null;
-      void fetchMeta(true);
+      setCatModalOpen(false);
+      setCatName("");
+      setEditingCategory(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.categories });
     } catch (err: any) {
-      setAllCategories(prevCategories);
       const body = err.response?.data;
       const msg =
         (body?.errors && Object.values(body.errors).flat().join(" ")) ||
@@ -1356,6 +971,8 @@ useEffect(() => {
         err.message ||
         "Failed to save category";
       showToast("error", "Category save failed", msg);
+    } finally {
+      setCatSaving(false);
     }
   };
 
@@ -1363,24 +980,14 @@ useEffect(() => {
     if (!confirmDeleteCat) return;
     const doomed = confirmDeleteCat;
     setDeletingCat(true);
-
-    const prevCategories = allCategories;
-    // Optimistic remove
-    setAllCategories((prev) => prev.filter((c) => c.id !== doomed.id));
-    setConfirmDeleteCat(null);
-    if (filterCat === doomed.id) setFilterCat("all");
-    showToast("success", "Category deleted", `"${doomed.name}" was removed.`);
-    setDeletingCat(false);
-
     try {
       await api.delete(`/categories/${doomed.id}`);
-      metaCache.entry = null;
-      listCache.clear();
-      statsCache.entry = null;
-      void fetchMeta(true);
-      void fetchInventory(true);
+      if (filterCat === doomed.id) setFilterCat("all");
+      setConfirmDeleteCat(null);
+      showToast("success", "Category deleted", `"${doomed.name}" was removed.`);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.categories });
+      void refetchAll();
     } catch (err: any) {
-      setAllCategories(prevCategories);
       const body = err.response?.data;
       showToast(
         "error",
@@ -1389,6 +996,8 @@ useEffect(() => {
           err.message ||
           "Could not delete category"
       );
+    } finally {
+      setDeletingCat(false);
     }
   };
 
@@ -1660,8 +1269,8 @@ useEffect(() => {
         // Replace temp row with server data
         const realRow = enrichProduct({ ...payload, ...body, id: String(productId) });
         setProducts((prev) => prev.map((p) => (p.id === tempId ? realRow : p)));
-        bustListCaches();
-        refreshStatsBg();
+        /* Query invalidation handles cache */
+        void refetchAll();
         void invalidateInventory();
       } catch (err: any) {
         // Rollback optimistic create
@@ -1726,8 +1335,8 @@ useEffect(() => {
             )
           );
         }
-        bustListCaches();
-        refreshStatsBg();
+        /* Query invalidation handles cache */
+        void refetchAll();
         if (editingId) detailCache.delete(String(editingId));
         void invalidateInventory();
       } catch (err: any) {
@@ -1765,8 +1374,8 @@ useEffect(() => {
 
     try {
       await api.delete(`/inventories/${doomed.id}`);
-      bustListCaches();
-      refreshStatsBg();
+      /* Query invalidation handles cache */
+      void refetchAll();
       detailCache.delete(String(doomed.id));
       void invalidateInventory();
     } catch (err: any) {
@@ -1859,7 +1468,7 @@ useEffect(() => {
                 className="btn btn-secondary"
                 onClick={() => {
                   void refetchAll();
-                  void fetchMeta(true);
+                  /* meta via Query */
                 }}
                 disabled={invFetching || metaLoading}
               >

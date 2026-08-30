@@ -1,17 +1,12 @@
 import { queryClient, queryKeys } from "./queryClient";
 import { resolvePermissionsFromStorage, hasAnyPermission } from "./permissions";
 import { ROUTE_VIEW } from "./routePermissions";
+import { getDashboard } from "../api/dashboard";
+import { getInventoryList, getInventoryStats } from "../api/inventory";
 
 /**
- * Background-warm the TanStack Query cache right after login, for the
- * pages people land on most: Dashboard and Inventory.
- *
- * Kept deliberately small — this used to prefetch ~15 modules (orders,
- * warehouses, users, roles, permissions, etc.) unconditionally, which
- * fired a burst of requests for pages a given user often can't even see.
- * If you need to warm more modules, add them here ONE at a time and gate
- * each behind the same permission check used below, so we never fetch
- * data for a page the current user isn't allowed to open.
+ * Background-warm TanStack Query after login for Dashboard + Inventory only.
+ * Params must match the first paint of each page so keys collide (one cache entry).
  */
 export async function prefetchAppData(): Promise<void> {
   const perms = resolvePermissionsFromStorage();
@@ -23,33 +18,33 @@ export async function prefetchAppData(): Promise<void> {
 
   const tasks: Promise<unknown>[] = [];
 
-  // Dashboard — nearly everyone lands here first after login.
+  // Dashboard — same key as useDashboard({ range: "7m" })
   if (canView("/dashboard")) {
     tasks.push(
       queryClient.prefetchQuery({
         queryKey: queryKeys.dashboard("7m"),
-        queryFn: async () => {
-          const { default: api } = await import("../api/axios");
-          const { data } = await api.get("/dashboard", { params: { range: "7m" } });
-          return data;
-        },
+        queryFn: () => getDashboard("7m"),
         staleTime: 60_000,
       })
     );
   }
 
-  // Inventory list + stats — the other most-visited page.
+  // Inventory — must match Inventory.tsx first paint:
+  // page=1, pageSize=50, sortKey="sku", sortAsc=true, no filters
   if (canView("/products")) {
-    const invListParams = { page: 1, per_page: 15, sort: "updated_at", dir: "desc" };
+    const invListParams = {
+      page: 1,
+      per_page: 50,
+      sort: "sku",
+      dir: "asc" as const,
+      paginate: true,
+      with_images: true,
+    };
 
     tasks.push(
       queryClient.prefetchQuery({
         queryKey: queryKeys.inventory.list(invListParams as Record<string, unknown>),
-        queryFn: async () => {
-          const { default: api } = await import("../api/axios");
-          const { data } = await api.get("/inventories", { params: invListParams });
-          return data;
-        },
+        queryFn: () => getInventoryList(invListParams),
         staleTime: 60_000,
       })
     );
@@ -57,28 +52,21 @@ export async function prefetchAppData(): Promise<void> {
     tasks.push(
       queryClient.prefetchQuery({
         queryKey: queryKeys.inventory.stats,
-        queryFn: async () => {
-          const { default: api } = await import("../api/axios");
-          const { data } = await api.get("/inventories/stats");
-          return data;
-        },
+        queryFn: () => getInventoryStats(),
         staleTime: 60_000,
       })
     );
   }
 
-  // Fire-and-forget: log failures for visibility, but never block on them
-  // or let one failed prefetch stop the others (they already run in
-  // parallel via Promise.allSettled below).
   const results = await Promise.allSettled(tasks);
   results.forEach((r) => {
     if (r.status === "rejected") {
-      console.warn("[prefetch] a background prefetch failed (non-fatal):", r.reason);
+      console.warn("[prefetch] background prefetch failed (non-fatal):", r.reason);
     }
   });
 }
 
-/** Idle-friendly wrapper — waits a tick so the first paint wins. */
+/** Idle-friendly wrapper — first paint wins. */
 export function schedulePrefetch(delayMs = 800): void {
   if (typeof window === "undefined") return;
 
