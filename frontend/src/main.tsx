@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "./lib/queryClient";
+import RequirePermission from "./Pages/components/RequirePermission";
 
 import App from "./App.tsx";
 import "./Pages/css/Sidebar.css";
@@ -38,6 +39,11 @@ import Roles from "./Pages/System/Roles.tsx";
 import Settings from "./Pages/System/Settings.tsx";
 import Profile from "./Pages/components/Header/Profile.tsx";
 
+
+function guard(path: string, element: React.ReactNode) {
+  return <RequirePermission path={path}>{element}</RequirePermission>;
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
@@ -47,38 +53,25 @@ createRoot(document.getElementById("root")!).render(
           <Route path="/" element={<App />} />
 
           {/* ===================== MAIN ===================== */}
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/products" element={<Inventory />} />
-          <Route path="/inventory" element={<Navigate to="/products" replace />} />
-          <Route path="/stock-movements" element={<StockMovements />} />
-
-          {/* ===================== ORDERS ===================== */}
-          <Route path="/purchase-orders" element={<PurchaseOrders />} />
-          <Route path="/sales-orders" element={<SalesOrders />} />
-          <Route path="/goods-receiving" element={<Receiving />} />
-          <Route path="/shipping" element={<Shipping />} />
-          <Route path="/returns" element={<Returns />} />
-
-          {/* ===================== WAREHOUSE ===================== */}
-          <Route path="/warehouses" element={<Warehouses />} />
-          <Route path="/locations" element={<Navigate to="/warehouses" replace />} />
-          <Route path="/capacity" element={<Capacity />} />
-          <Route path="/cycle-count" element={<CycleCount />} />
-
-          {/* ===================== PARTNERS ===================== */}
-          <Route path="/suppliers" element={<Suppliers />} />
-          <Route path="/customers" element={<Customers />} />
-
-          {/* ===================== INSIGHTS ===================== */}
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/analytics" element={<Analytics />} />
-
-          {/* ===================== SYSTEM ===================== */}
-          <Route path="/users" element={<Users />} />
-          <Route path="/roles" element={<Roles />} />
-          <Route path="/profile" element={<Profile />} />
-          <Route path="/company-settings" element={<Settings />} />
-          <Route path="/settings" element={<Navigate to="/company-settings" replace />} />
+          <Route path="/dashboard" element={guard("/dashboard", <Dashboard />)} />
+          <Route path="/products" element={guard("/products", <Inventory />)} />
+          <Route path="/stock-movements" element={guard("/stock-movements", <StockMovements />)} />
+          <Route path="/purchase-orders" element={guard("/purchase-orders", <PurchaseOrders />)} />
+          <Route path="/sales-orders" element={guard("/sales-orders", <SalesOrders />)} />
+          <Route path="/goods-receiving" element={guard("/goods-receiving", <Receiving />)} />
+          <Route path="/shipping" element={guard("/shipping", <Shipping />)} />
+          <Route path="/returns" element={guard("/returns", <Returns />)} />
+          <Route path="/warehouses" element={guard("/warehouses", <Warehouses />)} />
+          <Route path="/capacity" element={guard("/capacity", <Capacity />)} />
+          <Route path="/cycle-count" element={guard("/cycle-count", <CycleCount />)} />
+          <Route path="/suppliers" element={guard("/suppliers", <Suppliers />)} />
+          <Route path="/customers" element={guard("/customers", <Customers />)} />
+          <Route path="/reports" element={guard("/reports", <Reports />)} />
+          <Route path="/analytics" element={guard("/analytics", <Analytics />)} />
+          <Route path="/users" element={guard("/users", <Users />)} />
+          <Route path="/roles" element={guard("/roles", <Roles />)} />
+          <Route path="/profile" element={guard("/profile", <Profile />)} />
+          <Route path="/company-settings" element={guard("/company-settings", <Settings />)} />
 
           {/* ---------- Legacy redirects (old paths → new) ---------- */}
           <Route path="/stockin" element={<Navigate to="/stock-movements" replace />} />

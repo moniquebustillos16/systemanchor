@@ -3,6 +3,7 @@ import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { fetchWarehousesCached } from "../../hooks/useWarehouses";
 import { useStockMovementsList } from "../../hooks/useStockMovements";
 import { invalidateStockMovements } from "../../lib/invalidate";
 import "../css/Main.css";
@@ -359,25 +360,19 @@ function StockMovements() {
     if (!force && warehousesCache.inflight) return warehousesCache.inflight as Promise<WarehouseOpt[]>;
 
     const work = (async () => {
-      // Only real endpoints — /locations/warehouses returns 404
-      const paths = [
-        "/warehouses?paginate=false&per_page=100",
-        "/warehouses?all=1&per_page=100",
-        "/warehouses",
-      ];
-      for (const p of paths) {
-        try {
-          const { data: json } = await api.get(p, { timeout: 12000 });
-          const rows = extractArr<WarehouseOpt>(json)
-            .map((w) => ({ id: String(w.id), code: w.code ?? "", name: w.name }))
-            .filter((w) => w.id)
-            .sort((a, b) => a.code.localeCompare(b.code));
-          if (rows.length > 0 || json != null) return rows;
-        } catch {
-          /* try next */
-        }
+      try {
+        const rows = (await fetchWarehousesCached())
+          .map((w) => ({
+            id: String(w.id ?? ""),
+            code: String(w.code ?? ""),
+            name: w.name != null ? String(w.name) : undefined,
+          }))
+          .filter((w) => w.id)
+          .sort((a, b) => a.code.localeCompare(b.code));
+        return rows;
+      } catch {
+        return [] as WarehouseOpt[];
       }
-      return [] as WarehouseOpt[];
     })();
 
     warehousesCache.inflight = work;

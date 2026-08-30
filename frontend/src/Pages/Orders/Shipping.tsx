@@ -6,11 +6,10 @@ import { useWarehouses } from "../../hooks/useWarehouses";
 import { useShipments } from "../../hooks/useOrders";
 import { invalidateShipments } from "../../lib/invalidate";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { fetchWarehousesCached } from "../../hooks/useWarehouses";
 import "../css/Orders.css";
 
 /* ── Types ─────────────────────────────────────────────────── */
- 
-
 type Customer = { id: string; name: string };
 type Warehouse = { id: string; code: string; name?: string };
 type ProductOpt = {
@@ -324,7 +323,7 @@ function Shipping() {
       const [soRes, prodRes, whRes] = await Promise.all([
         api.get("/sales-orders", { params: { per_page: 200, all: 1 } }),
         api.get("/products", { params: { per_page: 200 } }),
-        api.get("/warehouses", { params: { per_page: 200, all: 1 } }),
+        fetchWarehousesCached().then((rows) => ({ data: rows })),
       ]);
 
       const soList: SalesOrder[] = getItems(soRes.data).map((item) => {

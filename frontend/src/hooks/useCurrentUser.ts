@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getMe, type AuthUser } from "../api/auth";
-import { queryKeys } from "../lib/queryClient";
+import { queryClient, queryKeys } from "../lib/queryClient";
 import {
   hasAnyPermission,
   resolvePermissions,
@@ -149,4 +149,17 @@ export function usePermissions(options: { enabled?: boolean } = {}) {
     clear,
     user,
   };
+}
+
+/**
+ * Imperative read of the shared current-user cache (queryKeys.me).
+ * Use inside non-hook async flows (e.g. warehouse-scope loaders).
+ * Dedupes with useCurrentUser() / usePermissions().
+ */
+export async function fetchCurrentUserCached(): Promise<AuthUser> {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.me,
+    queryFn: getMe,
+    staleTime: 5 * 60_000,
+  });
 }

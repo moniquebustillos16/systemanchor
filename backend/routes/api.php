@@ -108,8 +108,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::delete('/user-warehouses/{id}', [UserWarehouseController::class, 'destroy'])
         ->middleware('permission:users.update');
 
-    Route::get('/users/{user}/warehouses', [UserWarehouseController::class, 'forUser'])
-        ->middleware('permission:users.view');
+    Route::get('/users/{user}/warehouses', [UserWarehouseController::class, 'forUser']);
 
     Route::put('/users/{user}/warehouses', [UserWarehouseController::class, 'sync'])
         ->middleware('permission:users.update');

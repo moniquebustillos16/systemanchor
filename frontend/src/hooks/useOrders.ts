@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { queryKeys } from "../lib/queryClient";
+import { queryClient, queryKeys } from "../lib/queryClient";
 import {
   getPurchaseOrders,
   getPurchaseOrderStats,
@@ -141,6 +141,57 @@ function buildMeta(
     per_page: d.per_page ?? d.meta?.per_page ?? perPage,
     total: d.total ?? d.meta?.total ?? rowsLen,
   };
+}
+export async function fetchPurchaseOrderStatsCached() {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.purchaseOrders.stats,
+    queryFn: () => getPurchaseOrderStats(),
+    staleTime: 60_000,
+  });
+}
+
+export async function fetchSalesOrderStatsCached() {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.salesOrders.stats,
+    queryFn: () => getSalesOrderStats(),
+    staleTime: 60_000,
+  });
+}
+
+export async function fetchGoodsReceiptStatsCached() {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.goodsReceipts.stats,
+    queryFn: () => getGoodsReceiptStats(),
+    staleTime: 60_000,
+  });
+}
+
+export async function fetchShipmentStatsCached() {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.shipments.stats,
+    queryFn: () => getShipmentStats(),
+    staleTime: 60_000,
+  });
+}
+
+export async function fetchPurchaseOrdersLookupCached(
+  params: Record<string, unknown> = { per_page: 200, all: 1 }
+) {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.purchaseOrders.list(params),
+    queryFn: () => getPurchaseOrders(params),
+    staleTime: 60_000,
+  });
+}
+
+export async function fetchSalesOrdersLookupCached(
+  params: Record<string, unknown> = { per_page: 200, all: 1 }
+) {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.salesOrders.list(params),
+    queryFn: () => getSalesOrders(params),
+    staleTime: 60_000,
+  });
 }
 
 /* ── Purchase orders ───────────────────────────────────────── */

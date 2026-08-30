@@ -36,6 +36,11 @@ export async function deleteUser(id: string) {
   return data;
 }
 
+export async function getUserWarehouses(id: string) {
+  const { data } = await api.get(`/users/${id}/warehouses`);
+  return data;
+}
+
 export async function updateUserWarehouses(
   id: string,
   payload: { access_all_warehouses: boolean; warehouse_ids: string[] }
@@ -44,9 +49,7 @@ export async function updateUserWarehouses(
   return data;
 }
 
-export async function getRoles(
-  params: Record<string, unknown> = {}
-) {
+export async function getRoles(params: Record<string, unknown> = {}) {
   const { data } = await api.get("/roles", {
     params: {
       per_page: 200,

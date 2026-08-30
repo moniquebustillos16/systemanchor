@@ -2,38 +2,25 @@ import { QueryClient } from "@tanstack/react-query";
 
 /**
  * Shared QueryClient for SystemAnchor (WMS).
- *
- * Defaults rationale (ops software, not social feed):
- * - staleTime 60s: match existing soft TTLs in Dashboard/Inventory (~60s).
- *   Cached data is shown immediately; background refetch only after 60s of "stale".
- * - gcTime 10 min: match hard sessionStorage bootstrap window; unused cache
- *   stays available if user navigates away and back within a shift window.
- * - retry 1: one retry for flaky network; avoid hammering Laravel on real 4xx/5xx.
- * - refetchOnWindowFocus: true — warehouse data changes while tab is backgrounded;
- *   only refetches if query is stale (respects staleTime).
- * - refetchOnReconnect: true — after network drop, sync once when online again.
- * - refetchOnMount: true — if data is stale when a page mounts, refresh in background
- *   while showing cache (stale-while-revalidate).
  */
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 60_000, // 60 seconds
-      gcTime: 10 * 60_000, // 10 minutes (formerly cacheTime)
+      staleTime: 60_000,
+      gcTime: 10 * 60_000,
       retry: 1,
       refetchOnWindowFocus: true,
       refetchOnReconnect: true,
       refetchOnMount: true,
     },
     mutations: {
-      retry: 0, // mutations (stock in/out, saves) should not auto-retry
+      retry: 0,
     },
   },
 });
 
 /**
  * Query key factory — use consistently across modules.
- * Keeps invalidation predictable.
  */
 export const queryKeys = {
   me: ["me"] as const,
@@ -60,6 +47,10 @@ export const queryKeys = {
     list: (params?: Record<string, unknown>) =>
       ["warehouses", "list", params ?? {}] as const,
   },
+
+  /** Per-user warehouse assignment scope: GET /users/:id/warehouses */
+  userWarehouses: (userId: string) =>
+    ["users", userId, "warehouses"] as const,
 
   purchaseOrders: {
     all: ["purchase-orders"] as const,
@@ -98,7 +89,6 @@ export const queryKeys = {
 
   categories: ["categories"] as const,
 
-  // ── Partners (Customers / Suppliers) ───────────────────────
   customers: {
     all: ["customers"] as const,
     list: (params?: Record<string, unknown>) =>
@@ -110,7 +100,6 @@ export const queryKeys = {
       ["suppliers", "list", params ?? {}] as const,
   },
 
-  // ── System: Users / Roles ─────────────────────────────────
   users: {
     all: ["users"] as const,
     stats: ["users", "stats"] as const,
@@ -118,7 +107,6 @@ export const queryKeys = {
       ["users", "list", params] as const,
   },
 
-    // ── System: Roles / Permissions ───────────────────────────
   roles: {
     all: ["roles"] as const,
     list: (params?: Record<string, unknown>) =>
@@ -132,15 +120,12 @@ export const queryKeys = {
     list: (params?: Record<string, unknown>) =>
       ["permissions", "list", params ?? {}] as const,
   },
-  
 
-    profile: {
+  profile: {
     all: ["profile"] as const,
     me: ["profile", "me"] as const,
     sessions: ["profile", "sessions"] as const,
     activity: ["profile", "activity"] as const,
     twoFactor: ["profile", "2fa"] as const,
   },
-
-  
 } as const;
