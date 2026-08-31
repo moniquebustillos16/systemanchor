@@ -4,6 +4,7 @@ import { queryClient, queryKeys } from "../lib/queryClient";
 import {
   getInventoryList,
   getInventoryStats,
+  getInventoryItem,
   getCategories,
   type InventoryListParams,
   type InventoryStats,
@@ -47,6 +48,17 @@ export async function fetchInventoryProductsCached(
   if (Array.isArray(data)) return data as Record<string, unknown>[];
   const d = data as { data?: Record<string, unknown>[] };
   return Array.isArray(d?.data) ? d.data : [];
+}
+
+/** Full product (with images) via shared React Query cache — used by View/Edit. */
+export async function fetchInventoryDetailCached(
+  id: string
+): Promise<Record<string, unknown>> {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.inventory.detail(String(id)),
+    queryFn: () => getInventoryItem(String(id)),
+    staleTime: 60_000,
+  });
 }
 
 export function useInventoryStats(options: { enabled?: boolean } = {}) {
@@ -164,10 +176,24 @@ export function useInventoryCategories(options: { enabled?: boolean } = {}) {
   const enabled = options.enabled !== false;
 
   return useQuery({
-    // Single source of truth — matches queryKeys.categories in queryClient.ts
     queryKey: queryKeys.categories,
     queryFn: () => getCategories(),
     enabled,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useInventoryDetail(
+  id: string | null | undefined,
+  options: { enabled?: boolean } = {}
+) {
+  const enabled = options.enabled !== false && !!id;
+
+  return useQuery({
+    queryKey: queryKeys.inventory.detail(String(id ?? "")),
+    queryFn: () => getInventoryItem(String(id)),
+    enabled,
+    staleTime: 60_000,
     placeholderData: (prev) => prev,
   });
 }

@@ -1,9 +1,13 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { queryClient, queryKeys } from "../lib/queryClient";
-import { getStockMovements, getProductOptions } from "../api/stockMovements";
+import {
+  getStockMovements,
+  getProductOptions,
+  createStockMovement,
+} from "../api/stockMovements";
+import { fetchWarehousesCached } from "./useWarehouses";
 import api from "../api/axios";
-
 
 export type UseStockMovementsListOptions = {
   page?: number;
@@ -22,6 +26,7 @@ function extractArr<T>(json: unknown): T[] {
   if (nested && Array.isArray(nested.data)) return nested.data as T[];
   return [];
 }
+
 export async function fetchStockProductOptionsCached(): Promise<unknown> {
   return queryClient.fetchQuery({
     queryKey: queryKeys.stockMovements.products,
@@ -37,6 +42,19 @@ export async function fetchStockProductOptionsCached(): Promise<unknown> {
     },
     staleTime: 5 * 60_000,
   });
+}
+
+export async function fetchStockWarehouseOptionsCached(): Promise<
+  { id: string; code?: string; name?: string }[]
+> {
+  const rows = await fetchWarehousesCached();
+  return rows
+    .map((w) => ({
+      id: String(w.id ?? ""),
+      code: w.code != null ? String(w.code) : undefined,
+      name: w.name != null ? String(w.name) : undefined,
+    }))
+    .filter((w) => w.id);
 }
 
 export function useStockMovementsList(options: UseStockMovementsListOptions = {}) {
@@ -144,30 +162,24 @@ export function useStockProductOptions(options: { enabled?: boolean } = {}) {
   });
 }
 
+/**
+ * Warehouse options for stock-movement forms.
+ * Shares the same underlying data as useWarehouses / fetchWarehousesCached
+ * so Inventory, Locations, and Stock Movements do not duplicate requests.
+ */
 export function useStockWarehouseOptions(options: { enabled?: boolean } = {}) {
   const enabled = options.enabled !== false;
 
   return useQuery({
-    queryKey: queryKeys.stockMovements.warehouses,
+    queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
     queryFn: async () => {
-      const paths = [
-        "/warehouses?paginate=false&per_page=100",
-        "/warehouses?all=1&per_page=100",
-        "/warehouses",
-      ];
-      for (const path of paths) {
-        try {
-          const { data } = await api.get(path);
-          const list = extractArr<{ id: string; code?: string; name?: string }>(data);
-          if (list.length) return list;
-        } catch {
-          /* try next */
-        }
-      }
-      return [];
+      const rows = await fetchWarehousesCached();
+      return rows;
     },
     enabled,
     staleTime: 5 * 60_000,
     placeholderData: (prev) => prev,
   });
 }
+
+export { createStockMovement };

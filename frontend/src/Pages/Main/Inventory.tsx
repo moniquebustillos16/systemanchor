@@ -2,8 +2,17 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
-import { usePermissions} from "../../hooks/useCurrentUser";
-import { useInventoryPage, useInventoryCategories } from "../../hooks/useInventory";
+import { usePermissions } from "../../hooks/useCurrentUser";
+import {
+  useInventoryPage,
+  useInventoryCategories,
+  fetchInventoryDetailCached,
+} from "../../hooks/useInventory";
+import {
+  createInventory,
+  updateInventory,
+  deleteInventory,
+} from "../../api/inventory";
 import { useQuery } from "@tanstack/react-query";
 import { queryClient, queryKeys } from "../../lib/queryClient";
 import { getWarehouses } from "../../api/warehouses";
@@ -323,33 +332,10 @@ function productToForm(p: Product): ProductForm {
 }
 
 type Toast = { type: "success" | "error"; title: string; message?: string } | null;
-/* ── Module cache (survives Strict Mode remounts) ─────────────── */
-/* List/stats owned by TanStack Query (useInventoryPage). Detail cache only for View/Edit. */
-
+/* List/stats owned by TanStack Query (useInventoryPage).
+ * Detail (View/Edit images) uses queryKeys.inventory.detail via fetchInventoryDetailCached.
+ */
 let invHasShownData = false;
-
-/** Cache full product (with images) so View/Edit don't refetch the same id. */
-const detailCache = new Map<string, { product: Product; at: number }>();
-const DETAIL_CACHE_TTL = 60_000;
-
-function getCachedDetail(id: string): Product | null {
-  const e = detailCache.get(String(id));
-  if (!e) return null;
-  if (Date.now() - e.at > DETAIL_CACHE_TTL) {
-    detailCache.delete(String(id));
-    return null;
-  }
-  return e.product;
-}
-
-function setCachedDetail(p: Product) {
-  if (!p?.id) return;
-  detailCache.set(String(p.id), {
-    product: normalizeProductImages(p),
-    at: Date.now(),
-  });
-}
-
 
 function Inventory() {
   const [tab, setTab] = useState<Tab>("products");
@@ -867,14 +853,13 @@ const warehousesForFilter = allWarehouses;
     }
   };
 
-      const openEdit = (p: Product) => {
+  const openEdit = (p: Product) => {
     if (!canUpdate) {
       showToast("error", "Permission denied", "You cannot edit products.");
       return;
     }
 
-    const cached = getCachedDetail(p.id);
-    const source = cached ?? p;
+    const source = p;
 
     setModalMode("edit");
     setEditingId(source.id);
@@ -897,14 +882,12 @@ const warehousesForFilter = allWarehouses;
       return;
     }
 
-    api
-      .get(`/inventories/${source.id}`)
-      .then((res) => {
-        const full = (res.data?.data ?? res.data) as Product;
+    // TanStack Query detail cache (queryKeys.inventory.detail)
+    void fetchInventoryDetailCached(source.id)
+      .then((raw) => {
+        const full = raw as unknown as Product;
         if (!full?.images) return;
         const normalized = normalizeProductImages(full);
-        setCachedDetail(normalized);
-        // Only apply if still editing this product
         setEditingId((currentId) => {
           if (currentId === source.id) applyImages(normalized);
           return currentId;
@@ -912,9 +895,8 @@ const warehousesForFilter = allWarehouses;
       })
       .catch(() => {});
   };
-      const openView = (p: Product) => {
-    const cached = getCachedDetail(p.id);
-    const initial = cached ?? p;
+  const openView = (p: Product) => {
+    const initial = p;
 
     setViewProduct(initial);
     setViewImageIndex(0);
@@ -924,19 +906,14 @@ const warehousesForFilter = allWarehouses;
 
     const requestedId = String(p.id);
 
-    api
-      .get(`/inventories/${p.id}`)
-      .then((res) => {
-        const full = (res.data?.data ?? res.data) as Product;
+    void fetchInventoryDetailCached(p.id)
+      .then((raw) => {
+        const full = raw as unknown as Product;
         if (!full?.id) return;
-
         const normalized = normalizeProductImages(full);
-        setCachedDetail(normalized);
-
-        // Only update UI if user is still viewing THIS product
         setViewProduct((current) => {
-          if (!current) return current; // user closed the modal
-          if (String(current.id) !== requestedId) return current; // switched product
+          if (!current) return current;
+          if (String(current.id) !== requestedId) return current;
           return normalized;
         });
       })
@@ -1091,8 +1068,7 @@ const warehousesForFilter = allWarehouses;
       try {
         let created: any;
         try {
-          const { data } = await api.post("/inventories", payload);
-          created = data;
+          created = await createInventory(payload);
         } catch (err: any) {
           const status = err.response?.status;
           if (status === 404 || status === 405) {
@@ -1107,8 +1083,8 @@ const warehousesForFilter = allWarehouses;
           }
         }
 
-        const body = created?.data ?? created;
-        const productId = body?.id ?? created?.id;
+        const body = (created?.data ?? created) as Partial<Product> & { id?: string };
+        const productId = body?.id ?? (created as { id?: string })?.id;
         if (!productId) throw new Error("Product created but no ID returned");
 
         // Upload images after we have a real id
@@ -1171,8 +1147,10 @@ const warehousesForFilter = allWarehouses;
       setSaving(false);
 
       try {
-        const { data } = await api.put(`/inventories/${editingId}`, payload);
-        const body = data?.data ?? data;
+        const body = (await updateInventory(
+          editingId,
+          payload
+        )) as Partial<Product> & { id?: string };
 
         if (pendingImages.length > 0) {
           const formData = new FormData();
@@ -1197,13 +1175,19 @@ const warehousesForFilter = allWarehouses;
         if (body && body.id) {
           setProducts((prev) =>
             prev.map((p) =>
-              p.id === editingId ? enrichProduct({ ...optimistic, ...body }) : p
+              p.id === editingId
+                ? enrichProduct({ ...optimistic, ...body, id: String(body.id) })
+                : p
             )
           );
         }
         /* Query invalidation handles cache */
         void refetchAll();
-        if (editingId) detailCache.delete(String(editingId));
+        if (editingId) {
+          void queryClient.removeQueries({
+            queryKey: queryKeys.inventory.detail(String(editingId)),
+          });
+        }
         void invalidateInventory();
       } catch (err: any) {
         // Rollback optimistic edit
@@ -1239,10 +1223,10 @@ const warehousesForFilter = allWarehouses;
     showToast("success", "Product deleted", `${doomed.name} was removed.`);
 
     try {
-      await api.delete(`/inventories/${doomed.id}`);
+      await deleteInventory(doomed.id);
       /* Query invalidation handles cache */
       void refetchAll();
-      detailCache.delete(String(doomed.id));
+      void queryClient.removeQueries({ queryKey: queryKeys.inventory.detail(String(doomed.id)) });
       void invalidateInventory();
     } catch (err: any) {
       setProducts(prevRows);

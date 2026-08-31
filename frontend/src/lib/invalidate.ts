@@ -8,6 +8,8 @@ async function invalidateDashboard() {
 export async function invalidateInventory() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.inventory.all }),
+    // Product options used by Stock Movements forms
+    queryClient.invalidateQueries({ queryKey: queryKeys.stockMovements.products }),
     invalidateDashboard(),
   ]);
 }
@@ -96,8 +98,6 @@ export async function invalidateSuppliers() {
 export async function invalidateUsers() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.users.all }),
-    // Roles list is independent; only invalidate if you ever mutate roles here
-    // queryClient.invalidateQueries({ queryKey: queryKeys.roles.all }),
   ]);
 }
 /** After create / update / delete role, or permission sync */
