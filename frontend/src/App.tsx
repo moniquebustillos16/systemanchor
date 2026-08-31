@@ -102,10 +102,6 @@ function App() {
             </li>
             <li>
               <span className="point-icon">◇</span>
-              Alerts before issues escalate
-            </li>
-            <li>
-              <span className="point-icon">◇</span>
               Secure roles for every team
             </li>
           </ul>
@@ -113,7 +109,7 @@ function App() {
 
         <footer className="brand-foot">
           <span className="status-pip" />
-          Production-ready · Encrypted · Audit-friendly
+          Production-ready  · Audit-friendly
         </footer>
       </aside>
 
