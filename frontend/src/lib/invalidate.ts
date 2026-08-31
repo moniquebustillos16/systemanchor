@@ -76,7 +76,6 @@ export async function invalidateReturns() {
 export async function invalidateCustomers() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.customers.all }),
-    // Sales orders may show customer names / filters
     queryClient.invalidateQueries({ queryKey: queryKeys.salesOrders.all }),
     invalidateDashboard(),
   ]);
@@ -86,7 +85,6 @@ export async function invalidateCustomers() {
 export async function invalidateSuppliers() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.suppliers.all }),
-    // Purchase orders / meta depend on suppliers
     queryClient.invalidateQueries({ queryKey: queryKeys.purchaseOrders.all }),
     invalidateDashboard(),
   ]);
@@ -100,14 +98,13 @@ export async function invalidateUsers() {
     queryClient.invalidateQueries({ queryKey: queryKeys.users.all }),
   ]);
 }
+
 /** After create / update / delete role, or permission sync */
 export async function invalidateRoles() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.roles.all }),
     queryClient.invalidateQueries({ queryKey: queryKeys.permissions.all }),
-    // Users page role filter / form may show role names
     queryClient.invalidateQueries({ queryKey: queryKeys.users.all }),
-    // Current user's effective permissions may have changed
     queryClient.invalidateQueries({ queryKey: queryKeys.me }),
   ]);
 }

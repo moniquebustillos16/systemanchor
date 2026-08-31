@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import { usePermissions } from "../../hooks/useCurrentUser";
@@ -214,9 +214,7 @@ function num(v: number | string | null | undefined): number {
 /* ===================== COMPONENT ===================== */
 
 function StockMovements() {
-  const [history, setHistory] = useState<ApiMovement[]>([]);
   // No full-page loading gate (show shell immediately after login)
-  const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -329,23 +327,10 @@ function StockMovements() {
 
 
 
-  // History on filter/search change + initial (paint cache first)  /* Phase 6: TanStack Query → history */
-    // Once we have shown any rows this session, never full-page load again
-  const hasDataRef = useRef(history.length > 0);
-
-  useEffect(() => {
-    if (history.length > 0) hasDataRef.current = true;
-  }, [history.length]);
-
-  // Sync TanStack rows → local history (keep previous while empty+loading)
-  useEffect(() => {
-    if (!movementRows) return;
-    if (movementRows.length === 0 && movLoading) return;
-
-    setHistory(movementRows as ApiMovement[]);
-    setLoading(false);
-    setError(null);
-  }, [movementRows, movLoading]);
+  /* Server data: TanStack Query is the single source of truth.
+   * placeholderData on the query keeps prior rows while refetching. */
+  const history = movementRows as ApiMovement[];
+  const loading = movLoading && history.length === 0;
 
   // Seed form defaults once product/warehouse options arrive
   useEffect(() => {
@@ -359,12 +344,9 @@ function StockMovements() {
     if (!toWh) setToWh(warehouses[1]?.id || warehouses[0].id);
   }, [warehouses, warehouseId, fromWh, toWh]);
 
-  // Never block the page on first fetch — keep previous rows / empty state
   useEffect(() => {
-    if (history.length > 0 || !movLoading) {
-      setLoading(false);
-    }
-  }, [movLoading, history.length]);
+    if (!movLoading) setError(null);
+  }, [movLoading]);
 
   const selectedProduct = useMemo(
     () => products.find((p) => p.id === productId) ?? null,
