@@ -3,8 +3,7 @@ import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { useUsers, useUserStats, useRoles } from "../../hooks/useUsers";
-import { useQuery } from "@tanstack/react-query";
-import { queryKeys } from "../../lib/queryClient";
+import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidateUsers } from "../../lib/invalidate";
 import "../css/System.css";
 
@@ -264,32 +263,6 @@ function getErrorMessage(
 }
 
 /* ── Warehouses via shared query key ─────────────────────────── */
-function useWarehousesList() {
-  return useQuery({
-    queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
-    queryFn: async () => {
-      const { data: j } = await api.get("/warehouses", {
-        params: { per_page: 200, all: 1 },
-      });
-      const raw = Array.isArray(j)
-        ? j
-        : Array.isArray(j?.data)
-          ? j.data
-          : Array.isArray(j?.data?.data)
-            ? j.data.data
-            : [];
-      return raw.map((w: any) => ({
-        id: String(w.id),
-        name: String(w.name ?? ""),
-        code: w.code != null ? String(w.code) : undefined,
-        location: w.location ?? w.address ?? null,
-      })) as Warehouse[];
-    },
-    staleTime: 60_000,
-    placeholderData: (prev) => prev,
-  });
-}
-
 function Users() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -335,7 +308,7 @@ function Users() {
 
   const statsQ = useUserStats();
   const rolesQ = useRoles();
-  const warehousesQ = useWarehousesList();
+  const warehousesQ = useWarehouses({ enabled: true, perPage: 200 });
 
   const users = useMemo(
     () => (usersQ.rows as Record<string, unknown>[]).map(normalizeUser),
@@ -351,7 +324,23 @@ function Users() {
     [rolesQ.rows]
   );
 
-  const warehouses = warehousesQ.data ?? [];
+  /* Always an array — shared warehouse cache may hold raw API shapes from other pages */
+  const warehouses: Warehouse[] = useMemo(() => {
+    const rows = warehousesQ.rows ?? [];
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((w) => ({
+        id: String(w.id ?? ""),
+        name: String(w.name ?? w.code ?? ""),
+        code: w.code != null ? String(w.code) : undefined,
+        location:
+          (w.location as string | null | undefined) ??
+          (w.address as string | null | undefined) ??
+          null,
+      }))
+      .filter((w) => w.id);
+  }, [warehousesQ.rows]);
+
   const stats = statsQ.stats;
 
   const loading = usersQ.isLoading && users.length === 0;
@@ -404,7 +393,10 @@ function Users() {
 
   const warehouseNameById = useMemo(() => {
     const m = new Map<string, Warehouse>();
-    for (const w of warehouses) m.set(w.id, w);
+    if (!Array.isArray(warehouses)) return m;
+    for (const w of warehouses) {
+      if (w?.id) m.set(w.id, w);
+    }
     return m;
   }, [warehouses]);
 
