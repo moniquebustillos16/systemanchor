@@ -166,9 +166,13 @@ function Locations() {
   /* ── Permissions ─────────────────────────────────────────── */
   const { can, isLoaded: permsLoaded } = usePermissions();
 
-  const canView = can("warehouses.view", "locations.view");
-  const canCreate = can("warehouses.create", "locations.create");
-  const canUpdate = can("warehouses.update", "locations.update");
+  // Backend gates /warehouses (GET/POST/PUT/DELETE) behind capacity.* — see
+  // WarehouseController routes in routes/api.php — so capacity.* must be
+  // checked here too, or a capacity.*-only role can't use this page at all,
+  // and a warehouses.*-only role gets 403s from every API call it makes.
+  const canView = can("capacity.view", "warehouses.view", "locations.view");
+  const canCreate = can("capacity.create", "warehouses.create", "locations.create");
+  const canUpdate = can("capacity.update", "warehouses.update", "locations.update");
   const canDelete = canUpdate; // same gate as backend soft-delete path
 
   /* ── Stats & filtered list (client-side over full list) ──── */
