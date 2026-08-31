@@ -4,6 +4,10 @@ A full-stack warehouse management system (WMS) for tracking inventory, orders, a
 
 SystemAnchor covers the core operational loop of a warehouse: products come in through **Purchase Orders → Goods Receiving**, get tracked as **Inventory** across **Warehouses/Zones/Bins**, move through **Stock Movements** and **Cycle Counts**, and go out through **Sales Orders → Shipping**, with **Returns** handled on the way back. All of it sits behind a role-and-permission system enforced on the server, not just hidden in the UI.
 
+**Live demo:** [systemanchor.duckdns.org](http://systemanchor.duckdns.org)
+
+> **Status:** Active portfolio project — both the codebase and the AWS deployment are still being iterated on and hardened. See [Roadmap / known limitations](#roadmap--known-limitations) below.
+
 ## Why I built this
 
 I wanted to build something bigger than a CRUD demo — a system with real operational logic (stock never goes negative, orders move through actual status pipelines, permissions are enforced per-endpoint) and a frontend that manages server state properly instead of `useEffect` + `fetch` everywhere. This project was also where I learned to use TanStack Query as an actual caching layer — query keys, invalidation, prefetching — rather than just a `fetch` replacement.
@@ -91,6 +95,20 @@ email:    admin@systemanchor.com
 password: SystemAnchor@123
 ```
 
+## Deployment
+
+SystemAnchor is deployed on **AWS**, using an EC2 `t3.micro` instance (Ubuntu 24.04 LTS) in the `us-east-1c` Availability Zone. The instance hosts the entire stack — the built React/Vite frontend, the Laravel backend, PHP 8.4-FPM, and PostgreSQL — behind **Nginx**, which acts as the single entry point:
+
+- Requests to the main domain are served directly as static files from the compiled React build.
+- Requests under `/api/` are routed to the Laravel backend, processed by PHP-FPM.
+- Laravel connects to **PostgreSQL 16** over `localhost:5432` on the same instance.
+- The instance sits in the SystemAnchor VPC/subnet, with an **AWS Security Group** controlling inbound network access, and an **IAM instance role** (`SystemAnchorEC2Role`) attached so the instance can access AWS resources without any credentials stored in the application itself.
+- The app is publicly reachable via a **DuckDNS** domain pointed at the instance: [systemanchor.duckdns.org](http://systemanchor.duckdns.org).
+
+In short: public traffic → Nginx → (static frontend) or (PHP-FPM → Laravel → PostgreSQL).
+
+**This is an ongoing portfolio project, and the deployment is a work in progress alongside the code.** It currently runs without HTTPS/TLS and without a host-level firewall (UFW is inactive; access control is security-group-only) — closing those gaps, along with automating the deploy process, are the next infrastructure items planned. See the roadmap below.
+
 ## Project structure
 
 ```
@@ -110,11 +128,13 @@ systemanchor/
 
 ## Roadmap / known limitations
 
-This is an actively evolving portfolio project. Current focus areas:
+This is an actively evolving portfolio project — both the application code and the AWS deployment are ongoing work, not a finished state. Current focus areas:
 
 - Expanding automated test coverage (currently minimal)
 - Consolidating a couple of ad-hoc client-side caches into the TanStack Query layer
 - Adding CI (lint + test on push)
+- Enabling HTTPS and a proper firewall (UFW) on the production instance
+- Automating deploys instead of manual pull + build
 
 ## License
 
