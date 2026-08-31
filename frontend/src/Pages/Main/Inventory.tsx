@@ -378,12 +378,11 @@ function Inventory() {
   dir: sortAsc ? "asc" : "desc",
 });
     
-  const [products, setProducts] = useState<Product[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+  /* Server data: TanStack Query is the single source of truth.
+   * optimisticProducts is only a short-lived UI overlay for create/edit/delete;
+   * it is cleared whenever list.rows updates from the server. */
+  const [optimisticProducts, setOptimisticProducts] = useState<Product[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [total, setTotal] = useState(0);
-  const [lastPage, setLastPage] = useState(1);
 
   // Filter meta via TanStack Query (single source of truth)
   const categoriesQuery = useInventoryCategories({ enabled: true });
@@ -493,9 +492,41 @@ const warehousesForFilter = allWarehouses;
     "inventory.update"
   );
 
+  /* ── List + stats: TanStack Query is the single source of truth ── */
+  const serverProducts: Product[] = useMemo(() => {
+    if (!list.rows) return [];
+    // Keep previous rows while a fetch is in progress (placeholderData on the query
+    // already preserves prior pages; empty+loading → show nothing until first paint)
+    if (list.rows.length === 0 && invLoading) return [];
+    return (list.rows as Product[]).map((r) => normalizeProductImages(r));
+  }, [list.rows, invLoading]);
+
+  // Drop optimistic overlay when server list updates
+  useEffect(() => {
+    setOptimisticProducts(null);
+    setError(null);
+  }, [list.rows, list.meta.total, list.meta.last_page]);
+
+  const products: Product[] = optimisticProducts ?? serverProducts;
+  const total = list.meta.total;
+  const lastPage = list.meta.last_page;
+  const stats: Stats | null = useMemo(
+    () =>
+      queryStats
+        ? {
+            total_products: queryStats.total_products,
+            low_stock: queryStats.low_stock,
+            out_of_stock: queryStats.out_of_stock,
+            inventory_value: queryStats.inventory_value,
+          }
+        : null,
+    [queryStats]
+  );
+  // Skeletons only when we have no rows to show yet
+  const loading = products.length === 0 && invLoading;
+
   // Once we have shown any data this session, never use full-page loader again
-  // (same idea as Dashboard: loading && !lastUpdated)
-    const hasDataRef = useRef(
+  const hasDataRef = useRef(
     products.length > 0 || total > 0 || !!stats
   );
 
@@ -505,15 +536,12 @@ const warehousesForFilter = allWarehouses;
     }
   }, [products.length, total]);
 
-    // Module-level flag: once true, stays true for the whole tab session
+  // Module-level flag: once true, stays true for the whole tab session
   // even after navigate away and back to Inventory
   if (products.length > 0 || total > 0) {
     invHasShownData = true;
   }
-  if (
-    !invHasShownData &&
-    (products.length > 0 || !!stats)
-  ) {
+  if (!invHasShownData && (products.length > 0 || !!stats)) {
     invHasShownData = true;
   }
 
@@ -522,44 +550,6 @@ const warehousesForFilter = allWarehouses;
     !invHasShownData &&
     products.length === 0 &&
     invLoading;
-
-    /* ── List + stats: TanStack Query only (useInventoryPage). Meta: Query hooks above. ── */
-
-  /* Meta loaded via useInventoryCategories / warehousesQuery / suppliersQuery */
-
-
-  useEffect(() => {
-    if (!list.rows) return;
-
-    // Keep previous rows while a fetch is in progress (avoids empty flash + full-page loader)
-    if (list.rows.length === 0 && invLoading) return;
-
-    const rows = (list.rows as Product[]).map((r) => normalizeProductImages(r));
-    setProducts(rows);
-    setTotal(list.meta.total);
-    setLastPage(list.meta.last_page);
-    setLoading(false);
-    setError(null);
-  }, [list.rows, list.meta, invLoading]);
-
-  useEffect(() => {
-    if (!queryStats) return;
-    setStats({
-      total_products: queryStats.total_products,
-      low_stock: queryStats.low_stock,
-      out_of_stock: queryStats.out_of_stock,
-      inventory_value: queryStats.inventory_value,
-    });
-  }, [queryStats]);
-
-  useEffect(() => {
-    // Skeletons only when we have no rows to show yet
-    if (products.length === 0 && invLoading) {
-      setLoading(true);
-    } else {
-      setLoading(false);
-    }
-  }, [invLoading, products.length]);
 
   useEffect(() => {
     return () => {
@@ -672,8 +662,8 @@ const warehousesForFilter = allWarehouses;
 
     // Optimistic: remove from UI immediately
     setExistingImages((prev) => prev.filter((i) => i.id !== img.id));
-    setProducts((prev) =>
-      prev.map((p) => {
+    setOptimisticProducts((prev) =>
+      (prev ?? products).map((p) => {
         if (!p.images?.some((i) => i.id === img.id) && p.primary_image?.id !== img.id) {
           return p;
         }
@@ -702,7 +692,7 @@ const warehousesForFilter = allWarehouses;
     } catch (err: any) {
       // Rollback
       setExistingImages(prevExisting);
-      setProducts(prevProducts);
+      setOptimisticProducts(prevProducts);
       setViewProduct(prevView);
       const body = err?.response?.data;
       showToast(
@@ -726,8 +716,8 @@ const warehousesForFilter = allWarehouses;
     setExistingImages((prev) =>
       prev.map((i) => ({ ...i, is_primary: i.id === img.id }))
     );
-    setProducts((prev) =>
-      prev.map((p) => {
+    setOptimisticProducts((prev) =>
+      (prev ?? products).map((p) => {
         if (!p.images?.some((i) => i.id === img.id)) return p;
         const images = (p.images ?? []).map((i) => ({
           ...i,
@@ -743,7 +733,7 @@ const warehousesForFilter = allWarehouses;
       await api.post(`/product-images/${img.id}/primary`);
     } catch (err: any) {
       setExistingImages(prevExisting);
-      setProducts(prevProducts);
+      setOptimisticProducts(prevProducts);
       const body = err?.response?.data;
       showToast(
         "error",
@@ -1055,10 +1045,8 @@ const warehousesForFilter = allWarehouses;
       });
 
       const prevRows = products;
-      const prevTotal = total;
-
-      setProducts((prev) => [optimisticRow, ...prev]);
-      setTotal((t) => t + 1);
+      
+      setOptimisticProducts((prev) => [optimisticRow, ...(prev ?? products)]);
       setModalOpen(false);
       setForm(emptyForm());
       clearImages();
@@ -1110,14 +1098,13 @@ const warehousesForFilter = allWarehouses;
 
         // Replace temp row with server data
         const realRow = enrichProduct({ ...payload, ...body, id: String(productId) });
-        setProducts((prev) => prev.map((p) => (p.id === tempId ? realRow : p)));
+        setOptimisticProducts((prev) => (prev ?? products).map((p) => (p.id === tempId ? realRow : p)));
         /* Query invalidation handles cache */
         void refetchAll();
         void invalidateInventory();
       } catch (err: any) {
         // Rollback optimistic create
-        setProducts(prevRows);
-        setTotal(prevTotal);
+        setOptimisticProducts(prevRows);
         console.error("[Inventory] create failed:", err);
         const body = err?.response?.data;
         const msg =
@@ -1139,7 +1126,7 @@ const warehousesForFilter = allWarehouses;
         id: editingId,
       });
 
-      setProducts((prev) => prev.map((p) => (p.id === editingId ? optimistic : p)));
+      setOptimisticProducts((prev) => (prev ?? products).map((p) => (p.id === editingId ? optimistic : p)));
       setModalOpen(false);
       setForm(emptyForm());
       clearImages();
@@ -1173,8 +1160,8 @@ const warehousesForFilter = allWarehouses;
 
         // Merge authoritative server body
         if (body && body.id) {
-          setProducts((prev) =>
-            prev.map((p) =>
+          setOptimisticProducts((prev) =>
+      (prev ?? products).map((p) =>
               p.id === editingId
                 ? enrichProduct({ ...optimistic, ...body, id: String(body.id) })
                 : p
@@ -1192,7 +1179,7 @@ const warehousesForFilter = allWarehouses;
       } catch (err: any) {
         // Rollback optimistic edit
         if (prevSnapshot) {
-          setProducts((prev) => prev.map((p) => (p.id === editingId ? prevSnapshot : p)));
+          setOptimisticProducts((prev) => (prev ?? products).map((p) => (p.id === editingId ? prevSnapshot : p)));
         }
         console.error("[Inventory] update failed:", err);
         const body = err?.response?.data;
@@ -1216,9 +1203,7 @@ const warehousesForFilter = allWarehouses;
     setDeleting(true);
 
     const prevRows = products;
-    const prevTotal = total;
-    setProducts((prev) => prev.filter((p) => p.id !== doomed.id));
-    setTotal((t) => Math.max(0, t - 1));
+        setOptimisticProducts((prev) => (prev ?? products).filter((p) => p.id !== doomed.id));
     setConfirmDelete(null);
     showToast("success", "Product deleted", `${doomed.name} was removed.`);
 
@@ -1229,8 +1214,7 @@ const warehousesForFilter = allWarehouses;
       void queryClient.removeQueries({ queryKey: queryKeys.inventory.detail(String(doomed.id)) });
       void invalidateInventory();
     } catch (err: any) {
-      setProducts(prevRows);
-      setTotal(prevTotal);
+      setOptimisticProducts(prevRows);
       console.error("[Inventory] delete failed:", err);
       const body = err.response?.data;
       showToast(
