@@ -12,11 +12,7 @@ SystemAnchor covers the core operational loop of a warehouse: products come in t
 
 I wanted to build something bigger than a CRUD demo — a system with real operational logic (stock never goes negative, orders move through actual status pipelines, permissions are enforced per-endpoint) and a frontend that manages server state properly instead of `useEffect` + `fetch` everywhere. This project was also where I learned to use TanStack Query as an actual caching layer — query keys, invalidation, prefetching — rather than just a `fetch` replacement.
 
-## Screenshots
 
-<!-- Add 2–4 screenshots or a short GIF here, e.g.: -->
-<!-- ![Dashboard](docs/screenshots/dashboard.png) -->
-<!-- ![Inventory](docs/screenshots/inventory.png) -->
 
 ## Features
 
