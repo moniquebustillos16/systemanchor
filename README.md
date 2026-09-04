@@ -89,10 +89,6 @@ email:    admin@systemanchor.com
 password: SystemAnchor@123
 ```
 
-## Environment configuration
-
-Do not commit `.env`, production credentials, database passwords, cloud keys, or API tokens.
-
 ### Backend
 
 Important production variables include:
