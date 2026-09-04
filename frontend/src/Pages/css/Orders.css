@@ -1551,6 +1551,170 @@
     max-width: none;
   }
 }
+
+/* ---------- Shipping page ---------- */
+.shipping-page .content {
+  max-width: 1680px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.shipping-page .page-header {
+  align-items: center;
+}
+
+.shipping-page .page-subtitle {
+  max-width: 720px;
+  line-height: 1.5;
+}
+
+.shipping-page .shipping-stats .stat-card {
+  min-height: 124px;
+}
+
+.shipping-page .shipping-card {
+  overflow: hidden;
+}
+
+.shipping-page .shipping-toolbar {
+  justify-content: space-between;
+}
+
+.shipping-page .shipping-toolbar .table-filters {
+  margin-left: auto;
+}
+
+.shipping-page .orders-table th:last-child,
+.shipping-page .orders-table td:last-child {
+  min-width: 132px;
+}
+
+@media (max-width: 700px) {
+  .shipping-page .content {
+    padding: 20px 16px 32px;
+  }
+
+  .shipping-page .page-header {
+    align-items: stretch;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .shipping-page .page-title {
+    font-size: 22px;
+  }
+
+  .shipping-page .page-actions,
+  .shipping-page .page-actions .btn {
+    width: 100%;
+  }
+
+  .shipping-page .page-actions .btn {
+    justify-content: center;
+  }
+
+  .shipping-page .shipping-stats {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .shipping-page .shipping-stats .stat-card {
+    min-height: 108px;
+    padding: 15px 14px;
+  }
+
+  .shipping-page .shipping-toolbar,
+  .shipping-page .shipping-toolbar .table-search,
+  .shipping-page .shipping-toolbar .table-filters,
+  .shipping-page .shipping-toolbar .table-filters select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .shipping-page .shipping-toolbar .table-filters {
+    margin-left: 0;
+  }
+}
+
+/* ---------- Purchase Orders page ---------- */
+.purchase-orders-page .content {
+  max-width: 1680px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.purchase-orders-page .page-subtitle {
+  max-width: 720px;
+  line-height: 1.5;
+}
+
+.purchase-orders-page .purchase-orders-stats .stat-card {
+  min-height: 124px;
+}
+
+.purchase-orders-page .purchase-orders-card {
+  overflow: hidden;
+}
+
+.purchase-orders-page .purchase-orders-toolbar {
+  justify-content: space-between;
+}
+
+.purchase-orders-page .purchase-orders-toolbar .table-filters {
+  margin-left: auto;
+}
+
+.purchase-orders-page .orders-table th:last-child,
+.purchase-orders-page .orders-table td:last-child {
+  min-width: 116px;
+}
+
+@media (max-width: 700px) {
+  .purchase-orders-page .content {
+    padding: 20px 16px 32px;
+  }
+
+  .purchase-orders-page .page-header {
+    align-items: stretch;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .purchase-orders-page .page-title {
+    font-size: 22px;
+  }
+
+  .purchase-orders-page .page-actions,
+  .purchase-orders-page .page-actions .btn {
+    width: 100%;
+  }
+
+  .purchase-orders-page .page-actions .btn {
+    justify-content: center;
+  }
+
+  .purchase-orders-page .purchase-orders-stats {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .purchase-orders-page .purchase-orders-stats .stat-card {
+    min-height: 108px;
+    padding: 15px 14px;
+  }
+
+  .purchase-orders-page .purchase-orders-toolbar,
+  .purchase-orders-page .purchase-orders-toolbar .table-search,
+  .purchase-orders-page .purchase-orders-toolbar .table-filters,
+  .purchase-orders-page .purchase-orders-toolbar .table-filters select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .purchase-orders-page .purchase-orders-toolbar .table-filters {
+    margin-left: 0;
+  }
+}
 /* ============================================================
    Orders page — enhanced UI (PO / SO modals, actions, polish)
    ============================================================ */

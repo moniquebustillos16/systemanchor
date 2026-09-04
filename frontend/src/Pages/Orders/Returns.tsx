@@ -5,6 +5,7 @@ import api from "../../api/axios";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { useReturns } from "../../hooks/useOrders";
 import { invalidateReturns } from "../../lib/invalidate";
+import { fetchCachedLookup, lookupKeys } from "../../lib/cachedLookups";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Orders.css";
 
@@ -317,12 +318,12 @@ function Returns() {
   const loadLookups = useCallback(async () => {
     try {
       const [soSettled, prodSettled] = await Promise.allSettled([
-        api.get("/sales-orders", { params: { per_page: 200 } }),
-        api.get("/products", { params: { per_page: 200 } }),
+        fetchCachedLookup("/sales-orders", lookupKeys.salesOrders, { per_page: 200, all: 1 }),
+        fetchCachedLookup("/products", lookupKeys.products, { per_page: 200, paginate: false }),
       ]);
 
       if (soSettled.status === "fulfilled") {
-        const json = soSettled.value.data;
+        const json = soSettled.value;
         const list: SalesOrder[] = getItems(json).map((item) => {
           const row = asRecord(item);
           const soNumber = String(row.so_number ?? row.id);
@@ -369,7 +370,7 @@ function Returns() {
       }
 
       if (prodSettled.status === "fulfilled") {
-        const json = prodSettled.value.data;
+        const json = prodSettled.value;
         const list: ProductOpt[] = getItems(json)
           .map((p) => {
             const row = asRecord(p);
@@ -1334,6 +1335,7 @@ function Returns() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

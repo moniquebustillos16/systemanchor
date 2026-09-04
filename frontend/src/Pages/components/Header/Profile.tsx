@@ -1132,7 +1132,10 @@ function Profile() {
       )}
 
       {toast && (
-        <div className={`profile-toast profile-toast--${toast.type}`}>{toast.message}</div>
+        <div className={`profile-toast profile-toast--${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
+          {toast.message}
+        </div>
       )}
     </div>
   );

@@ -635,6 +635,7 @@ function Customers() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

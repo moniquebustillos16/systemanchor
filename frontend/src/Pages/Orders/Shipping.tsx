@@ -1,15 +1,16 @@
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
-import { useWarehouses } from "../../hooks/useWarehouses";
-import { useReturns } from "../../hooks/useOrders";
-import { invalidateReturns } from "../../lib/invalidate";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { useWarehouses } from "../../hooks/useWarehouses";
+import { useShipments } from "../../hooks/useOrders";
+import { invalidateShipments } from "../../lib/invalidate";
+import { fetchCachedLookup, lookupKeys } from "../../lib/cachedLookups";
 import "../css/Orders.css";
 
 /* ── Types ─────────────────────────────────────────────────── */
-
 type Customer = { id: string; name: string };
 type Warehouse = { id: string; code: string; name?: string };
 type ProductOpt = {
@@ -41,21 +42,21 @@ type SalesOrder = {
   lines?: SoLine[];
 };
 
-type ReturnItem = {
+type Shipment = {
   id: string;
-  return_number: string;
+  shipment_number: string;
   sales_order_id: string | null;
+  carrier: string;
+  tracking: string | null;
   warehouse_id: string | null;
-  reason: string;
-  disposition: string;
-  items: number;
+  packages: number;
   date: string;
   status: string;
   sales_order?: SalesOrder | null;
   warehouse?: Warehouse | null;
 };
 
-type RetLine = {
+type ShipLine = {
   key: string;
   product_id: string;
   product_name: string;
@@ -63,14 +64,15 @@ type RetLine = {
   unit_price: string;
 };
 
-type RetForm = {
+type ShipForm = {
   sales_order_id: string;
   warehouse_id: string;
-  reason: string;
-  disposition: string;
+  carrier: string;
+  tracking: string;
+  packages: string;
   date: string;
   status: string;
-  lines: RetLine[];
+  lines: ShipLine[];
 };
 
 type ToastState = {
@@ -80,19 +82,12 @@ type ToastState = {
 };
 
 /* ── Constants ─────────────────────────────────────────────── */
-const REASONS = [
-  "Damaged in transit",
-  "Wrong item shipped",
-  "Quality issue",
-  "Customer changed mind",
-  "Other",
-] as const;
-
-const DISPOSITIONS = [
-  "Inspect & restock",
-  "Replace",
-  "Refund",
-  "Scrap",
+const CARRIERS = [
+  "LBC Express",
+  "J&T Express",
+  "JRS Express",
+  "Ninja Van",
+  "Grab Express",
 ] as const;
 
 const UUID_RE =
@@ -101,9 +96,9 @@ const UUID_RE =
 const PAGE_SIZE = 15;
 
 let lineKeySeq = 0;
-const newLineKey = () => `ret-line-${Date.now()}-${++lineKeySeq}`;
+const newLineKey = () => `ship-line-${Date.now()}-${++lineKeySeq}`;
 
-const emptyLine = (): RetLine => ({
+const emptyLine = (): ShipLine => ({
   key: newLineKey(),
   product_id: "",
   product_name: "",
@@ -111,31 +106,38 @@ const emptyLine = (): RetLine => ({
   unit_price: "0",
 });
 
-const emptyForm = (): RetForm => ({
+const emptyForm = (): ShipForm => ({
   sales_order_id: "",
   warehouse_id: "",
-  reason: REASONS[0],
-  disposition: DISPOSITIONS[0],
+  carrier: CARRIERS[0],
+  tracking: "",
+  packages: "1",
   date: new Date().toISOString().slice(0, 10),
-  status: "pending",
+  status: "processing",
   lines: [emptyLine()],
 });
 
-/* ── Permission helpers ────────────────────────────────────── */
-
-
 /* ── Domain helpers ────────────────────────────────────────── */
 function getItems(json: unknown): unknown[] {
+  if (!json) return [];
   if (Array.isArray(json)) return json;
+
   const o = json as Record<string, unknown>;
-  if (Array.isArray(o?.data)) return o.data as unknown[];
-  if (
-    o?.data &&
-    typeof o.data === "object" &&
-    Array.isArray((o.data as { data?: unknown }).data)
-  ) {
-    return (o.data as { data: unknown[] }).data;
+
+  if (Array.isArray(o.data)) return o.data as unknown[];
+  if (Array.isArray(o.items)) return o.items as unknown[];
+  if (Array.isArray(o.results)) return o.results as unknown[];
+  if (Array.isArray(o.rows)) return o.rows as unknown[];
+
+  const nested = o.data;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const n = nested as Record<string, unknown>;
+    if (Array.isArray(n.data)) return n.data as unknown[];
+    if (Array.isArray(n.items)) return n.items as unknown[];
+    if (Array.isArray(n.results)) return n.results as unknown[];
+    if (Array.isArray(n.rows)) return n.rows as unknown[];
   }
+
   return [];
 }
 
@@ -217,8 +219,17 @@ const IconBox = () => (
   </svg>
 );
 
+const IconTruck = () => (
+  <svg {...svg} width="15" height="15">
+    <rect x="1" y="3" width="15" height="13" rx="2" />
+    <path d="M16 8h4l3 3v5h-7V8z" />
+    <circle cx="5.5" cy="18.5" r="2.5" />
+    <circle cx="18.5" cy="18.5" r="2.5" />
+  </svg>
+);
+
 /* ── Component ─────────────────────────────────────────────── */
-function Returns() {
+function Shipping() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -226,18 +237,17 @@ function Returns() {
 
   const [salesOrders, setSalesOrders] = useState<SalesOrder[]>([]);
   const [products, setProducts] = useState<ProductOpt[]>([]);
+  const [formWarehouses, setFormWarehouses] = useState<Warehouse[]>([]);
 
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState<RetForm>(emptyForm);
+  const [form, setForm] = useState<ShipForm>(emptyForm);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [closingId, setClosingId] = useState<string | null>(null);
+  const [deliveringId, setDeliveringId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
-  // Sales Orders pattern: warehouse dropdown from useWarehouses (API scopes non-admins)
   const { rows: whRows, refetch: refetchWarehouses } = useWarehouses({
     enabled: true,
-    perPage: 200,
   });
 
   const warehouses: Warehouse[] = useMemo(
@@ -251,14 +261,15 @@ function Returns() {
             name: row.name != null ? String(row.name) : undefined,
           };
         })
-        .filter((w) => w.id)
-        .sort((a, b) => (a.code || "").localeCompare(b.code || "")),
+        .filter((w) => w.id),
     [whRows]
   );
 
-  /* ── Cached list + stats ─────────────────────────────────── */
+  const warehouseOptions =
+    formWarehouses.length > 0 ? formWarehouses : warehouses;
+
   const {
-    rows: returnRows,
+    rows: shipRows,
     meta,
     stats,
     isLoading: loading,
@@ -266,7 +277,7 @@ function Returns() {
     isError,
     error: queryError,
     refetchAll,
-  } = useReturns({
+  } = useShipments({
     page,
     perPage: PAGE_SIZE,
     search: debouncedSearch,
@@ -274,11 +285,11 @@ function Returns() {
     enabled: true,
   });
 
-  const rows = returnRows as unknown as ReturnItem[];
+  const rows = shipRows as unknown as Shipment[];
   const total = meta.total;
   const lastPage = meta.last_page;
   const error = isError
-    ? (queryError as Error)?.message ?? "Failed to load returns"
+    ? (queryError as Error)?.message ?? "Failed to load shipments"
     : null;
 
   const showToast = useCallback(
@@ -289,21 +300,12 @@ function Returns() {
     []
   );
 
-  /* ── Permissions ─────────────────────────────────────────── */
-  const { can, isLoaded: permsLoaded } = usePermissions();
+  /* ── Permissions: shared /me cache used by every protected page ── */
+  const { can: canPermission, isLoaded: permsLoaded } = usePermissions();
+  const canView = canPermission("shipping.view", "shipments.view");
+  const canCreate = canPermission("shipping.create", "shipments.create");
+  const canUpdate = canPermission("shipping.update", "shipments.update");
 
-   const canView = can("returns.view",
-    "rma.view",
-    "return.view"
-  );
-  const canCreate = can("returns.create",
-    "rma.create",
-    "return.create"
-  );
-  const canUpdate = can("returns.update",
-    "rma.update",
-    "return.update"
-  );
   /* ── Debounced search ────────────────────────────────────── */
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -313,83 +315,109 @@ function Returns() {
     return () => window.clearTimeout(t);
   }, [search]);
 
-  /* ── Lookups (SO + products) ─────────────────────────────── */
+  /* ── Lookups: SO + products + warehouses (for create form) ─ */
   const loadLookups = useCallback(async () => {
     try {
-      const [soSettled, prodSettled] = await Promise.allSettled([
-        api.get("/sales-orders", { params: { per_page: 200 } }),
-        api.get("/products", { params: { per_page: 200 } }),
+      const [soJson, prodJson, whJson] = await Promise.all([
+        fetchCachedLookup("/sales-orders", lookupKeys.salesOrders, { per_page: 200, all: 1 }),
+        fetchCachedLookup("/products", lookupKeys.products, { per_page: 200, paginate: false }),
+        fetchCachedLookup("/warehouses", lookupKeys.warehouses, { per_page: 200, all: 1 }),
       ]);
 
-      if (soSettled.status === "fulfilled") {
-        const json = soSettled.value.data;
-        const list: SalesOrder[] = getItems(json).map((item) => {
-          const row = asRecord(item);
-          const soNumber = String(row.so_number ?? row.id);
-          const cached = readCachedSoLines(soNumber);
-          const customer = row.customer as
-            | { id?: unknown; name?: string }
-            | null
-            | undefined;
-          const warehouse = row.warehouse as
-            | { id?: unknown; code?: string; name?: string }
-            | null
-            | undefined;
+        const soList: SalesOrder[] = getItems(soJson).map((item) => {
+        const row = asRecord(item);
+        const soNumber = String(row.so_number ?? row.number ?? row.id);
+        const cached = readCachedSoLines(soNumber);
+        const customer = asRecord(row.customer);
+        const warehouse = asRecord(row.warehouse);
 
-          return {
-            id: String(row.id),
-            so_number: soNumber,
-            customer_id:
-              (row.customer_id as string | null) ??
-              (customer?.id != null ? String(customer.id) : null),
-            warehouse_id:
-              (row.warehouse_id as string | null) ??
-              (warehouse?.id != null ? String(warehouse.id) : null),
-            items: row.items as number | undefined,
-            status: row.status as string | undefined,
-            customer: customer
-              ? { id: String(customer.id), name: customer.name ?? "" }
-              : null,
-            warehouse: warehouse
+        return {
+          id: String(row.id),
+          so_number: soNumber,
+          customer_id:
+            row.customer_id != null
+              ? String(row.customer_id)
+              : customer.id != null
+                ? String(customer.id)
+                : null,
+          warehouse_id:
+            row.warehouse_id != null
+              ? String(row.warehouse_id)
+              : warehouse.id != null
+                ? String(warehouse.id)
+                : null,
+          items: Number(row.items ?? 0) || undefined,
+          status: row.status != null ? String(row.status) : undefined,
+          customer:
+            customer.id != null
               ? {
-                  id: String(warehouse.id),
-                  code: warehouse.code ?? warehouse.name ?? "",
-                  name: warehouse.name,
+                  id: String(customer.id),
+                  name: String(customer.name ?? ""),
                 }
               : null,
-            lines:
-              Array.isArray(row.lines) && (row.lines as SoLine[]).length > 0
-                ? (row.lines as SoLine[])
-                : cached.length
-                  ? cached
-                  : [],
-          };
-        });
-        setSalesOrders(list);
-      }
+          warehouse:
+            warehouse.id != null
+              ? {
+                  id: String(warehouse.id),
+                  code: String(
+                    warehouse.code ?? warehouse.name ?? warehouse.id
+                  ),
+                  name:
+                    warehouse.name != null
+                      ? String(warehouse.name)
+                      : undefined,
+                }
+              : null,
+          lines:
+            Array.isArray(row.lines) && (row.lines as SoLine[]).length > 0
+              ? (row.lines as SoLine[])
+              : cached.length
+                ? cached
+                : [],
+        };
+      });
 
-      if (prodSettled.status === "fulfilled") {
-        const json = prodSettled.value.data;
-        const list: ProductOpt[] = getItems(json)
-          .map((p) => {
-            const row = asRecord(p);
-            return {
-              id: String(row.id),
-              sku: String(row.sku ?? ""),
-              name: String(row.name ?? ""),
-              price: row.price as number | string | undefined,
-              qty: row.qty as number | string | undefined,
-              status: row.status as string | undefined,
-            };
-          })
-          .filter((p) => !p.status || p.status === "active")
-          .sort((a, b) => a.name.localeCompare(b.name));
-        setProducts(list);
-      }
+      const prodList: ProductOpt[] = getItems(prodJson)
+        .map((p) => {
+          const row = asRecord(p);
+          return {
+            id: String(row.id),
+            sku: String(row.sku ?? ""),
+            name: String(row.name ?? ""),
+            price: row.price as number | string | undefined,
+            qty: row.qty as number | string | undefined,
+            status: row.status != null ? String(row.status) : undefined,
+          };
+        })
+        .filter((p) => !p.status || p.status === "active")
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const whList: Warehouse[] = getItems(whJson)
+        .map((w) => {
+          const row = asRecord(w);
+          return {
+            id: String(row.id ?? ""),
+            code: String(row.code ?? row.name ?? row.id ?? ""),
+            name: row.name != null ? String(row.name) : undefined,
+          };
+        })
+        .filter((w) => w.id);
+
+      setSalesOrders(soList);
+      setProducts(prodList);
+      setFormWarehouses(whList);
+
+      return { soList, prodList, whList };
     } catch (e) {
-      console.error("[Returns] lookups failed:", e);
+      console.error("[Shipping] lookups failed:", e);
+      showToast("error", "Lookups failed", "Could not load form options.");
+      return {
+        soList: [] as SalesOrder[],
+        prodList: [] as ProductOpt[],
+        whList: [] as Warehouse[],
+      };
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     void loadLookups();
@@ -407,17 +435,20 @@ function Returns() {
       (p) =>
         p.name.toLowerCase() === label ||
         p.sku.toLowerCase() === label ||
-        p.name.toLowerCase().includes(label)
+        p.name.toLowerCase().includes(label) ||
+        label.includes(p.name.toLowerCase())
     );
   };
 
-  const soToRetLines = (so: SalesOrder | undefined): RetLine[] => {
+  const soToShipLines = (so: SalesOrder | undefined): ShipLine[] => {
     if (!so) return [emptyLine()];
-    const source =
+
+    const sourceLines =
       so.lines && so.lines.length > 0
         ? so.lines
         : readCachedSoLines(so.so_number);
-    if (source.length === 0) {
+
+    if (sourceLines.length === 0) {
       return [
         {
           ...emptyLine(),
@@ -425,37 +456,39 @@ function Returns() {
         },
       ];
     }
-    return source.map((ln) => {
+
+    return sourceLines.map((ln) => {
       const matched = resolveProduct(ln);
+      const qty = Math.max(1, Number(ln.qty) || 1);
+      const stock =
+        matched?.qty != null
+          ? Math.max(0, Math.floor(Number(matched.qty) || 0))
+          : null;
+      const safeQty =
+        stock !== null ? Math.min(qty, Math.max(1, stock || 1)) : qty;
+      const price =
+        matched != null
+          ? Number(matched.price) || Number(ln.unit_price) || 0
+          : Number(ln.unit_price) || 0;
+
       return {
         key: newLineKey(),
         product_id: matched?.id ?? (ln.product_id ? String(ln.product_id) : ""),
         product_name: matched?.name ?? ln.product_name ?? ln.name ?? "Product",
-        qty: String(Math.max(1, Number(ln.qty) || 1)),
-        unit_price: String(
-          matched != null
-            ? Number(matched.price) || Number(ln.unit_price) || 0
-            : Number(ln.unit_price) || 0
-        ),
+        qty: String(stock === 0 ? 0 : safeQty),
+        unit_price: String(price),
       };
     });
   };
 
-  const applySo = (soId: string, base?: RetForm): RetForm => {
-    const so = salesOrders.find((s) => s.id === soId);
-    return {
-      ...(base ?? form),
-      sales_order_id: soId,
-      warehouse_id:
-        so?.warehouse_id ??
-        so?.warehouse?.id ??
-        base?.warehouse_id ??
-        form.warehouse_id,
-      lines: soToRetLines(so),
-    };
-  };
+  const shippableOrders = salesOrders.filter(
+    (s) =>
+      !s.status ||
+      !["cancelled", "completed"].includes(String(s.status).toLowerCase())
+  );
+  const soOptions = shippableOrders.length > 0 ? shippableOrders : salesOrders;
 
-  const openAdd = () => {
+  const openAdd = async () => {
     if (!canCreate) {
       showToast(
         "error",
@@ -466,43 +499,101 @@ function Returns() {
     }
 
     setFormError(null);
-    const first = salesOrders[0];
+    setShowAdd(true);
+
+    const { soList, whList } = await loadLookups();
+    void refetchWarehouses();
+
+    const shippable = soList.filter(
+      (s) =>
+        !s.status ||
+        !["cancelled", "completed"].includes(String(s.status).toLowerCase())
+    );
+    const options = shippable.length > 0 ? shippable : soList;
+    const first = options[0];
+
     if (first) {
-      setForm(
-        applySo(first.id, {
-          ...emptyForm(),
-          warehouse_id:
-            first.warehouse_id ??
-            first.warehouse?.id ??
-            warehouses[0]?.id ??
-            "",
-        })
-      );
+      setForm({
+        ...emptyForm(),
+        sales_order_id: first.id,
+        warehouse_id:
+          first.warehouse_id ??
+          first.warehouse?.id ??
+          whList[0]?.id ??
+          "",
+        lines: soToShipLines(first),
+      });
     } else {
       setForm({
         ...emptyForm(),
-        warehouse_id: warehouses[0]?.id ?? "",
+        warehouse_id: whList[0]?.id ?? "",
       });
     }
-    setShowAdd(true);
   };
 
-  const onSoChange = (soId: string) => setForm((f) => applySo(soId, f));
+  const onSoChange = (soId: string) => {
+    const so = salesOrders.find((s) => s.id === soId);
+    setForm((f) => ({
+      ...f,
+      sales_order_id: soId,
+      warehouse_id:
+        so?.warehouse_id ?? so?.warehouse?.id ?? f.warehouse_id,
+      lines: soToShipLines(so),
+    }));
+  };
 
-  const setLine = (key: string, patch: Partial<RetLine>) => {
+  const selectedSo = salesOrders.find((s) => s.id === form.sales_order_id);
+
+  const setLine = (key: string, patch: Partial<ShipLine>) => {
     setForm((f) => ({
       ...f,
       lines: f.lines.map((l) => (l.key === key ? { ...l, ...patch } : l)),
     }));
   };
 
+  const stockOf = (productId: string): number | null => {
+    const p = products.find((x) => x.id === productId);
+    if (!p || p.qty == null || p.qty === "") return null;
+    const n = Number(p.qty);
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : null;
+  };
+
   const onProductChange = (key: string, productId: string) => {
     const p = products.find((x) => x.id === productId);
+    const stock =
+      p?.qty != null ? Math.max(0, Math.floor(Number(p.qty) || 0)) : null;
+    const currentQty = Number(form.lines.find((l) => l.key === key)?.qty) || 1;
+    const safeQty =
+      stock !== null
+        ? Math.min(Math.max(1, currentQty), Math.max(1, stock || 1))
+        : currentQty;
     setLine(key, {
       product_id: productId,
       product_name: p?.name ?? "",
       unit_price: p ? String(Number(p.price) || 0) : "0",
+      qty: String(stock === 0 ? 0 : safeQty),
     });
+  };
+
+  const onQtyChange = (key: string, raw: string) => {
+    const line = form.lines.find((l) => l.key === key);
+    if (!line) return;
+    let qty = Number(raw);
+    if (!Number.isFinite(qty) || qty < 0) qty = 0;
+    qty = Math.floor(qty);
+    const stock = line.product_id ? stockOf(line.product_id) : null;
+    if (stock !== null && qty > stock) qty = stock;
+    setLine(key, { qty: String(qty) });
+  };
+
+  const lineStockError = (line: ShipLine): string | null => {
+    if (!line.product_id) return null;
+    const stock = stockOf(line.product_id);
+    if (stock === null) return null;
+    const qty = Number(line.qty) || 0;
+    if (stock <= 0) return "Out of stock";
+    if (qty > stock) return `Only ${stock.toLocaleString()} in stock`;
+    return null;
   };
 
   const addLine = () =>
@@ -513,10 +604,12 @@ function Returns() {
       lines: f.lines.length <= 1 ? f.lines : f.lines.filter((l) => l.key !== key),
     }));
 
-  const selectedSo = salesOrders.find((s) => s.id === form.sales_order_id);
-  const itemsTotal = form.lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+  const unitsOnForm = form.lines.reduce(
+    (s, l) => s + (Number(l.qty) || 0),
+    0
+  );
 
-  /* ── Create RMA ──────────────────────────────────────────── */
+  /* ── Create shipment ─────────────────────────────────────── */
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
@@ -525,45 +618,62 @@ function Returns() {
       setFormError("Sales order is required.");
       return;
     }
+    if (!form.carrier) {
+      setFormError("Carrier is required.");
+      return;
+    }
 
-    const validLines = form.lines.filter(
+    const shipLines = form.lines.filter(
       (l) => l.product_id && l.product_name.trim() && Number(l.qty) > 0
     );
-    if (validLines.length === 0) {
+    if (shipLines.length === 0) {
       setFormError(
         "Select at least one product with quantity greater than zero."
       );
       return;
     }
 
+    for (const line of shipLines) {
+      const stock = stockOf(line.product_id);
+      const qty = Number(line.qty) || 0;
+      if (stock !== null) {
+        if (stock <= 0) {
+          setFormError(`“${line.product_name}” is out of stock.`);
+          return;
+        }
+        if (qty > stock) {
+          setFormError(
+            `“${line.product_name}” — requested ${qty.toLocaleString()}, only ${stock.toLocaleString()} in stock.`
+          );
+          return;
+        }
+      }
+    }
+
     const so = salesOrders.find((s) => s.id === form.sales_order_id);
-    const totalItems = validLines.reduce(
-      (s, l) => s + (Number(l.qty) || 0),
-      0
-    );
+    const pkgs = Math.max(1, parseInt(form.packages, 10) || 1);
 
     setSaving(true);
     try {
-      const { data: body } = await api.post("/returns", {
+      const { data: body } = await api.post("/shipments", {
         sales_order_id: form.sales_order_id,
         warehouse_id: form.warehouse_id || null,
-        reason: form.reason,
-        disposition: form.disposition,
-        items: totalItems,
+        carrier: form.carrier,
+        tracking: form.tracking.trim() || null,
+        packages: pkgs,
         date: form.date || null,
-        status: form.status || "pending",
+        status: form.status || "processing",
       });
 
       const data = (body.data ?? body) as Record<string, unknown>;
-      const retId = String(data.id ?? "");
-      const retNumber = String(
-        data.return_number ?? `RMA-${Date.now().toString().slice(-6)}`
+      const shipId = String(data.id ?? "");
+      const shipNumber = String(
+        data.shipment_number ?? `SH-${Date.now().toString().slice(-6)}`
       );
 
       const customerId = so?.customer_id ?? so?.customer?.id ?? null;
-
       await Promise.all(
-        validLines.map(async (l) => {
+        shipLines.map(async (l) => {
           try {
             await api.post("/product-transactions", {
               product_id:
@@ -571,15 +681,16 @@ function Returns() {
                   ? l.product_id
                   : null,
               product_name: l.product_name.trim(),
-              transaction_type: "return",
-              reference_id: retId && UUID_RE.test(retId) ? retId : null,
-              reference_number: retNumber,
+              transaction_type: "shipment",
+              reference_id:
+                shipId && UUID_RE.test(shipId) ? shipId : null,
+              reference_number: shipNumber,
               partner_id:
                 customerId && UUID_RE.test(customerId) ? customerId : null,
               partner_type: "customer",
               quantity: Number(l.qty) || 0,
               unit_price: Number(l.unit_price) || 0,
-              status: form.status || "pending",
+              status: form.status || "processing",
             });
           } catch {
             /* non-blocking */
@@ -590,45 +701,50 @@ function Returns() {
       setShowAdd(false);
       showToast(
         "success",
-        "RMA created",
-        `${retNumber} · ${so?.so_number ?? "SO"} · ${totalItems} items`
+        "Shipment created",
+        `${shipNumber} · ${so?.so_number ?? "SO"} · ${pkgs} pkg`
       );
       setPage(1);
-      await invalidateReturns();
+      await invalidateShipments();
       await refetchAll();
+      void loadLookups();
     } catch (err: unknown) {
       const body = (err as { response?: { data?: any } })?.response?.data;
       const msg =
         body?.message ||
         (body?.errors && Object.values(body.errors).flat().join(" ")) ||
         (err as Error)?.message ||
-        "Failed to create return";
+        "Failed to create shipment";
       setFormError(String(msg));
     } finally {
       setSaving(false);
     }
   };
 
-  /* ── Close RMA ───────────────────────────────────────────── */
-  const completeReturn = async (id: string, number: string) => {
+  /* ── Mark delivered ──────────────────────────────────────── */
+  const markDelivered = async (id: string, number: string) => {
     if (!canUpdate) {
-      showToast("error", "Permission denied", "You cannot update returns.");
+      showToast(
+        "error",
+        "Permission denied",
+        "You cannot update shipments."
+      );
       return;
     }
-    setClosingId(id);
+    setDeliveringId(id);
     try {
-      await api.post(`/returns/${id}/complete`);
-      showToast("success", "RMA closed", `${number} closed.`);
-      await invalidateReturns();
+      await api.post(`/shipments/${id}/deliver`);
+      showToast("success", "Delivered", `${number} marked delivered.`);
+      await invalidateShipments();
       await refetchAll();
     } catch (err) {
       showToast(
         "error",
         "Update failed",
-        err instanceof Error ? err.message : "Could not close RMA"
+        err instanceof Error ? err.message : "Could not mark delivered"
       );
     } finally {
-      setClosingId(null);
+      setDeliveringId(null);
     }
   };
 
@@ -636,12 +752,12 @@ function Returns() {
     void refetchAll();
     void loadLookups();
     void refetchWarehouses();
-    showToast("success", "Refreshed", "Returns reloaded.");
+    showToast("success", "Refreshed", "Shipments reloaded.");
   };
 
   /* ── Render ──────────────────────────────────────────────── */
   return (
-    <div className="orders-page">
+    <div className="orders-page shipping-page">
       <Sidebar />
       <div className="main-wrapper">
         <Topbar />
@@ -654,17 +770,16 @@ function Returns() {
               <p style={{ fontWeight: 600, marginBottom: 6 }}>Access restricted</p>
               <p className="text-muted" style={{ margin: 0 }}>
                 You do not have permission to view this page. Ask an admin to
-                grant <code>returns.view</code>.
+                grant <code>shipping.view</code>.
               </p>
             </div>
           )}
 
-          <div className="page-header">
+          <div className="page-header shipping-header">
             <div>
-              <h1 className="page-title">Returns</h1>
+              <h1 className="page-title">Shipping</h1>
               <p className="page-subtitle">
-                RMA intake · link SO · product lines as return transactions ·
-                restock or refund
+                Link SO · pack lines · shipment transactions · carriers
                 {isFetching && !loading ? " · refreshing…" : ""}
               </p>
             </div>
@@ -681,9 +796,9 @@ function Returns() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={openAdd}
+                  onClick={() => void openAdd()}
                 >
-                  <IconPlus /> New Return
+                  <IconPlus /> New Shipment
                 </button>
               )}
             </div>
@@ -706,7 +821,7 @@ function Returns() {
 
           {canView && (
             <>
-              <div className="stats-grid">
+              <div className="stats-grid shipping-stats">
                 <button
                   type="button"
                   className={`stat-card${status === "all" ? " is-active" : ""}`}
@@ -716,22 +831,22 @@ function Returns() {
                     setPage(1);
                   }}
                 >
-                  <div className="stat-label">Returns</div>
+                  <div className="stat-label">Shipments</div>
                   <div className="stat-value">
                     {loading ? "…" : stats.all.toLocaleString()}
                   </div>
-                  <div className="stat-hint">All RMAs</div>
+                  <div className="stat-hint">All documents</div>
                 </button>
                 <button
                   type="button"
                   className={`stat-card${
-                    status === "pending" || status === "processing"
+                    status === "processing" || status === "shipped"
                       ? " is-active"
                       : ""
                   }`}
                   style={{ cursor: "pointer", textAlign: "left", width: "100%" }}
                   onClick={() => {
-                    setStatus(status === "pending" ? "all" : "pending");
+                    setStatus(status === "processing" ? "all" : "processing");
                     setPage(1);
                   }}
                 >
@@ -752,31 +867,31 @@ function Returns() {
                     setPage(1);
                   }}
                 >
-                  <div className="stat-label">Closed</div>
+                  <div className="stat-label">Delivered</div>
                   <div className="stat-value success">
-                    {loading ? "…" : stats.closed.toLocaleString()}
+                    {loading ? "…" : stats.delivered.toLocaleString()}
                   </div>
                   <div className="stat-hint">Completed</div>
                 </button>
                 <div className="stat-card">
-                  <div className="stat-label">Items</div>
+                  <div className="stat-label">Packages</div>
                   <div className="stat-value">
-                    {loading ? "…" : stats.items.toLocaleString()}
+                    {loading ? "…" : stats.packages.toLocaleString()}
                   </div>
-                  <div className="stat-hint">Units returned</div>
+                  <div className="stat-hint">Total packs</div>
                 </div>
               </div>
 
-              <div className="card">
-                <div className="table-toolbar">
+              <div className="card shipping-card">
+                <div className="table-toolbar shipping-toolbar">
                   <div className="table-search">
                     <IconSearch />
                     <input
                       type="text"
-                      placeholder="Search RMA, SO, customer…"
+                      placeholder="Search shipment, SO, carrier, tracking…"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      aria-label="Search returns"
+                      aria-label="Search shipments"
                     />
                   </div>
                   <div className="table-filters">
@@ -789,8 +904,8 @@ function Returns() {
                       aria-label="Filter by status"
                     >
                       <option value="all">All status</option>
-                      <option value="pending">Pending</option>
                       <option value="processing">Processing</option>
+                      <option value="shipped">Shipped</option>
                       <option value="completed">Completed</option>
                       <option value="cancelled">Cancelled</option>
                     </select>
@@ -801,20 +916,20 @@ function Returns() {
                   <table className="orders-table">
                     <thead>
                       <tr>
-                        <th>RMA</th>
+                        <th>Shipment</th>
                         <th>SO</th>
                         <th>Customer</th>
-                        <th>Reason</th>
+                        <th>Carrier</th>
+                        <th>Tracking</th>
                         <th>Warehouse</th>
-                        <th>Items</th>
-                        <th>Disposition</th>
+                        <th>Packages</th>
                         <th>Date</th>
                         <th>Status</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {loading ? (
+                      {loading && rows.length === 0 ? (
                         Array.from({ length: 5 }).map((_, i) => (
                           <tr key={`skel-${i}`}>
                             {Array.from({ length: 10 }).map((__, j) => (
@@ -822,7 +937,7 @@ function Returns() {
                                 <div
                                   className="skel"
                                   style={{
-                                    width: j === 0 ? 100 : 56,
+                                    width: j === 0 ? 110 : 56,
                                     height: 12,
                                     background:
                                       "linear-gradient(90deg, var(--sa-cream-2) 25%, var(--sa-beige) 50%, var(--sa-cream-2) 75%)",
@@ -848,15 +963,15 @@ function Returns() {
                             >
                               <IconBox />
                               <p style={{ margin: 0, fontWeight: 550 }}>
-                                No returns match your filters
+                                No shipments match your filters
                               </p>
                               {canCreate && (
                                 <button
                                   type="button"
                                   className="btn btn-primary"
-                                  onClick={openAdd}
+                                  onClick={() => void openAdd()}
                                 >
-                                  <IconPlus /> New Return
+                                  <IconPlus /> New Shipment
                                 </button>
                               )}
                             </div>
@@ -864,7 +979,7 @@ function Returns() {
                         </tr>
                       ) : (
                         rows.map((r) => {
-                          const canClose =
+                          const canDeliver =
                             r.status !== "completed" &&
                             r.status !== "cancelled";
                           return (
@@ -874,15 +989,15 @@ function Returns() {
                                   <div
                                     className="product-avatar"
                                     style={{
-                                      background: "rgba(184, 92, 74, 0.1)",
-                                      color: "var(--sa-clay)",
+                                      background: "rgba(196, 160, 122, 0.14)",
+                                      color: "var(--sa-brown)",
                                     }}
                                   >
-                                    <IconBox />
+                                    <IconTruck />
                                   </div>
                                   <div>
                                     <div className="product-name">
-                                      {r.return_number}
+                                      {r.shipment_number}
                                     </div>
                                   </div>
                                 </div>
@@ -893,10 +1008,14 @@ function Returns() {
                               <td>
                                 {r.sales_order?.customer?.name ?? "—"}
                               </td>
-                              <td>{r.reason}</td>
+                              <td>{r.carrier}</td>
+                              <td>
+                                <code className="track-code">
+                                  {r.tracking || "—"}
+                                </code>
+                              </td>
                               <td>{r.warehouse?.code ?? "—"}</td>
-                              <td className="fw-600">{r.items}</td>
-                              <td>{r.disposition}</td>
+                              <td className="fw-600">{r.packages}</td>
                               <td className="text-muted">
                                 {formatDateLong(r.date)}
                               </td>
@@ -908,21 +1027,23 @@ function Returns() {
                                 </span>
                               </td>
                               <td>
-                                {canClose && canUpdate ? (
+                                {canDeliver && canUpdate ? (
                                   <button
                                     type="button"
                                     className="btn btn-sm btn-primary"
-                                    disabled={closingId === r.id}
+                                    disabled={deliveringId === r.id}
                                     onClick={() =>
-                                      void completeReturn(
+                                      void markDelivered(
                                         r.id,
-                                        r.return_number
+                                        r.shipment_number
                                       )
                                     }
                                   >
-                                    {closingId === r.id ? "…" : "Close RMA"}
+                                    {deliveringId === r.id
+                                      ? "…"
+                                      : "Mark Delivered"}
                                   </button>
-                                ) : canClose && !canUpdate ? (
+                                ) : canDeliver && !canUpdate ? (
                                   <span
                                     className="text-muted"
                                     style={{ fontSize: 12 }}
@@ -1002,7 +1123,7 @@ function Returns() {
             }}
             role="dialog"
             aria-modal="true"
-            aria-labelledby="ret-create-title"
+            aria-labelledby="ship-create-title"
           >
             <div
               style={{
@@ -1014,10 +1135,10 @@ function Returns() {
             >
               <div>
                 <h2
-                  id="ret-create-title"
+                  id="ship-create-title"
                   style={{ margin: 0, fontSize: 18, fontWeight: 650 }}
                 >
-                  New Return (RMA)
+                  New Shipment
                 </h2>
                 <p
                   style={{
@@ -1026,7 +1147,7 @@ function Returns() {
                     color: "var(--sa-muted)",
                   }}
                 >
-                  Link a sales order · select products · return transactions
+                  Link a sales order · pack lines · shipment transactions
                 </p>
               </div>
               <button
@@ -1059,19 +1180,20 @@ function Returns() {
             <form onSubmit={handleAdd}>
               <div className="form-grid-2">
                 <div className="form-field" style={{ gridColumn: "1 / -1" }}>
-                  <label htmlFor="ret-so">Sales Order *</label>
+                  <label htmlFor="ship-so">Sales Order *</label>
                   <select
-                    id="ret-so"
+                    id="ship-so"
                     required
                     value={form.sales_order_id}
                     onChange={(e) => onSoChange(e.target.value)}
                     disabled={saving}
                   >
                     <option value="">— Select SO —</option>
-                    {salesOrders.map((o) => (
+                    {soOptions.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.so_number}
                         {o.customer?.name ? ` · ${o.customer.name}` : ""}
+                        {o.items != null ? ` · ${o.items} units` : ""}
                         {o.status ? ` (${o.status})` : ""}
                       </option>
                     ))}
@@ -1103,35 +1225,80 @@ function Returns() {
                 </div>
 
                 <div className="form-field">
-                  <label htmlFor="ret-wh">Warehouse</label>
+                  <label htmlFor="ship-wh">Warehouse</label>
                   <select
-                    id="ret-wh"
+                    id="ship-wh"
                     value={form.warehouse_id}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, warehouse_id: e.target.value }))
                     }
                     disabled={saving}
-                    required={warehouses.length > 0}
                   >
-                    {warehouses.length === 0 ? (
-                      <option value="">— No warehouses —</option>
-                    ) : (
-                      <>
-                        <option value="">— Select warehouse —</option>
-                        {warehouses.map((w) => (
-                          <option key={w.id} value={w.id}>
-                            {w.name ? `${w.code} — ${w.name}` : w.code}
-                          </option>
-                        ))}
-                      </>
-                    )}
+                    <option value="">— None —</option>
+                    {warehouseOptions.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name ? `${w.code} — ${w.name}` : w.code}
+                      </option>
+                    ))}
+                  </select>
+                  {warehouseOptions.length === 0 && (
+                    <span className="po-field-hint">
+                      No warehouses loaded.
+                    </span>
+                  )}
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="ship-carrier">Carrier *</label>
+                  <select
+                    id="ship-carrier"
+                    required
+                    value={form.carrier}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, carrier: e.target.value }))
+                    }
+                    disabled={saving}
+                  >
+                    {CARRIERS.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
                 <div className="form-field">
-                  <label htmlFor="ret-date">Date</label>
+                  <label htmlFor="ship-tracking">Tracking No.</label>
                   <input
-                    id="ret-date"
+                    id="ship-tracking"
+                    type="text"
+                    placeholder="Auto or enter"
+                    value={form.tracking}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, tracking: e.target.value }))
+                    }
+                    disabled={saving}
+                  />
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="ship-packages">Packages</label>
+                  <input
+                    id="ship-packages"
+                    type="number"
+                    min={1}
+                    value={form.packages}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, packages: e.target.value }))
+                    }
+                    disabled={saving}
+                  />
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="ship-date">Date</label>
+                  <input
+                    id="ship-date"
                     type="date"
                     value={form.date}
                     onChange={(e) =>
@@ -1142,40 +1309,18 @@ function Returns() {
                 </div>
 
                 <div className="form-field">
-                  <label htmlFor="ret-reason">Reason *</label>
+                  <label htmlFor="ship-status">Status</label>
                   <select
-                    id="ret-reason"
-                    required
-                    value={form.reason}
+                    id="ship-status"
+                    value={form.status}
                     onChange={(e) =>
-                      setForm((f) => ({ ...f, reason: e.target.value }))
+                      setForm((f) => ({ ...f, status: e.target.value }))
                     }
                     disabled={saving}
                   >
-                    {REASONS.map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="form-field">
-                  <label htmlFor="ret-disposition">Disposition *</label>
-                  <select
-                    id="ret-disposition"
-                    required
-                    value={form.disposition}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, disposition: e.target.value }))
-                    }
-                    disabled={saving}
-                  >
-                    {DISPOSITIONS.map((d) => (
-                      <option key={d} value={d}>
-                        {d}
-                      </option>
-                    ))}
+                    <option value="processing">Processing</option>
+                    <option value="shipped">Shipped</option>
+                    <option value="completed">Completed</option>
                   </select>
                 </div>
               </div>
@@ -1183,9 +1328,10 @@ function Returns() {
               <div className="po-lines-section">
                 <div className="po-lines-header">
                   <div>
-                    <span className="po-lines-title">Products returned</span>
+                    <span className="po-lines-title">Products to ship</span>
                     <span className="po-lines-hint">
-                      From SO / catalog · recorded as return transactions
+                      From product catalog · qty checked against stock ·
+                      shipment transactions
                     </span>
                   </div>
                   <button
@@ -1205,92 +1351,158 @@ function Returns() {
                 )}
 
                 <div className="po-lines-list">
-                  {form.lines.map((line, idx) => (
-                    <div key={line.key} className="po-line-row">
-                      <div className="form-field po-line-product">
-                        {idx === 0 && <label>Product *</label>}
-                        <select
-                          value={line.product_id}
-                          onChange={(e) =>
-                            onProductChange(line.key, e.target.value)
-                          }
-                          disabled={saving || products.length === 0}
-                          required
-                        >
-                          <option value="">— Select product —</option>
-                          {products.map((p) => {
-                            const used = form.lines.some(
-                              (l) =>
-                                l.key !== line.key && l.product_id === p.id
-                            );
-                            return (
-                              <option
-                                key={p.id}
-                                value={p.id}
-                                disabled={used}
-                              >
-                                {p.sku ? `${p.sku} — ${p.name}` : p.name}
-                                {p.price != null
-                                  ? ` · ₱${Number(p.price).toLocaleString()}`
-                                  : ""}
-                              </option>
-                            );
-                          })}
-                        </select>
-                      </div>
-                      <div className="form-field po-line-qty">
-                        {idx === 0 && <label>Qty *</label>}
-                        <input
-                          type="number"
-                          min={1}
-                          value={line.qty}
-                          onChange={(e) =>
-                            setLine(line.key, { qty: e.target.value })
-                          }
-                          disabled={saving}
-                          required
-                        />
-                      </div>
-                      <div className="form-field po-line-price">
-                        {idx === 0 && <label>Unit ₱</label>}
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          value={line.unit_price}
-                          onChange={(e) =>
-                            setLine(line.key, {
-                              unit_price: e.target.value,
-                            })
-                          }
-                          disabled={saving}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm btn-icon po-line-remove"
-                        title="Remove line"
-                        disabled={saving || form.lines.length <= 1}
-                        onClick={() => removeLine(line.key)}
+                  {form.lines.map((line, idx) => {
+                    const selected = products.find(
+                      (p) => p.id === line.product_id
+                    );
+                    const stock = line.product_id
+                      ? stockOf(line.product_id)
+                      : null;
+                    const stockErr = lineStockError(line);
+                    const maxAttr =
+                      stock !== null ? Math.max(0, stock) : undefined;
+                    const stockClass =
+                      stock === null
+                        ? ""
+                        : stock <= 0
+                          ? "so-stock-out"
+                          : stockErr
+                            ? "so-stock-warn"
+                            : "so-stock-ok";
+
+                    return (
+                      <div
+                        key={line.key}
+                        className={`po-line-row${stockErr ? " so-line-invalid" : ""}`}
                       >
-                        <IconX />
-                      </button>
-                    </div>
-                  ))}
+                        <div className="form-field po-line-product">
+                          {idx === 0 && <label>Product *</label>}
+                          <select
+                            value={line.product_id}
+                            onChange={(e) =>
+                              onProductChange(line.key, e.target.value)
+                            }
+                            disabled={saving || products.length === 0}
+                            required
+                          >
+                            <option value="">— Select product —</option>
+                            {products.map((p) => {
+                              const usedElsewhere = form.lines.some(
+                                (l) =>
+                                  l.key !== line.key && l.product_id === p.id
+                              );
+                              const pStock =
+                                p.qty != null
+                                  ? Math.max(0, Math.floor(Number(p.qty) || 0))
+                                  : null;
+                              const out = pStock !== null && pStock <= 0;
+                              return (
+                                <option
+                                  key={p.id}
+                                  value={p.id}
+                                  disabled={usedElsewhere || out}
+                                >
+                                  {p.sku ? `${p.sku} — ${p.name}` : p.name}
+                                  {p.price != null
+                                    ? ` · ₱${Number(p.price).toLocaleString()}`
+                                    : ""}
+                                  {pStock !== null
+                                    ? out
+                                      ? " · Out of stock"
+                                      : ` · ${pStock} in stock`
+                                    : ""}
+                                </option>
+                              );
+                            })}
+                          </select>
+                          {selected && (
+                            <div className={`so-stock-bar ${stockClass}`}>
+                              <span className="so-stock-label">
+                                {stock === null
+                                  ? "Stock unknown"
+                                  : stock <= 0
+                                    ? "Out of stock"
+                                    : `${stock.toLocaleString()} available`}
+                              </span>
+                              {selected.sku && (
+                                <span className="so-stock-sku">
+                                  {selected.sku}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div className="form-field po-line-qty">
+                          {idx === 0 && <label>Qty *</label>}
+                          <input
+                            type="number"
+                            min={stock === 0 ? 0 : 1}
+                            max={maxAttr}
+                            step="1"
+                            value={line.qty}
+                            onChange={(e) =>
+                              onQtyChange(line.key, e.target.value)
+                            }
+                            disabled={
+                              saving || (stock !== null && stock <= 0)
+                            }
+                            required={!(stock !== null && stock <= 0)}
+                            className={stockErr ? "so-input-error" : undefined}
+                          />
+                          {stockErr && (
+                            <span className="so-line-error">{stockErr}</span>
+                          )}
+                        </div>
+                        <div className="form-field po-line-price">
+                          {idx === 0 && <label>Unit ₱</label>}
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            value={line.unit_price}
+                            onChange={(e) =>
+                              setLine(line.key, {
+                                unit_price: e.target.value,
+                              })
+                            }
+                            disabled={saving}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm btn-icon po-line-remove"
+                          title="Remove line"
+                          disabled={saving || form.lines.length <= 1}
+                          onClick={() => removeLine(line.key)}
+                        >
+                          <IconX />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div className="po-lines-footer">
                   <div>
                     <div style={{ fontSize: 12, color: "var(--sa-muted)" }}>
-                      RMA summary
+                      Shipment summary
                     </div>
                     <span>
-                      {form.lines.filter((l) => l.product_id).length} line
+                      {
+                        form.lines.filter((l) => l.product_id).length
+                      }{" "}
+                      line
                       {form.lines.filter((l) => l.product_id).length === 1
                         ? ""
                         : "s"}
                       {" · "}
-                      {itemsTotal.toLocaleString()} units · {form.disposition}
+                      {unitsOnForm.toLocaleString()} units · {form.packages} pkg
+                      {form.lines.some((l) => lineStockError(l)) && (
+                        <span className="so-footer-warn">
+                          {" "}
+                          · Fix stock issues
+                        </span>
+                      )}
                     </span>
                   </div>
                 </div>
@@ -1319,12 +1531,13 @@ function Returns() {
                     saving ||
                     salesOrders.length === 0 ||
                     products.length === 0 ||
+                    form.lines.some((l) => !!lineStockError(l)) ||
                     form.lines.filter(
                       (l) => l.product_id && Number(l.qty) > 0
                     ).length === 0
                   }
                 >
-                  {saving ? "Creating…" : "Create RMA"}
+                  {saving ? "Creating…" : "Create Shipment"}
                 </button>
               </div>
             </form>
@@ -1334,6 +1547,7 @@ function Returns() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>
@@ -1342,4 +1556,4 @@ function Returns() {
   );
 }
 
-export default Returns;
+export default Shipping;

@@ -43,6 +43,17 @@ export async function invalidateWarehouses() {
   ]);
 }
 
+export async function invalidateCycleCounts() {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: queryKeys.cycleCounts }),
+    invalidateDashboard(),
+  ]);
+}
+
+export async function invalidateSettings() {
+  await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+}
+
 export async function invalidateGoodsReceipts() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.goodsReceipts.all }),

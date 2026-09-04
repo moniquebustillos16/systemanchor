@@ -1,9 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import { queryClient } from "./lib/queryClient";
+import { queryCacheMaxAge, queryPersister } from "./lib/queryPersistence";
 import RequirePermission from "./Pages/components/RequirePermission";
+import "./Pages/css/Feedback.css";
 
 import App from "./App.tsx";
 import "./Pages/css/Sidebar.css";
@@ -46,7 +48,10 @@ function guard(path: string, element: React.ReactNode) {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
+    <PersistQueryClientProvider
+      client={queryClient}
+      persistOptions={{ persister: queryPersister, maxAge: queryCacheMaxAge }}
+    >
       <BrowserRouter>
         <Routes>
           {/* App shell (login / layout) */}
@@ -85,6 +90,6 @@ createRoot(document.getElementById("root")!).render(
           <Route path="/audit-logs" element={<Navigate to="/roles" replace />} />
         </Routes>
       </BrowserRouter>
-    </QueryClientProvider>
+    </PersistQueryClientProvider>
   </StrictMode>
 );

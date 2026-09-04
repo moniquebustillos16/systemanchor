@@ -1406,57 +1406,6 @@ function Dashboard() {
     );
   }
 
-  if (loading && invValue === 0 && skuCount === 0 && !lastUpdated) {
-    return (
-      <div className="dashboard">
-        <Sidebar />
-        <div className="main-wrapper">
-          <Topbar />
-          <main className="content">
-            <div
-              style={{
-                minHeight: "calc(100vh - 120px)",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 16,
-                padding: 32,
-              }}
-              role="status"
-              aria-live="polite"
-              aria-busy="true"
-            >
-              <div
-                className="roles-spinner"
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderWidth: 3,
-                }}
-              />
-              <div style={{ textAlign: "center" }}>
-                <div
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 600,
-                    marginBottom: 6,
-                    letterSpacing: "-0.01em",
-                  }}
-                >
-                  Loading dashboard
-                </div>
-                <div className="text-muted" style={{ fontSize: 13 }}>
-                  Fetching inventory, orders, and movement metrics…
-                </div>
-              </div>
-            </div>
-          </main>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="dashboard">
       <Sidebar />

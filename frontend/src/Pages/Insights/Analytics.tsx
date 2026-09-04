@@ -31,6 +31,34 @@ type PulseItem = {
   tone?: "ok" | "warn" | "bad" | "neutral";
 };
 
+type AnalyticsSnapshot = {
+  invValue: number;
+  lowStock: number;
+  outOfStock: number;
+  totalProducts: number;
+  soAll: number;
+  soPending: number;
+  soDone: number;
+  soValue: number;
+  poAll: number;
+  poPending: number;
+  poValue: number;
+  grPending: number;
+  shipInTransit: number;
+  warehouses: Warehouse[];
+  updatedAt: number;
+};
+
+let analyticsSnapshot: AnalyticsSnapshot | null = null;
+
+if (typeof window !== "undefined") {
+  const clearAnalyticsSnapshot = () => {
+    analyticsSnapshot = null;
+  };
+  window.addEventListener("sa-auth-changed", clearAnalyticsSnapshot);
+  window.addEventListener("sa-logout", clearAnalyticsSnapshot);
+}
+
 
 
 function toNum(v: unknown): number {
@@ -58,28 +86,30 @@ function resolveUtilPct(w: Warehouse): number {
 function Analytics() {
   const [period, setPeriod] = useState("Last 30 days");
   const [autoRefresh, setAutoRefresh] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!analyticsSnapshot);
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(() =>
+    analyticsSnapshot ? new Date(analyticsSnapshot.updatedAt) : null
+  );
 
-  const [invValue, setInvValue] = useState(0);
-  const [lowStock, setLowStock] = useState(0);
-  const [outOfStock, setOutOfStock] = useState(0);
-  const [totalProducts, setTotalProducts] = useState(0);
+  const [invValue, setInvValue] = useState(() => analyticsSnapshot?.invValue ?? 0);
+  const [lowStock, setLowStock] = useState(() => analyticsSnapshot?.lowStock ?? 0);
+  const [outOfStock, setOutOfStock] = useState(() => analyticsSnapshot?.outOfStock ?? 0);
+  const [totalProducts, setTotalProducts] = useState(() => analyticsSnapshot?.totalProducts ?? 0);
 
-  const [soAll, setSoAll] = useState(0);
-  const [soPending, setSoPending] = useState(0);
-  const [soDone, setSoDone] = useState(0);
-  const [soValue, setSoValue] = useState(0);
+  const [soAll, setSoAll] = useState(() => analyticsSnapshot?.soAll ?? 0);
+  const [soPending, setSoPending] = useState(() => analyticsSnapshot?.soPending ?? 0);
+  const [soDone, setSoDone] = useState(() => analyticsSnapshot?.soDone ?? 0);
+  const [soValue, setSoValue] = useState(() => analyticsSnapshot?.soValue ?? 0);
 
-  const [poAll, setPoAll] = useState(0);
-  const [poPending, setPoPending] = useState(0);
-  const [poValue, setPoValue] = useState(0);
+  const [poAll, setPoAll] = useState(() => analyticsSnapshot?.poAll ?? 0);
+  const [poPending, setPoPending] = useState(() => analyticsSnapshot?.poPending ?? 0);
+  const [poValue, setPoValue] = useState(() => analyticsSnapshot?.poValue ?? 0);
 
-  const [grPending, setGrPending] = useState(0);
-  const [shipInTransit, setShipInTransit] = useState(0);
+  const [grPending, setGrPending] = useState(() => analyticsSnapshot?.grPending ?? 0);
+  const [shipInTransit, setShipInTransit] = useState(() => analyticsSnapshot?.shipInTransit ?? 0);
 
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [warehouses, setWarehouses] = useState<Warehouse[]>(() => analyticsSnapshot?.warehouses ?? []);
 
 
   const { can, isLoaded: permsLoaded } = usePermissions();
@@ -154,6 +184,45 @@ function Analytics() {
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
   }, [autoRefresh, load]);
+
+  useEffect(() => {
+    if (!lastUpdated) return;
+    analyticsSnapshot = {
+      invValue,
+      lowStock,
+      outOfStock,
+      totalProducts,
+      soAll,
+      soPending,
+      soDone,
+      soValue,
+      poAll,
+      poPending,
+      poValue,
+      grPending,
+      shipInTransit,
+      warehouses,
+      updatedAt: lastUpdated.getTime(),
+    };
+  }, [
+    lastUpdated,
+    invValue,
+    lowStock,
+    outOfStock,
+    totalProducts,
+    soAll,
+    soPending,
+    soDone,
+    soValue,
+    poAll,
+    poPending,
+    poValue,
+    grPending,
+    shipInTransit,
+    warehouses,
+  ]);
+
+  const initialLoading = loading && !lastUpdated;
 
   const avgUtil = useMemo(() => {
     if (!warehouses.length) return 0;
@@ -405,14 +474,14 @@ function Analytics() {
             <div className="stat-card">
               <div className="stat-label">Ops health</div>
               <div className={`stat-value tone-${healthTone}`}>
-                {loading ? "…" : healthScore}
+                {initialLoading ? "…" : healthScore}
               </div>
               <div className="stat-hint">{healthLabel} · composite score</div>
             </div>
             <div className="stat-card">
               <div className="stat-label">Inventory value</div>
               <div className="stat-value">
-                {loading ? "…" : formatMoney(invValue)}
+                {initialLoading ? "…" : formatMoney(invValue)}
               </div>
               <div className="stat-hint">
                 {totalProducts} SKUs · {lowStock} low · {outOfStock} OOS
@@ -421,7 +490,7 @@ function Analytics() {
             <div className="stat-card">
               <div className="stat-label">Sales pipeline</div>
               <div className="stat-value">
-                {loading ? "…" : soAll.toLocaleString()}
+                {initialLoading ? "…" : soAll.toLocaleString()}
               </div>
               <div className="stat-hint">
                 {soPending} open · {formatMoney(soValue)}
@@ -434,7 +503,7 @@ function Analytics() {
                   avgUtil >= 90 ? " danger" : avgUtil >= 70 ? " warning" : ""
                 }`}
               >
-                {loading ? "…" : `${avgUtil}%`}
+                {initialLoading ? "…" : `${avgUtil}%`}
               </div>
               <div className="stat-hint">
                 {warehouses.length} sites · PO {poAll}
@@ -528,7 +597,7 @@ function Analytics() {
                 <span className="card-title">Operations pulse</span>
               </div>
               <div style={{ padding: "8px 18px 12px" }}>
-                {loading ? (
+                {initialLoading ? (
                   <div className="text-muted" style={{ padding: 12 }}>
                     Loading KPIs…
                   </div>
@@ -567,7 +636,7 @@ function Analytics() {
                     </tr>
                   </thead>
                   <tbody>
-                    {loading ? (
+                    {initialLoading ? (
                       <tr>
                         <td colSpan={5} className="empty-row">
                           Loading…

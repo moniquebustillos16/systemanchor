@@ -1,8 +1,9 @@
 import { queryClient, queryKeys } from "./queryClient";
 import { resolvePermissionsFromStorage, hasAnyPermission } from "./permissions";
 import { ROUTE_VIEW } from "./routePermissions";
-import { getDashboard } from "../api/dashboard";
-import { getInventoryList, getInventoryStats } from "../api/inventory";
+import { fetchDashboardData } from "../hooks/useDashboard";
+import { getCategories, getInventoryList, getInventoryStats } from "../api/inventory";
+import { getWarehouses } from "../api/warehouses";
 
 /**
  * Background-warm TanStack Query after login for Dashboard + Inventory only.
@@ -23,7 +24,7 @@ export async function prefetchAppData(): Promise<void> {
     tasks.push(
       queryClient.prefetchQuery({
         queryKey: queryKeys.dashboard("7m"),
-        queryFn: () => getDashboard("7m"),
+        queryFn: () => fetchDashboardData("7m"),
         staleTime: 60_000,
       })
     );
@@ -57,6 +58,21 @@ export async function prefetchAppData(): Promise<void> {
       })
     );
   }
+
+  // Lightweight catalogs shared by forms and filters across Orders, System,
+  // Cycle Count, Reports, and Analytics. Keep large transactional lists lazy.
+  tasks.push(
+    queryClient.prefetchQuery({
+      queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
+      queryFn: () => getWarehouses({ per_page: 200, all: 1 }),
+      staleTime: 5 * 60_000,
+    }),
+    queryClient.prefetchQuery({
+      queryKey: queryKeys.categories,
+      queryFn: () => getCategories(),
+      staleTime: 5 * 60_000,
+    })
+  );
 
   const results = await Promise.allSettled(tasks);
   results.forEach((r) => {

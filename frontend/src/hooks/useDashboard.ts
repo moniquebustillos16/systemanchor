@@ -194,7 +194,7 @@ export function mapUnifiedDashboard(payload: Record<string, unknown>): Dashboard
   };
 }
 
-async function fetchDashboardData(range: string): Promise<DashboardViewModel> {
+export async function fetchDashboardData(range: string): Promise<DashboardViewModel> {
   const payload = await getDashboard(range as DashboardRange);
   if (!payload || typeof payload !== "object") {
     throw new Error("Dashboard API returned an empty payload");
@@ -218,6 +218,7 @@ export function useDashboard(options: { range?: string; enabled?: boolean } = {}
     queryFn: () => fetchDashboardData(range),
     enabled,
     staleTime: 60_000,
+    // Keep the previous range visible while the selected range refreshes.
     placeholderData: (prev) => prev,
   });
 

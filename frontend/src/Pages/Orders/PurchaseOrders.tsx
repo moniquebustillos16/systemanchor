@@ -1286,10 +1286,12 @@ function PurchaseOrders() {
         };
       });
 
-      // ProductTransactionController — one purchase transaction per line
+      // ProductTransactionController — sync lines after the PO is visible.
+      // The PO itself is authoritative; transaction logging must not block the
+      // user from seeing the newly created order.
       let txOk = 0;
       let txFail = 0;
-      await Promise.all(
+      const transactionSync = Promise.all(
         validLines.map(async (l) => {
           const q = Math.max(1, Math.round(Number(l.qty) || 1));
           const price = Number(l.unit_price) || 0;
@@ -1312,7 +1314,15 @@ function PurchaseOrders() {
             txFail += 1;
           }
         })
-      );
+      ).then(() => {
+        if (txFail > 0) {
+          showToast(
+            "info",
+            "Partial product transactions",
+            `${txOk} saved, ${txFail} failed — check Product Transactions`
+          );
+        }
+      });
 
       const created: PurchaseOrder = {
         id: poId || String(Date.now()),
@@ -1347,17 +1357,9 @@ function PurchaseOrders() {
         "PO created",
         `${created.po_number} · ${primaryOffer}${validLines.length > 1 ? ` +${validLines.length - 1}` : ""} · ${formatPeso(orderTotal)}`
       );
-      if (txFail > 0) {
-        setTimeout(() => {
-          showToast(
-            "info",
-            "Partial product transactions",
-            `${txOk} saved, ${txFail} failed — check Product Transactions`
-          );
-        }, 500);
-      }
       setPage(1);
-      await refetchPOs();
+      void transactionSync;
+      void refetchPOs();
       void invalidatePurchaseOrders();
       setViewOrder(created);
       setViewLoading(false);
@@ -1727,7 +1729,7 @@ function PurchaseOrders() {
   };
 
   return (
-    <div className="orders-page">
+    <div className="orders-page purchase-orders-page">
       <Sidebar />
       <div className="main-wrapper">
         <Topbar />
@@ -1744,7 +1746,7 @@ function PurchaseOrders() {
             </div>
           ) : (
           <>
-          <div className="page-header">
+          <div className="page-header purchase-orders-header">
             <div>
               <h1 className="page-title">Purchase Orders</h1>
               <p className="page-subtitle">
@@ -1825,7 +1827,7 @@ function PurchaseOrders() {
             </div>
           )}
 
-          <div className="stats-grid">
+          <div className="stats-grid purchase-orders-stats">
             <button
               type="button"
               className={`stat-card${status === "all" ? " is-active" : ""}`}
@@ -1880,8 +1882,8 @@ function PurchaseOrders() {
             </button>
           </div>
 
-          <div className="card">
-            <div className="table-toolbar">
+          <div className="card purchase-orders-card">
+            <div className="table-toolbar purchase-orders-toolbar">
               <div className="table-search">
                 <IconSearch />
                 <input
@@ -1953,7 +1955,7 @@ function PurchaseOrders() {
                   </tr>
                 </thead>
                 <tbody>
-                  {loading ? (
+                  {loading && orders.length === 0 ? (
                     Array.from({ length: 5 }).map((_, i) => (
                       <tr key={`skel-${i}`}>
                         {Array.from({ length: 9 }).map((__, j) => (
@@ -2914,6 +2916,7 @@ function PurchaseOrders() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

@@ -4,6 +4,7 @@ import api from "./api/axios";
 import mainLogo from "./assets/main_logo.png";
 import { schedulePrefetch } from "./lib/prefetch";
 import { setAuthToken } from "./lib/auth";
+import { queryClient, queryKeys } from "./lib/queryClient";
 import "./index.css";
 
 function App() {
@@ -31,6 +32,15 @@ function App() {
       const { token, user } = response.data;
 
       setAuthToken(token, remember);
+      const hasPermissionSnapshot =
+        Array.isArray(user?.permissions) ||
+        Array.isArray(user?.permission_names) ||
+        user?.is_admin === true ||
+        user?.isAdmin === true ||
+        (user?.role && typeof user.role === "object" && Array.isArray(user.role.permissions));
+      if (hasPermissionSnapshot) {
+        queryClient.setQueryData(queryKeys.me, user);
+      }
       const userStore = remember ? localStorage : sessionStorage;
       userStore.setItem("user", JSON.stringify(user));
 

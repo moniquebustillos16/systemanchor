@@ -13,6 +13,8 @@ import api from "../../api/axios";
 import { getAuthToken, clearAuthToken } from "../../lib/auth";
 import { useProfile } from "../../hooks/useProfile";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { queryClient } from "../../lib/queryClient";
+import { queryPersister } from "../../lib/queryPersistence";
 import "../css/Topbar.css";
 
 /* ===================== ICONS ===================== */
@@ -918,6 +920,8 @@ function Topbar({
     unreadCache.inflight = null;
     unreadCache.lastKnown = -1;
     topbarBootstrapStarted = false;
+    queryClient.clear();
+    void queryPersister.removeClient();
     window.dispatchEvent(new Event("sa-logout"));
     if (onLogout) onLogout();
     else {

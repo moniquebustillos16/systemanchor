@@ -1,0 +1,173 @@
+/* Shared feedback cards used by every page. */
+.inv-toast,
+.sm-toast,
+.orders-toast,
+.profile-toast {
+  position: fixed !important;
+  inset: 50% auto auto 50% !important;
+  z-index: 1100 !important;
+  width: min(420px, calc(100vw - 32px)) !important;
+  min-width: 0 !important;
+  max-width: 420px !important;
+  padding: 20px 24px 20px 58px !important;
+  border: 1px solid var(--sa-border, #e5ddd2) !important;
+  border-left: 4px solid var(--feedback-accent, #9a6b45) !important;
+  border-top-color: color-mix(in srgb, var(--feedback-accent, #9a6b45) 30%, var(--sa-border, #e5ddd2)) !important;
+  border-radius: 14px !important;
+  background: var(--sa-card, #fffefb) !important;
+  color: var(--sa-text, #2a2218) !important;
+  box-shadow: 0 20px 55px rgba(42, 34, 24, 0.2), 0 4px 14px rgba(42, 34, 24, 0.08) !important;
+  transform: translate(-50%, -50%) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 5px !important;
+  line-height: 1.45 !important;
+  animation: feedback-card-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) both !important;
+}
+
+.inv-toast::before,
+.sm-toast::before,
+.orders-toast::before,
+.profile-toast::before {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 22px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--feedback-accent, #9a6b45);
+  box-shadow: inset 0 0 0 5px var(--sa-card, #fffefb);
+  outline: 2px solid var(--feedback-accent, #9a6b45);
+  color: var(--feedback-accent, #9a6b45);
+  font: 700 11px/18px sans-serif;
+  text-align: center;
+}
+
+.inv-toast::before,
+.sm-toast::before,
+.orders-toast::before,
+.profile-toast::before {
+  content: "✓";
+}
+
+.inv-toast strong,
+.sm-toast strong,
+.orders-toast strong {
+  color: var(--sa-text, #2a2218) !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  line-height: 1.3 !important;
+}
+
+.inv-toast span,
+.sm-toast span,
+.orders-toast span {
+  color: var(--sa-muted, #8a7b6a) !important;
+  font-size: 13px !important;
+}
+
+.profile-toast {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+}
+
+.feedback-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sa-muted, #8a7b6a);
+  font: 400 22px/1 sans-serif;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.feedback-close:hover {
+  background: var(--sa-cream-2, #f0ebe3);
+  color: var(--sa-text, #2a2218);
+}
+
+.feedback-close:focus-visible {
+  outline: 2px solid var(--feedback-accent, #9a6b45);
+  outline-offset: 2px;
+}
+
+.inv-toast.success,
+.sm-toast.success,
+.orders-toast.success,
+.profile-toast--success {
+  --feedback-accent: #5a9a6e;
+}
+
+.inv-toast.error,
+.sm-toast.error,
+.orders-toast.error,
+.profile-toast--error {
+  --feedback-accent: #b85c4a;
+}
+
+.inv-toast.error::before,
+.sm-toast.error::before,
+.orders-toast.error::before,
+.profile-toast--error::before {
+  content: "!";
+}
+
+.inv-toast.info,
+.sm-toast.info,
+.orders-toast.info,
+.profile-toast--info {
+  --feedback-accent: #c49a5a;
+}
+
+.inv-toast.info::before,
+.sm-toast.info::before,
+.orders-toast.info::before,
+.profile-toast--info::before {
+  content: "i";
+}
+
+[data-theme="dark"] .inv-toast,
+[data-theme="dark"] .sm-toast,
+[data-theme="dark"] .orders-toast,
+[data-theme="dark"] .profile-toast {
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.42), 0 4px 14px rgba(0, 0, 0, 0.25) !important;
+}
+
+@keyframes feedback-card-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 12px)) scale(0.96) !important;
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1) !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .inv-toast,
+  .sm-toast,
+  .orders-toast,
+  .profile-toast {
+    width: calc(100vw - 24px) !important;
+    padding: 17px 18px 17px 51px !important;
+  }
+
+  .inv-toast::before,
+  .sm-toast::before,
+  .orders-toast::before,
+  .profile-toast::before {
+    left: 19px;
+    top: 19px;
+  }
+}
