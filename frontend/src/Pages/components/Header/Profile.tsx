@@ -330,7 +330,19 @@ function Profile() {
     [user, name, email, phone, jobTitle, department, hasImage]
   );
 
-  const avatarSrc = previewUrl || user?.image_url || null;
+  const avatarSrc = (() => {
+    const url = previewUrl || user?.image_url || user?.image_path || null;
+    if (!url) return null;
+    if (url.startsWith("blob:") || url.startsWith("data:")) return url;
+    if (/^https?:\/\//i.test(url)) {
+      const parsed = new URL(url);
+      if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+        return new URL(import.meta.env.VITE_API_URL).origin + parsed.pathname;
+      }
+      return url;
+    }
+    return new URL(import.meta.env.VITE_API_URL).origin + (url.startsWith("/") ? url : "/" + url);
+  })();
   const initials = (name || user?.name || "?")
     .split(" ")
     .map((p) => p[0])
