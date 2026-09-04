@@ -1,12 +1,14 @@
 import axios from "axios";
 import { getAuthToken, clearAuthToken } from "../lib/auth";
+import { queryClient } from "../lib/queryClient";
+import { queryPersister } from "../lib/queryPersistence";
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api",
-  // Default timeout for every request. Individual calls can still override
-  // this by passing their own `timeout` in the request config if a specific
-  // endpoint is known to be slow (e.g. large report generation).
-  timeout: 15_000,
+  // Dashboard and list endpoints can legitimately take longer while the
+  // server computes aggregates. Query hooks keep cached data visible while
+  // these requests complete, and callers can still set a shorter timeout.
+  timeout: 45_000,
 });
 
 // Attach token on every request
@@ -25,6 +27,8 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      queryClient.clear();
+      void queryPersister.removeClient();
       clearAuthToken();
 
       if (window.location.pathname !== "/") {

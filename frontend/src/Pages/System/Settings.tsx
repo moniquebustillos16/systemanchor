@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
+import { queryClient, queryKeys } from "../../lib/queryClient";
+import { invalidateSettings } from "../../lib/invalidate";
 import "../css/System.css";
 
 type Warehouse = {
@@ -77,6 +79,15 @@ const warehousesCache: {
   entry: CacheEntry<Warehouse[]> | null;
   inflight: Promise<Warehouse[]> | null;
 } = { entry: null, inflight: null };
+
+if (typeof window !== "undefined") {
+  const clearSettingsCache = () => {
+    settingsCache.entry = null;
+    warehousesCache.entry = null;
+  };
+  window.addEventListener("sa-auth-changed", clearSettingsCache);
+  window.addEventListener("sa-logout", clearSettingsCache);
+}
 
 function isFresh<T>(entry: CacheEntry<T> | null): entry is CacheEntry<T> {
   return !!entry && Date.now() - entry.at < CACHE_TTL_MS;
@@ -257,6 +268,7 @@ function Settings() {
         try {
           mapped = await request;
           settingsCache.entry = { data: mapped, at: Date.now() };
+          queryClient.setQueryData(queryKeys.settings, mapped);
         } finally {
           settingsCache.inflight = null;
         }
@@ -409,6 +421,8 @@ function Settings() {
       const data = json.data ?? json;
       const mapped = mapApiToForm(data);
       settingsCache.entry = { data: mapped, at: Date.now() };
+      queryClient.setQueryData(queryKeys.settings, mapped);
+      void invalidateSettings();
       setForm(mapped);
       setSavedSnapshot(mapped);
       setDirty(false);
@@ -781,6 +795,7 @@ function Settings() {
       </div>
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

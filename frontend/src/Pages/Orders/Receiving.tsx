@@ -6,6 +6,7 @@ import { useWarehouses } from "../../hooks/useWarehouses";
 import { useGoodsReceipts } from "../../hooks/useOrders";
 import { invalidateGoodsReceipts } from "../../lib/invalidate";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { fetchCachedLookup, lookupKeys } from "../../lib/cachedLookups";
 import "../css/Orders.css";
 
 /* ── Types ─────────────────────────────────────────────────── */
@@ -367,13 +368,13 @@ function Receiving() {
   /* ── Form option loaders (PO + supplier + user). Warehouses = useWarehouses. ─ */
   const loadFormOptions = useCallback(async () => {
     try {
-      const [poRes, supRes, userRes] = await Promise.all([
-        api.get("/purchase-orders", { params: { per_page: 200, all: 1 } }),
-        api.get("/suppliers", { params: { per_page: 200 } }),
-        api.get("/users", { params: { per_page: 100 } }),
+      const [poJson, supJson, userJson] = await Promise.all([
+        fetchCachedLookup("/purchase-orders", lookupKeys.purchaseOrders, { per_page: 200, all: 1 }),
+        fetchCachedLookup("/suppliers", lookupKeys.suppliers, { per_page: 200 }),
+        fetchCachedLookup("/users", lookupKeys.users, { per_page: 100 }),
       ]);
 
-      const pos: PurchaseOrder[] = getItems(poRes.data).map((item) => {
+        const pos: PurchaseOrder[] = getItems(poJson).map((item) => {
         const row = asRecord(item);
         const poNumber = String(row.po_number ?? row.number ?? row.id);
         const cached = readCachedPoLines(poNumber);
@@ -427,7 +428,7 @@ function Receiving() {
         };
       });
 
-      const sups: Supplier[] = getItems(supRes.data).map((i) => {
+      const sups: Supplier[] = getItems(supJson).map((i) => {
         const row = asRecord(i);
         return {
           id: String(row.id),
@@ -441,7 +442,7 @@ function Receiving() {
         }
       });
 
-      const users: User[] = getItems(userRes.data).map((i) => {
+      const users: User[] = getItems(userJson).map((i) => {
         const row = asRecord(i);
         return {
           id: String(row.id),
@@ -1444,6 +1445,7 @@ function Receiving() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

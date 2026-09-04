@@ -31,7 +31,9 @@ class DashboardController extends Controller
             $range = '7m';
         }
 
-        $cacheKey = "dashboard:overview:{$range}";
+        // Dashboard aggregates are user-visible; never share a cached response
+        // between authenticated users with different warehouse access.
+        $cacheKey = "dashboard:overview:user:" . ($request->user()?->id ?? 'guest') . ":{$range}";
 
         $payload = Cache::remember($cacheKey, self::CACHE_TTL, function () use ($range) {
             $invStats      = $this->inventoryStats();

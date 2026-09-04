@@ -3,6 +3,7 @@ import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { usePermissions } from "../../hooks/useCurrentUser";
+import { useWarehouses } from "../../hooks/useWarehouses";
 import "../css/Insights.css";
 
 
@@ -305,9 +306,6 @@ function Reports() {
   const [toast, setToast] = useState<{ type: string; title: string; msg: string } | null>(
     null
   );
-  const [warehouses, setWarehouses] = useState<
-    { id: string; code?: string; name: string }[]
-  >([]);
   const [warehouseId, setWarehouseId] = useState("all");
   const [format, setFormat] = useState<"csv" | "json">("csv");
   const [favOnly, setFavOnly] = useState(false);
@@ -319,6 +317,17 @@ function Reports() {
   };
 
   const { can, isLoaded: permsLoaded } = usePermissions();
+  const { rows: warehouseRows } = useWarehouses({ perPage: 100 });
+
+  const warehouses = useMemo(
+    () =>
+      warehouseRows.map((w) => ({
+        id: String(w.id ?? ""),
+        code: w.code != null ? String(w.code) : undefined,
+        name: String(w.name ?? ""),
+      })),
+    [warehouseRows]
+  );
 
   const canView = can("reports.view", "analytics.view");
   const canCreate = can("reports.create", "reports.export");
@@ -331,24 +340,6 @@ function Reports() {
   useEffect(() => {
     localStorage.setItem("sa-report-history", JSON.stringify(history.slice(0, 12)));
   }, [history]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data: json } = await api.get("/warehouses", { params: { per_page: 100 } });
-        const list = Array.isArray(json) ? json : json.data ?? [];
-        setWarehouses(
-          list.map((w: { id: string; code?: string; name: string }) => ({
-            id: String(w.id),
-            code: w.code,
-            name: w.name,
-          }))
-        );
-      } catch {
-        /* optional */
-      }
-    })();
-  }, []);
 
   const filtered = useMemo(() => {
     let list = [...REPORTS];
@@ -853,6 +844,7 @@ function Reports() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

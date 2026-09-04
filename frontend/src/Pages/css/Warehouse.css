@@ -737,3 +737,66 @@
 .warehouse-page .stat-value.success {
   color: var(--sa-sage-deep);
 }
+
+/* Cycle Count responsive layout */
+.warehouse-page .content {
+  max-width: 1680px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.warehouse-page .page-subtitle {
+  max-width: 680px;
+  line-height: 1.5;
+}
+
+@media (max-width: 700px) {
+  .warehouse-page .content {
+    padding: 20px 16px 32px;
+  }
+
+  .warehouse-page .page-header {
+    align-items: stretch;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .warehouse-page .page-title {
+    font-size: 22px;
+  }
+
+  .warehouse-page .page-actions,
+  .warehouse-page .page-actions .btn {
+    width: 100%;
+  }
+
+  .warehouse-page .page-actions .btn {
+    justify-content: center;
+  }
+
+  .warehouse-page .stats-grid-5 {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .warehouse-page .stats-grid-5 .stat-card {
+    padding: 15px 14px;
+  }
+
+  .warehouse-page .cc-live-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .warehouse-page .table-toolbar,
+  .warehouse-page .table-search,
+  .warehouse-page .table-filters,
+  .warehouse-page .table-filters select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .warehouse-page .table-filters {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}

@@ -838,7 +838,10 @@ function Roles() {
   const roleUsers = roleUsersQ.rows as RoleUser[];
   const usersLoading = roleUsersQ.isLoading;
   const usersLoadedFor = roleUsersQ.data !== undefined ? selectedId : null;
-  const permLoading = rolePermsQ.isLoading || rolePermsQ.isFetching;
+  // Only block the matrix when there is no assigned-permission data yet.
+  // A stale refetch keeps the current matrix usable.
+  const permLoading = rolePermsQ.isLoading && !rolePermsQ.data;
+  const catalogLoading = permsQ.isLoading && permissions.length === 0;
 
   const serverPermKey = useMemo(
     () => Array.from(rolePermsQ.ids).sort().join(","),
@@ -1509,12 +1512,12 @@ function Roles() {
                       <div className="rac-table-wrap">
                         {visibleGroups.length === 0 &&
                         !permLoading &&
-                        !permsQ.isLoading ? (
+                        !catalogLoading ? (
                           <div className="roles-empty">
                             <p>No groups match your filters.</p>
                           </div>
                         ) : allGroups.length === 0 &&
-                          (permLoading || permsQ.isLoading) ? (
+                          (permLoading || catalogLoading) ? (
                           <div className="roles-empty">
                             <span className="roles-spinner" />
                             Loading permission catalog…
@@ -1865,6 +1868,7 @@ function Roles() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import { useWarehouses } from "../../hooks/useWarehouses";
+import { queryKeys } from "../../lib/queryClient";
+import { invalidateCycleCounts } from "../../lib/invalidate";
 import "../css/Warehouse.css";
 
 /* ── Types ─────────────────────────────────────────────────── */
@@ -150,8 +153,6 @@ const IconClipboard = () => (
 
 /* ── Component ─────────────────────────────────────────────── */
 function CycleCount() {
-  const [rows, setRows] = useState<Count[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -169,6 +170,20 @@ function CycleCount() {
   const [editCounted, setEditCounted] = useState(0);
   const [editSystem, setEditSystem] = useState(0);
   const [editCounter, setEditCounter] = useState("");
+  const queryClient = useQueryClient();
+
+  const countsQuery = useQuery({
+    queryKey: queryKeys.cycleCounts,
+    queryFn: async () => {
+      const { data: json } = await api.get("/cycle-counts");
+      return getItems(json) as Count[];
+    },
+    staleTime: 60_000,
+    placeholderData: (previous) => previous,
+  });
+
+  const rows = countsQuery.data ?? [];
+  const loading = countsQuery.isLoading && rows.length === 0;
 
   const {
     rows: whRows,
@@ -211,26 +226,12 @@ function CycleCount() {
 
   /* ── Load cycle counts ───────────────────────────────────── */
   const loadCounts = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const { data: json } = await api.get("/cycle-counts");
-      setRows(getItems(json) as Count[]);
-    } catch (e: unknown) {
-      const msg =
-        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        (e as Error)?.message ||
-        "Failed to load cycle counts";
-      setError(msg);
-      setRows([]);
-    } finally {
-      setLoading(false);
+    setError(null);
+    const result = await countsQuery.refetch();
+    if (result.error) {
+      setError((result.error as Error)?.message || "Failed to load cycle counts");
     }
-  }, []);
-
-  useEffect(() => {
-    void loadCounts();
-  }, [loadCounts]);
+  }, [countsQuery]);
 
   /* ── Stats & filtered list ───────────────────────────────── */
   const stats = useMemo(() => {
@@ -296,7 +297,8 @@ function CycleCount() {
         status: "pending",
       });
       const created = (body?.data ?? body) as Count;
-      setRows((prev) => [created, ...prev]);
+      queryClient.setQueryData<Count[]>(queryKeys.cycleCounts, (prev = []) => [created, ...prev]);
+      void invalidateCycleCounts();
       setShowForm(false);
       setCounter("");
       showToast("success", "Scheduled", `${created.code ?? "Count"} scheduled.`);
@@ -323,9 +325,10 @@ function CycleCount() {
         status: "pending",
       });
       const updated = (body?.data ?? body) as Count;
-      setRows((prev) =>
+      queryClient.setQueryData<Count[]>(queryKeys.cycleCounts, (prev = []) =>
         prev.map((r) => (r.id === row.id ? { ...r, ...updated } : r))
       );
+      void invalidateCycleCounts();
       showToast("success", "Started", `${row.code} started at ${nowTime()}.`);
     } catch (e: unknown) {
       const msg =
@@ -368,9 +371,10 @@ function CycleCount() {
       }
       const { data: body } = await api.put(`/cycle-counts/${editRow.id}`, payload);
       const updated = (body?.data ?? body) as Count;
-      setRows((prev) =>
+      queryClient.setQueryData<Count[]>(queryKeys.cycleCounts, (prev = []) =>
         prev.map((r) => (r.id === editRow.id ? { ...r, ...updated } : r))
       );
+      void invalidateCycleCounts();
       setEditRow(null);
       showToast(
         "success",
@@ -398,7 +402,10 @@ function CycleCount() {
     if (!window.confirm(`Delete ${row.code}? This cannot be undone.`)) return;
     try {
       await api.delete(`/cycle-counts/${row.id}`);
-      setRows((prev) => prev.filter((r) => r.id !== row.id));
+      queryClient.setQueryData<Count[]>(queryKeys.cycleCounts, (prev = []) =>
+        prev.filter((r) => r.id !== row.id)
+      );
+      void invalidateCycleCounts();
       showToast("success", "Deleted", `${row.code} removed.`);
     } catch (e: unknown) {
       const msg =
@@ -1169,6 +1176,7 @@ function CycleCount() {
 
       {toast && (
         <div className={`orders-toast ${toast.type}`}>
+          <button type="button" className="feedback-close" onClick={() => setToast(null)} aria-label="Close notification">×</button>
           <strong>{toast.title}</strong>
           <span>{toast.msg}</span>
         </div>

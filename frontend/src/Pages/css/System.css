@@ -3245,3 +3245,80 @@ html.dark .btn-secondary,
     width: 48px;
   }
 }
+
+/* Shared system-page responsive rhythm */
+.system-page .content {
+  max-width: 1680px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.system-page .page-header {
+  align-items: center;
+  padding-bottom: 4px;
+}
+
+.system-page .page-subtitle {
+  max-width: 680px;
+  line-height: 1.5;
+}
+
+@media (max-width: 700px) {
+  .system-page .content {
+    padding: 20px 16px 32px;
+  }
+
+  .system-page .page-header {
+    align-items: stretch;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .system-page .page-title {
+    font-size: 22px;
+  }
+
+  .system-page .page-actions,
+  .system-page .page-actions .btn {
+    width: 100%;
+  }
+
+  .system-page .page-actions .btn {
+    justify-content: center;
+  }
+
+  .system-page .users-toolbar {
+    align-items: stretch;
+  }
+
+  .system-page .users-toolbar .table-search,
+  .system-page .users-filters,
+  .system-page .users-filters select,
+  .system-page .users-filters .btn {
+    width: 100%;
+    max-width: none;
+  }
+
+  .system-page .users-filters {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .system-page .rac-detail-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .system-page .rac-detail-head > .btn {
+    width: 100%;
+  }
+
+  .system-page .rac-tabs {
+    overflow-x: auto;
+  }
+
+  .system-page .rac-tab {
+    flex: 1 0 max-content;
+    justify-content: center;
+  }
+}

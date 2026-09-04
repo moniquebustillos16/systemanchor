@@ -7,12 +7,13 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 60_000,
-      gcTime: 10 * 60_000,
+      gcTime: 30 * 60_000,
       retry: 1,
       refetchOnWindowFocus: true,
       refetchOnReconnect: true,
-      // Was: true — caused remount/refetch even right after login prefetch
-      refetchOnMount: false,
+      // Render cached data first, then refresh stale data in the background.
+      // TanStack Query deduplicates an already-running prefetch by query key.
+      refetchOnMount: true,
     },
     mutations: {
       retry: 0,
@@ -89,6 +90,8 @@ export const queryKeys = {
   },
 
   categories: ["categories"] as const,
+  cycleCounts: ["cycle-counts"] as const,
+  settings: ["settings"] as const,
 
   customers: {
     all: ["customers"] as const,
