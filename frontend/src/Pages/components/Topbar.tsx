@@ -279,18 +279,33 @@ const NOTIF_ICONS: Record<string, () => ReactElement> = {
 
 function resolveMediaUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  if (/^https?:\/\//i.test(url) || url.startsWith("blob:") || url.startsWith("data:")) return url;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return url;
+
   try {
     const base =
       (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
       "http://127.0.0.1:8000/api";
+
     const origin = new URL(base, window.location.origin).origin;
+
+    if (/^https?:\/\//i.test(url)) {
+      const parsed = new URL(url);
+
+      if (
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "127.0.0.1"
+      ) {
+        return origin + parsed.pathname + parsed.search;
+      }
+
+      return url;
+    }
+
     return origin + (url.startsWith("/") ? url : `/${url}`);
   } catch {
     return url.startsWith("/") ? url : `/${url}`;
   }
 }
-
 function computeInitials(name: string): string {
   return (
     name
