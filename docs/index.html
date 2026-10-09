@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SystemAnchor demos</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+      body { margin: 0; background: #0f172a; color: #e2e8f0; }
+      main { width: min(1100px, 92vw); margin: 0 auto; padding: 56px 0 72px; }
+      h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); }
+      .intro { color: #94a3b8; font-size: 1.1rem; line-height: 1.6; }
+      .demos { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 32px; }
+      article { background: #1e293b; border: 1px solid #334155; border-radius: 14px; overflow: hidden; }
+      video { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; }
+      h2, p { margin: 16px 18px; }
+      h2 { font-size: 1.15rem; }
+      p { color: #cbd5e1; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>SystemAnchor demos</h1>
+      <p class="intro">Short product walkthroughs. Videos autoplay muted; use the controls to pause, unmute, or replay.</p>
+      <section class="demos">
+        <article>
+          <video controls autoplay muted loop playsinline preload="metadata">
+            <source src="assets/main-application-walkthrough.mp4" type="video/mp4" />
+            Your browser does not support HTML video.
+          </video>
+          <h2>Main application walkthrough</h2>
+          <p>Warehouse management workflows across the core SystemAnchor application.</p>
+        </article>
+        <article>
+          <video controls autoplay muted loop playsinline preload="metadata">
+            <source src="assets/role-based-access-walkthrough.mp4" type="video/mp4" />
+            Your browser does not support HTML video.
+          </video>
+          <h2>Role-based access walkthrough</h2>
+          <p>A demonstration of permissions and role-specific application access.</p>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

@@ -70,6 +70,9 @@ Watch the project demonstrations on YouTube:
 - ▶ [SystemAnchor application walkthrough](https://youtu.be/x8MKAmA1D7g)
 - ▶ [Role-based access walkthrough](https://youtu.be/TG1yWSiqX5g)
 
+For an in-browser version without leaving GitHub, open the
+[SystemAnchor demo page](https://moniquebustillos16.github.io/systemanchor/).
+
 ## Permissions
 
 Permissions use exact canonical names such as `inventory.view`, `purchase_orders.view`, and `users.update`. Assign the exact permission required by the API route; similar names are not interchangeable.
