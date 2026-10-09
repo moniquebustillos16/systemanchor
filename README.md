@@ -113,11 +113,19 @@ Click a preview to open its compact recording, or use YouTube for the full walkt
 
 ### Application walkthrough
 
+This walkthrough follows the main warehouse workflow: reviewing the dashboard,
+managing inventory, working with suppliers and purchase orders, receiving stock,
+processing sales orders, and tracking fulfillment activity across warehouses.
+
 [![Application walkthrough](docs/videos/main-demo-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/main-demo-small.mp4)
 
 [Watch on YouTube instead](https://youtu.be/x8MKAmA1D7g)
 
 ### Role-based access walkthrough
+
+This walkthrough shows how roles and permissions shape the experience for each
+user. It demonstrates that the interface adapts to available permissions while
+the Laravel API remains responsible for enforcing access to protected actions.
 
 [![Role-based access walkthrough](docs/videos/role-access-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/role-access-small.mp4)
 
