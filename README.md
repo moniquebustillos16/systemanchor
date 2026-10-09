@@ -123,9 +123,11 @@ processing sales orders, and tracking fulfillment activity across warehouses.
 
 ### Role-based access walkthrough
 
-This walkthrough shows how roles and permissions shape the experience for each
-user. It demonstrates that the interface adapts to available permissions while
-the Laravel API remains responsible for enforcing access to protected actions.
+This video shows how an administrator can add users, create or update roles,
+and choose what each user is allowed to view or manage. For example, a user can
+be allowed to view inventory but not edit it, or be limited to information from
+specific warehouses. Users who are not administrators only see the pages and
+actions that they have been given access to.
 
 [![Role-based access walkthrough](docs/videos/role-access-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/role-access-small.mp4)
 
