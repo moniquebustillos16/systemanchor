@@ -69,7 +69,7 @@ On GitHub, select a demo below to open it in GitHub's video viewer and watch
 it in the browser:
 
 - ▶ [Watch the main application walkthrough](<frontend/src/lib/Demo video/Main Demo.mp4>)
-- ▶ [Watch the role-based access walkthrough](<frontend/src/lib/Demo video/RoleAccess Demo.mp4>)
+- ▶ [Watch the role-based access walkthrough](<frontend/src/lib/Demo video/Role Access demo.mp4>)
 
 The video files are intentionally stored with the frontend source. Commit the
 files at these paths so the links remain available in GitHub.
