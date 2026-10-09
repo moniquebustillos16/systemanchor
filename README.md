@@ -65,11 +65,11 @@ Do not seed or retain this credential in a production environment.
 
 ## Demo videos
 
-Watch the project demonstrations after cloning the repository or opening the
-links on GitHub:
+On GitHub, select a demo below to open it in GitHub's video viewer and watch
+it in the browser:
 
-- [Main application walkthrough](<frontend/src/lib/Demo video/Main Demo.mp4>)
-- [Role-based access walkthrough](<frontend/src/lib/Demo video/RoleAccess Demo.mp4>)
+- ▶ [Watch the main application walkthrough](<frontend/src/lib/Demo video/Main Demo.mp4>)
+- ▶ [Watch the role-based access walkthrough](<frontend/src/lib/Demo video/RoleAccess Demo.mp4>)
 
 The video files are intentionally stored with the frontend source. Commit the
 files at these paths so the links remain available in GitHub.
