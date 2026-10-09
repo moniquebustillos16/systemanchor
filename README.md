@@ -63,6 +63,17 @@ password: SystemAnchor@123
 
 Do not seed or retain this credential in a production environment.
 
+## Demo videos
+
+Watch the project demonstrations after cloning the repository or opening the
+links on GitHub:
+
+- [Main application walkthrough](<frontend/src/lib/Demo video/Main Demo.mp4>)
+- [Role-based access walkthrough](<frontend/src/lib/Demo video/RoleAccess Demo.mp4>)
+
+The video files are intentionally stored with the frontend source. Commit the
+files at these paths so the links remain available in GitHub.
+
 ## Permissions
 
 Permissions use exact canonical names such as `inventory.view`, `purchase_orders.view`, and `users.update`. Assign the exact permission required by the API route; similar names are not interchangeable.
