@@ -6,6 +6,28 @@ SystemAnchor is a full-stack warehouse management system for recording products,
 
 The application manages products, categories, suppliers, customers, warehouses, purchase orders, goods receipts, sales orders, shipments, returns, stock movements, users, roles, and permissions. The frontend owns the user experience and server-state handling; the backend owns validation, authentication, authorization, and persisted operational data.
 
+## Demo Videos
+
+Click a GIF preview to open the compact recording, or use YouTube for the full walkthrough.
+
+### Application walkthrough
+
+This walkthrough covers the main warehouse workflow, including the dashboard,
+inventory, suppliers, purchase orders, receiving, sales orders, and fulfillment.
+
+[![Application walkthrough](docs/videos/main-demo-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/main-demo-small.mp4)
+
+[Watch on YouTube](https://youtu.be/x8MKAmA1D7g)
+
+### Role-based access walkthrough
+
+This walkthrough shows how an administrator manages users and roles, chooses
+what each user can view or edit, and limits users to specific warehouse data.
+
+[![Role-based access walkthrough](docs/videos/role-access-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/role-access-small.mp4)
+
+[Watch on YouTube](https://youtu.be/TG1yWSiqX5g)
+
 ## Key Features
 
 - Product, category, supplier, customer, and warehouse management
