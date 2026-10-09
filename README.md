@@ -65,17 +65,19 @@ Do not seed or retain this credential in a production environment.
 
 ## Demo videos
 
+Click a preview to watch the full video.
+
 ### Application walkthrough
 
-<video src="https://github.com/moniquebustillos16/systemanchor/raw/main/docs/videos/main-demo-small.mp4" controls muted width="100%"></video>
+[![Application walkthrough](docs/videos/main-demo-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/main-demo-small.mp4)
 
-[Watch in higher quality on YouTube](https://youtu.be/x8MKAmA1D7g)
+[Watch on YouTube instead](https://youtu.be/x8MKAmA1D7g)
 
 ### Role-based access walkthrough
 
-<video src="https://github.com/moniquebustillos16/systemanchor/raw/main/docs/videos/role-access-small.mp4" controls muted width="100%"></video>
+[![Role-based access walkthrough](docs/videos/role-access-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/role-access-small.mp4)
 
-[Watch in higher quality on YouTube](https://youtu.be/TG1yWSiqX5g)
+[Watch on YouTube instead](https://youtu.be/TG1yWSiqX5g)
 ## Permissions
 
 Permissions use exact canonical names such as `inventory.view`, `purchase_orders.view`, and `users.update`. Assign the exact permission required by the API route; similar names are not interchangeable.
