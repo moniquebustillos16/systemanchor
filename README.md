@@ -65,14 +65,10 @@ Do not seed or retain this credential in a production environment.
 
 ## Demo videos
 
-On GitHub, select a compact demo below to open it in GitHub's video viewer and
-watch it in the browser:
+Watch the project demonstrations on YouTube:
 
-- ▶ [Watch the main application walkthrough](demo-videos/main-application-walkthrough.mp4)
-- ▶ [Watch the role-based access walkthrough](demo-videos/role-based-access-walkthrough.mp4)
-
-Full-resolution source recordings remain under `frontend/src/lib/Demo video`
-and are stored with Git LFS.
+- ▶ [SystemAnchor application walkthrough](https://youtu.be/x8MKAmA1D7g)
+- ▶ [Role-based access walkthrough](https://youtu.be/TG1yWSiqX5g)
 
 ## Permissions
 
