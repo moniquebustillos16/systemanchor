@@ -1,199 +1,188 @@
 # SystemAnchor
 
-SystemAnchor is a full-stack warehouse-management system for teams that need a
-clear view of stock, fulfillment, suppliers, and warehouse activity. It pairs a
-Laravel API with a React/TypeScript client and enforces permissions on the
-server—not only in the interface.
+SystemAnchor is a full-stack warehouse management system for recording products, stock activity, purchasing, receiving, sales fulfillment, and warehouse access. The React and TypeScript client communicates with a Laravel REST API backed by PostgreSQL.
 
-## Highlights
+## Project Overview
 
-- Track products, categories, suppliers, customers, and stock across multiple warehouses, zones, and bins.
-- Run purchase orders, goods receiving, sales orders, shipping, returns, transfers, adjustments, and cycle counts.
-- Restrict access with Laravel Sanctum authentication, explicit permissions, and warehouse assignments.
-- Surface dashboard metrics, inventory health, order pipelines, utilization, notifications, and recent activity.
+The application manages products, categories, suppliers, customers, warehouses, purchase orders, goods receipts, sales orders, shipments, returns, stock movements, users, roles, and permissions. The frontend owns the user experience and server-state handling; the backend owns validation, authentication, authorization, and persisted operational data.
 
-## What the application covers
+## Key Features
 
-| Area | Capabilities |
+- Product, category, supplier, customer, and warehouse management
+- Inventory listings, stock movements, and cycle counts
+- Purchase orders, goods receipts, sales orders, shipments, and returns
+- Warehouse zones, bins, capacity, and user warehouse assignments
+- Role and permission management, dashboard data, notifications, reports, and profiles
+
+## Technology Stack
+
+| Layer | Technology |
 | --- | --- |
-| Inventory | Products, categories, stock levels, movements, adjustments, transfers, and cycle counts |
-| Procurement | Suppliers, purchase orders, and goods receiving |
-| Fulfillment | Customers, sales orders, shipping, and returns |
-| Warehouse operations | Warehouses, zones, bins, capacity, and user warehouse assignments |
-| Access control | Users, roles, permissions, Sanctum authentication, and server-side authorization |
-| Visibility | Dashboard summaries, notifications, reports, and operational activity |
+| Frontend | React 19, TypeScript, Vite, React Router |
+| Client data | TanStack Query, Axios |
+| Backend | PHP 8.3+, Laravel 13, Laravel Sanctum, REST API |
+| Database | PostgreSQL with `pgcrypto` |
+| Visualization | Recharts |
+| Checks | ESLint, TypeScript build, PHPUnit/Laravel test runner |
 
-## Technology
+## System Architecture
 
-- Backend: PHP 8.3+, Laravel 13, Laravel Sanctum, PostgreSQL
-- Frontend: React 19, TypeScript, Vite, TanStack Query, Axios, React Router
-
-## Architecture
-
-```text
-React + TypeScript client
-        │ Axios / TanStack Query
-        ▼
-Laravel API ── Sanctum authentication ── Permission middleware
-        │
-        ▼
-PostgreSQL ── warehouses, inventory, orders, roles, and operational data
+```mermaid
+flowchart LR
+    Client[React + TypeScript client] -->|Axios requests| API[Laravel REST API]
+    Client <--> Cache[TanStack Query cache]
+    API --> Sanctum[Sanctum token authentication]
+    Sanctum --> Permission[Permission middleware]
+    Permission --> API
+    API --> DB[(PostgreSQL)]
 ```
 
-- Laravel is the security boundary. API routes require Sanctum authentication and server-side permissions; hiding a control in the client is never authorization.
-- The client uses permissions only to hide unavailable navigation and controls. A hidden control is not authorization.
-- Users can be limited to assigned warehouses; controllers enforce warehouse scope when reading or changing operational data.
-- TanStack Query stores server state and query invalidation rules live in `frontend/src/lib`.
+### Frontend responsibilities
 
-## Requirements
+- Provides routed pages and role-aware navigation and controls.
+- Uses Axios with `VITE_API_URL`, or `http://127.0.0.1:8000/api` by default.
+- Sends the stored Sanctum bearer token and clears local authentication state after a `401` response.
+- Uses TanStack Query for cached server data, query keys, and mutation invalidation.
+
+### Backend responsibilities
+
+- Exposes REST endpoints in `backend/routes/api.php`.
+- Validates input in controllers and form requests.
+- Issues and revokes Sanctum personal-access tokens.
+- Applies permission checks and stores operational data in PostgreSQL.
+
+## Authentication and Authorization
+
+`POST /api/login` validates credentials and creates a Sanctum personal-access token. The client sends that token as a bearer token on later requests; `POST /api/logout` deletes the current token.
+
+Most operational routes are within `auth:sanctum` and declare a permission such as `inventory.view` or `purchase_orders.create`. `PermissionMiddleware` allows the `Admin` role through and otherwise checks role permissions. The client adjusts its navigation and controls, but the API is the authorization boundary.
+
+Users can have warehouse assignments and an `access_all_warehouses` flag. Warehouse-specific scope is implemented in relevant controllers, including purchase orders. Scope and authorization need review endpoint by endpoint as the system evolves.
+
+## Database Overview
+
+Laravel migrations define users, roles, permissions, warehouses, zones, bins, products, inventories, stock movements, suppliers, customers, purchase orders, goods receipts, sales orders, shipments, returns, notifications, and user-warehouse assignments.
+
+PostgreSQL is the supported application database. PHPUnit is configured for in-memory SQLite, which is separate from the local application configuration and should be validated against the migration chain before relying on wider test coverage.
+
+## Business Workflows
+
+### Inventory, movements, and transfers
+
+Products carry current quantity and warehouse information. The stock-movement endpoint supports `IN`, `OUT`, `TRANSFER`, and `ADJUSTMENT`. Its create operation uses a database transaction and rejects outgoing or transfer quantities above the current product quantity. A transfer records source and destination warehouse IDs; the current implementation updates the product warehouse reference when a destination is supplied. Review this behavior before production use where independent per-warehouse balances are required.
+
+### Purchasing and receiving
+
+Purchase orders are associated with suppliers and can be associated with warehouses. The purchase-order controller applies warehouse access checks for users without all-warehouse access. Goods receipts record expected and received quantities against a purchase order, supplier, warehouse, and optional receiver. Completing a receipt updates its status and can create a quantity-mismatch notification.
+
+### Sales, fulfillment, and permissions
+
+The API includes sales-order, shipment, and return list, detail, create, update, and delete endpoints. Shipment delivery and return completion actions are also defined. Administrators can manage users, roles, permissions, role-permission assignments, and user warehouse assignments. Non-administrator access is based on role permissions and protected routes enforce the required permission.
+
+## Installation and Setup
+
+### Prerequisites
 
 - PHP 8.3+ with PostgreSQL PDO support
 - Composer
 - Node.js 20+ and npm
-- PostgreSQL with the `pgcrypto` extension available (`gen_random_uuid()` is used by existing migrations)
+- PostgreSQL with the `pgcrypto` extension available
 
-PostgreSQL is the supported database. The migration history contains PostgreSQL-specific schema changes; SQLite is not a supported setup.
+### Backend
 
-## Local setup
+In one terminal:
 
-Use two terminals: one for the API and one for the React development server.
-
-### API
-
-```bash
+```powershell
 cd backend
 composer install
-copy .env.example .env
+Copy-Item .env.example .env
 php artisan key:generate
+```
+
+Configure the database values in `backend/.env`, then create the schema and sample data:
+
+```powershell
 php artisan migrate --seed
 php artisan serve
 ```
 
-Set the `DB_*` values in `backend/.env` before migrating. A typical local configuration is:
+The API is served at `http://127.0.0.1:8000/api` by default.
 
-```env
-DB_CONNECTION=pgsql
-DB_HOST=127.0.0.1
-DB_PORT=5432
-DB_DATABASE=systemanchor
-DB_USERNAME=postgres
-DB_PASSWORD=your_password
-```
+### Frontend
 
-The API runs at `http://127.0.0.1:8000/api`.
+In a second terminal from the repository root:
 
-### Client
-
-```bash
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-The development client runs at `http://localhost:5173`. To change the API address, set the following in `frontend/.env.local` and restart Vite:
+Vite serves the client at `http://localhost:5173` by default.
+
+## Environment Configuration
+
+Start from `backend/.env.example`. At minimum, configure the application key and PostgreSQL connection:
+
+```env
+APP_KEY=
+DB_CONNECTION=pgsql
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_DATABASE=systemanchor
+DB_USERNAME=postgres
+DB_PASSWORD=
+```
+
+For a non-default API address, create `frontend/.env.local`:
 
 ```env
 VITE_API_URL=http://127.0.0.1:8000/api
 ```
 
-## Demo account
+Never commit populated `.env` files, API tokens, or database passwords. The database seeder creates sample users and data for local development; inspect and change or remove seeded credentials before using any non-local environment.
 
-The demo seeder creates the following local-development account:
+## Running the Application
 
-```text
-email: admin@systemanchor.com
-password: SystemAnchor@123
-```
+Keep the API and frontend servers running in separate terminals. After `php artisan migrate --seed`, sign in using a local seeded account listed in `backend/database/seeders/DatabaseSeeder.php`. Change seeded credentials before sharing an environment.
 
-Do not seed or retain this credential in a production environment.
+## Testing
 
-## Demo videos
+Available project commands:
 
-Click a preview to open its compact recording, or use YouTube for the full walkthrough.
-
-### Application walkthrough
-
-This walkthrough follows the main warehouse workflow: reviewing the dashboard,
-managing inventory, working with suppliers and purchase orders, receiving stock,
-processing sales orders, and tracking fulfillment activity across warehouses.
-
-[![Application walkthrough](docs/videos/main-demo-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/main-demo-small.mp4)
-
-[Watch on YouTube instead](https://youtu.be/x8MKAmA1D7g)
-
-### Role-based access walkthrough
-
-This video shows how an administrator can add users, create or update roles,
-and choose what each user is allowed to view or manage. For example, a user can
-be allowed to view inventory but not edit it, or be limited to information from
-specific warehouses. Users who are not administrators only see the pages and
-actions that they have been given access to.
-
-[![Role-based access walkthrough](docs/videos/role-access-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/role-access-small.mp4)
-
-[Watch on YouTube instead](https://youtu.be/TG1yWSiqX5g)
-
-For autoplaying, in-browser previews, visit the [SystemAnchor demo page](https://moniquebustillos16.github.io/systemanchor/).
-
-## Permissions
-
-Permissions use exact canonical names such as `inventory.view`, `purchase_orders.view`, and `users.update`. Assign the exact permission required by the API route; similar names are not interchangeable.
-
-The main permission middleware is in `backend/app/Http/Middleware/PermissionMiddleware.php`, and protected routes are declared in `backend/routes/api.php`.
-
-## Quality checks
-
-Run these before opening a pull request or deploying:
-
-```bash
+```powershell
+# Frontend
 cd frontend
 npm run lint
 npm run build
 
+# Backend
 cd ../backend
-php artisan test
+composer test
 ```
 
-The current automated test suite is minimal. Before production use, add feature coverage for login, permission checks, warehouse scoping, migrations, and order workflows.
+`composer test` clears Laravel configuration and runs `php artisan test`. The repository currently contains only the default example unit and feature tests; these commands have not been represented as passing in this README. Add feature coverage for authentication, permissions, warehouse scoping, migrations, and order workflows.
 
-## Production notes
+## Deployment
 
-- Set `APP_ENV=production` and `APP_DEBUG=false`.
-- Use HTTPS and a production PostgreSQL instance.
-- Build the frontend before publishing it: `npm ci && npm run build`.
-- Run `php artisan migrate --force` only through a reviewed deployment process.
-- Run a queue worker when `QUEUE_CONNECTION=database`.
-- Keep `storage` and `bootstrap/cache` writable by the application user, not the full repository.
-- Back up PostgreSQL and test restores before deploying schema changes.
+The repository contains a GitHub Pages workflow for the static documentation/demo page in `.github/workflows/deploy-pages.yml`. It does not contain AWS infrastructure, application deployment scripts, container definitions, or CI/CD configuration for the Laravel API and React application.
 
-## Deployment checklist
+For an AWS deployment, define the hosting architecture outside this repository. At minimum, provide production environment variables, a PostgreSQL instance, HTTPS, a Laravel migration process, persistent writable Laravel storage, and a method to serve the built frontend and API. Do not use local seed data or credentials in production.
 
-1. Configure production environment variables, including `APP_URL`, database credentials, mail, cache, and queue settings.
-2. Set `APP_ENV=production` and `APP_DEBUG=false`.
-3. Build the web client with `cd frontend && npm ci && npm run build`.
-4. Apply migrations only through a reviewed deployment process using `php artisan migrate --force`.
-5. Start a queue worker when `QUEUE_CONNECTION=database` and verify backups before release.
+## Known Limitations and Future Improvements
 
-## Repository layout
+- Automated coverage is minimal and does not validate critical business workflows.
+- Authorization and warehouse scope should be audited consistently across all endpoints.
+- Warehouse-transfer behavior needs stronger per-warehouse inventory modeling and production-grade data-integrity coverage.
+- Some migrations perform destructive or non-reversible transformations. Two identifier/status alignment migrations explicitly reject rollback; rehearse migrations and backup/restore procedures against a production-like database.
+- No API/application AWS deployment configuration is versioned in this repository.
 
-```text
-backend/                 Laravel API
-  app/                   Controllers, models, middleware
-  database/              Migrations and seeders
-  routes/api.php         API and permission declarations
-frontend/                React client
-  src/api/               HTTP request modules
-  src/hooks/             Query hooks
-  src/lib/               Query, cache, and permission utilities
-  src/Pages/             Route-level UI
-docs/                    Demo media and GitHub Pages assets
-```
+## Repository Layout
 
-## Current limitations
-
-- Automated coverage and CI are still incomplete.
-- The migration chain is PostgreSQL-specific and contains non-reversible data/schema transitions; rehearse upgrades against a production-like database.
-- Permission names must remain synchronized between API routes, seeders, role configuration, and frontend UI checks.
+- `backend/` — Laravel API, migrations, seeders, and tests
+- `frontend/` — React client, API modules, hooks, and route-level pages
+- `docs/` — static demo-page assets
+- `.github/workflows/` — GitHub Pages deployment workflow
 
 ## License
 
