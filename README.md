@@ -65,14 +65,17 @@ Do not seed or retain this credential in a production environment.
 
 ## Demo videos
 
-Watch the project demonstrations on YouTube:
+### Application walkthrough
 
-- ▶ [SystemAnchor application walkthrough](https://youtu.be/x8MKAmA1D7g)
-- ▶ [Role-based access walkthrough](https://youtu.be/TG1yWSiqX5g)
+<video src="https://github.com/moniquebustillos16/systemanchor/raw/main/docs/videos/main-demo-small.mp4" controls muted width="100%"></video>
 
-For an in-browser version without leaving GitHub, open the
-[SystemAnchor demo page](https://moniquebustillos16.github.io/systemanchor/).
+[Watch in higher quality on YouTube](https://youtu.be/x8MKAmA1D7g)
 
+### Role-based access walkthrough
+
+<video src="https://github.com/moniquebustillos16/systemanchor/raw/main/docs/videos/role-access-small.mp4" controls muted width="100%"></video>
+
+[Watch in higher quality on YouTube](https://youtu.be/TG1yWSiqX5g)
 ## Permissions
 
 Permissions use exact canonical names such as `inventory.view`, `purchase_orders.view`, and `users.update`. Assign the exact permission required by the API route; similar names are not interchangeable.
