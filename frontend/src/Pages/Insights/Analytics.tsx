@@ -117,8 +117,8 @@ function Analytics() {
   const canView = can("analytics.view", "reports.view", "dashboard.view");
  
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (showProgress = false) => {
+    if (showProgress) setLoading(true);
     setError(null);
     try {
       const results = await Promise.allSettled([
@@ -181,7 +181,7 @@ function Analytics() {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const id = setInterval(load, 60_000);
+    const id = setInterval(() => void load(), 60_000);
     return () => clearInterval(id);
   }, [autoRefresh, load]);
 
@@ -222,7 +222,7 @@ function Analytics() {
     warehouses,
   ]);
 
-  const initialLoading = loading && !lastUpdated;
+  const initialLoading = false;
 
   const avgUtil = useMemo(() => {
     if (!warehouses.length) return 0;
@@ -429,7 +429,7 @@ function Analytics() {
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={load}
+                onClick={() => void load(true)}
                 disabled={loading}
               >
                 {loading ? "Refreshing…" : "Refresh"}
@@ -453,7 +453,7 @@ function Analytics() {
                 type="button"
                 className="btn btn-sm btn-secondary"
                 style={{ marginLeft: 12 }}
-                onClick={load}
+                onClick={() => void load(true)}
               >
                 Retry
               </button>

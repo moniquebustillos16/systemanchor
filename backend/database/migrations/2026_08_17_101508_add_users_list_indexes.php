@@ -11,6 +11,12 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if (!Schema::hasColumn('users', 'warehouse_id')) {
+            Schema::table('users', function (Blueprint $table) {
+                $table->uuid('warehouse_id')->nullable();
+            });
+        }
+
         Schema::table('users', function (Blueprint $table) {
             $table->index('status');
             $table->index('role_id');

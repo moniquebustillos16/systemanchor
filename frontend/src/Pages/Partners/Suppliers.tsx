@@ -273,10 +273,18 @@ function Suppliers() {
 
   const { can, isLoaded: permsLoaded } = usePermissions();
   const canView = can("suppliers.view");
+  const canViewPurchaseOrders = can("purchase_orders.view");
   const canCreate = can("suppliers.create");
   const canUpdate = can("suppliers.update");
 
   const fetchPoCounts = useCallback(async () => {
+    // Supplier order counts require the same permission as the PO list.
+    // Do not make a request that Laravel will correctly reject.
+    if (!canViewPurchaseOrders) {
+      setPoCounts(new Map());
+      return;
+    }
+
     try {
       const { data: json } = await api.get("/purchase-orders", {
         params: { per_page: 200, sort: "order_date", dir: "desc" },
@@ -288,11 +296,11 @@ function Suppliers() {
     } catch {
       /* keep previous counts */
     }
-  }, []);
+  }, [canViewPurchaseOrders]);
 
   useEffect(() => {
-    void fetchPoCounts();
-  }, [fetchPoCounts]);
+    if (permsLoaded) void fetchPoCounts();
+  }, [fetchPoCounts, permsLoaded]);
 
   const fetchSuppliers = useCallback(async () => {
     await Promise.all([refetch(), fetchPoCounts()]);

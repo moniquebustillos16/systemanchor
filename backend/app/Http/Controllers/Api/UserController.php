@@ -7,6 +7,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
+use Illuminate\Support\Str;
 
 class UserController extends Controller
 {
@@ -78,7 +79,11 @@ class UserController extends Controller
         $user->save();
 
         if (method_exists($user, 'warehouses')) {
-            $user->warehouses()->sync($warehouseIds);
+            $sync = [];
+            foreach ($warehouseIds as $warehouseId) {
+                $sync[$warehouseId] = ['id' => (string) Str::uuid()];
+            }
+            $user->warehouses()->sync($sync);
         }
     }
 

@@ -27,7 +27,7 @@ class DashboardController extends Controller
     public function index(Request $request)
     {
         $range = $request->query('range', '7m');
-        if (!in_array($range, ['3m', '7m', '1y'], true)) {
+        if (!in_array($range, ['3m', '7m', '10m', '1y'], true)) {
             $range = '7m';
         }
 
@@ -541,6 +541,7 @@ class DashboardController extends Controller
     {
         $months = match ($range) {
             '3m' => 3,
+            '10m' => 10,
             '1y' => 12,
             default => 7,
         };
@@ -550,14 +551,16 @@ class DashboardController extends Controller
 
         $driver    = DB::getDriverName();
         $monthExpr = $driver === 'pgsql'
-            ? "to_char(movement_date, 'YYYY-MM')"
-            : "DATE_FORMAT(movement_date, '%Y-%m')";
+            ? "to_char(stock_movements.movement_date, 'YYYY-MM')"
+            : "DATE_FORMAT(stock_movements.movement_date, '%Y-%m')";
 
         try {
-            $rows = StockMovement::query()
-                ->where('movement_date', '>=', $from)
-                ->selectRaw("{$monthExpr} as ym, type, COALESCE(SUM(qty), 0) as total_qty, COUNT(*) as move_cnt")
-                ->groupBy(DB::raw($monthExpr), 'type')
+            $rows = DB::table('stock_movements')
+                ->join('products', 'products.id', '=', 'stock_movements.product_id')
+                ->where('stock_movements.movement_date', '>=', $from)
+                ->where('stock_movements.movement_date', '<=', $now->copy()->endOfMonth())
+                ->selectRaw("{$monthExpr} as ym, stock_movements.type, COALESCE(SUM(stock_movements.qty * products.price), 0) as total_value, COUNT(*) as move_cnt")
+                ->groupBy(DB::raw($monthExpr), 'stock_movements.type')
                 ->get();
         } catch (\Throwable $e) {
             $rows = collect();
@@ -567,13 +570,13 @@ class DashboardController extends Controller
         foreach ($rows as $r) {
             $ym = $r->ym;
             if (!isset($byMonth[$ym])) {
-                $byMonth[$ym] = ['in' => 0, 'out' => 0, 'in_cnt' => 0, 'out_cnt' => 0];
+                $byMonth[$ym] = ['net_value' => 0, 'in_cnt' => 0, 'out_cnt' => 0];
             }
             if ($r->type === 'IN') {
-                $byMonth[$ym]['in'] += (float) $r->total_qty;
+                $byMonth[$ym]['net_value'] += (float) $r->total_value;
                 $byMonth[$ym]['in_cnt'] += (int) $r->move_cnt;
             } elseif ($r->type === 'OUT') {
-                $byMonth[$ym]['out'] += (float) $r->total_qty;
+                $byMonth[$ym]['net_value'] -= (float) $r->total_value;
                 $byMonth[$ym]['out_cnt'] += (int) $r->move_cnt;
             }
         }
@@ -595,16 +598,15 @@ class DashboardController extends Controller
 
         if ($hasAny) {
             $values[$months - 1] = round($currentValue);
-            $scale = max(1, $currentValue / max(1, array_sum(array_column($byMonth, 'in')) ?: 1));
             for ($i = $months - 2; $i >= 0; $i--) {
-                $nextStart = $now->copy()->subMonths($months - 1 - ($i + 1));
-                $nextYm    = $nextStart->format('Y-m');
-                $delta     = (($byMonth[$nextYm]['in'] ?? 0) - ($byMonth[$nextYm]['out'] ?? 0)) * $scale * 0.15;
-                $values[$i] = max(0, round(($values[$i + 1] ?? $currentValue) - $delta));
+                $nextYm = $from->copy()->addMonths($i + 1)->format('Y-m');
+                $netMovementValue = $byMonth[$nextYm]['net_value'] ?? 0;
+                $values[$i] = max(0, round(($values[$i + 1] ?? $currentValue) - $netMovementValue));
             }
         } else {
             $factors = match ($range) {
                 '3m' => [0.88, 0.94, 1.0],
+                '10m' => [0.68, 0.72, 0.76, 0.81, 0.85, 0.89, 0.93, 0.96, 0.98, 1.0],
                 '1y' => [0.70, 0.75, 0.78, 0.85, 0.90, 0.88, 0.95, 0.92, 0.96, 0.98, 0.97, 1.0],
                 default => [0.75, 0.82, 0.78, 0.90, 0.95, 0.92, 1.0],
             };

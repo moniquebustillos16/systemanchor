@@ -39,6 +39,12 @@ const IconSearch = () => (
     <path d="M21 21l-4.35-4.35" />
   </svg>
 );
+const IconClose = () => (
+  <svg {...svg} width="18" height="18">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
 
 type Customer = {
   id: string;
@@ -512,33 +518,32 @@ function Customers() {
       {modalOpen && (
         <div
           className="modal-overlay"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.45)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
           onClick={() => !saving && setModalOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="customer-form-title"
         >
           <div
-            className="card"
-            style={{
-              width: "100%",
-              maxWidth: 480,
-              margin: 16,
-              padding: 24,
-            }}
+            className="modal-panel"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 style={{ margin: "0 0 16px", fontSize: 18 }}>
-              {editing ? "Edit Customer" : "Add Customer"}
-            </h2>
-            <form onSubmit={handleSave}>
-              <div style={{ display: "grid", gap: 12 }}>
-                <label style={{ display: "grid", gap: 4 }}>
+            <div className="modal-header">
+              <h2 id="customer-form-title" className="modal-title">
+                {editing ? "Edit Customer" : "Add Customer"}
+              </h2>
+              <button
+                type="button"
+                className="modal-close"
+                disabled={saving}
+                onClick={() => setModalOpen(false)}
+                aria-label="Close"
+              >
+                <IconClose />
+              </button>
+            </div>
+            <form className="partner-modal-form" onSubmit={handleSave}>
+              <div className="modal-body form-stack">
+                <label className="form-field">
                   <span>Name *</span>
                   <input
                     required
@@ -549,7 +554,7 @@ function Customers() {
                     placeholder="Company / account name"
                   />
                 </label>
-                <label style={{ display: "grid", gap: 4 }}>
+                <label className="form-field">
                   <span>Contact</span>
                   <input
                     value={form.contact}
@@ -559,7 +564,7 @@ function Customers() {
                     placeholder="Contact person"
                   />
                 </label>
-                <label style={{ display: "grid", gap: 4 }}>
+                <label className="form-field">
                   <span>Email</span>
                   <input
                     type="email"
@@ -570,7 +575,7 @@ function Customers() {
                     placeholder="email@example.com"
                   />
                 </label>
-                <label style={{ display: "grid", gap: 4 }}>
+                <label className="form-field">
                   <span>Phone</span>
                   <input
                     value={form.phone}
@@ -580,7 +585,7 @@ function Customers() {
                     placeholder="+63 …"
                   />
                 </label>
-                <label style={{ display: "grid", gap: 4 }}>
+                <label className="form-field">
                   <span>City</span>
                   <input
                     value={form.city}
@@ -590,7 +595,7 @@ function Customers() {
                     placeholder="City"
                   />
                 </label>
-                <label style={{ display: "grid", gap: 4 }}>
+                <label className="form-field">
                   <span>Status</span>
                   <select
                     value={form.status}
@@ -604,14 +609,7 @@ function Customers() {
                   </select>
                 </label>
               </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "flex-end",
-                  gap: 8,
-                  marginTop: 20,
-                }}
-              >
+              <div className="modal-footer">
                 <button
                   type="button"
                   className="btn btn-secondary"

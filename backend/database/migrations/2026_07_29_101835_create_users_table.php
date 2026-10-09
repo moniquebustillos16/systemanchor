@@ -17,6 +17,7 @@ return new class extends Migration
             $table->string('password');
 
             $table->uuid('role_id')->nullable();
+            $table->uuid('warehouse_id')->nullable();
             $table->string('status', 30)->default('active');
             $table->string('phone', 50)->nullable();
             $table->string('job_title', 150)->nullable();

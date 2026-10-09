@@ -4,11 +4,14 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import { queryClient } from "./lib/queryClient";
 import { queryCacheMaxAge, queryPersister } from "./lib/queryPersistence";
+import { applyThemePreference, getThemePreference } from "./lib/theme";
 import RequirePermission from "./Pages/components/RequirePermission";
 import "./Pages/css/Feedback.css";
 
 import App from "./App.tsx";
 import "./Pages/css/Sidebar.css";
+
+applyThemePreference(getThemePreference());
 
 /* ===================== MAIN ===================== */
 import Dashboard from "./Pages/Main/Dashboard.tsx";

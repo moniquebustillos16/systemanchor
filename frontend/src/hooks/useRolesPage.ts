@@ -97,7 +97,7 @@ export function useRolesList(options: { enabled?: boolean } = {}) {
     },
     enabled,
     staleTime: CATALOG_STALE_MS,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const rows = useMemo(
@@ -132,7 +132,7 @@ export function usePermissionsCatalog(options: { enabled?: boolean } = {}) {
     },
     enabled,
     staleTime: CATALOG_STALE_MS,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const rows = useMemo(

@@ -13,8 +13,9 @@ import api from "../../api/axios";
 import { getAuthToken, clearAuthToken } from "../../lib/auth";
 import { useProfile } from "../../hooks/useProfile";
 import { usePermissions } from "../../hooks/useCurrentUser";
-import { queryClient } from "../../lib/queryClient";
+import { queryClient, queryKeys } from "../../lib/queryClient";
 import { queryPersister } from "../../lib/queryPersistence";
+import { applyThemePreference, getThemePreference } from "../../lib/theme";
 import "../css/Topbar.css";
 
 /* ===================== ICONS ===================== */
@@ -320,18 +321,6 @@ function computeInitials(name: string): string {
   );
 }
 
-function applyTheme(theme: "light" | "dark" | "system") {
-  let resolved: "light" | "dark" = "light";
-  if (theme === "dark") resolved = "dark";
-  else if (theme === "light") resolved = "light";
-  else {
-    resolved = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  }
-  document.documentElement.setAttribute("data-theme", resolved);
-  localStorage.setItem("sa-theme", resolved);
-  return resolved;
-}
-
 function isCanceled(err: unknown): boolean {
   const e = err as any;
   return e?.name === "CanceledError" || e?.code === "ERR_CANCELED" || e?.name === "AbortError";
@@ -481,7 +470,6 @@ function Topbar({
   const [notifications, setNotifications] = useState<Notif[]>(() =>
     notifsCache.entry ? notifsCache.entry.data.list : []
   );
-  const [notifsLoading, setNotifsLoading] = useState(() => !notifsCache.entry);
   const [notifsFromApi, setNotifsFromApi] = useState(() =>
     notifsCache.entry ? notifsCache.entry.data.fromApi : false
   );
@@ -551,7 +539,7 @@ function Topbar({
       setRoleName(profileUser.role.name);
     }
     if (profileSettings?.theme) {
-      const resolved = applyTheme(profileSettings.theme);
+      const resolved = applyThemePreference(profileSettings.theme);
       setIsDark(resolved === "dark");
     }
   }, [profileUser, profileSettings, propUserName, propUserEmail, propUserImageUrl]);
@@ -576,7 +564,7 @@ function Topbar({
         setDisplayImage(resolveMediaUrl(detail.image_url) || null);
       }
       if (detail.theme) {
-        const resolved = applyTheme(detail.theme);
+        const resolved = applyThemePreference(detail.theme);
         setIsDark(resolved === "dark");
       }
     };
@@ -603,21 +591,39 @@ function Topbar({
   }, [propUserImageUrl]);
 
   useEffect(() => {
-    const stored = localStorage.getItem("sa-theme");
-    const dark = stored === "dark";
-    setIsDark(dark);
-    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    const resolved = applyThemePreference(getThemePreference());
+    setIsDark(resolved === "dark");
+  }, []);
+
+  useEffect(() => {
+    const onThemeChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ resolved: "light" | "dark" }>).detail;
+      setIsDark(detail.resolved === "dark");
+    };
+    window.addEventListener("sa-theme-changed", onThemeChanged);
+    return () => window.removeEventListener("sa-theme-changed", onThemeChanged);
   }, []);
 
   const toggleDarkMode = async () => {
     const next = !isDark;
     setIsDark(next);
     const themeValue = next ? "dark" : "light";
-    applyTheme(themeValue);
+    applyThemePreference(themeValue);
+    queryClient.setQueryData(
+      queryKeys.profile.me,
+      (current: { settings?: Record<string, unknown> } | undefined) =>
+        current
+          ? {
+              ...current,
+              settings: { ...current.settings, theme: themeValue },
+            }
+          : current
+    );
 
     if (!getAuthToken()) return;
     try {
       await api.put("/profile/settings", { theme: themeValue }, { timeout: REQUEST_TIMEOUT_MS });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.profile.me });
     } catch {
       /* local theme kept */
     }
@@ -689,7 +695,6 @@ function Topbar({
     if (!mountedRef.current) return;
     setNotifications(list);
     setNotifsFromApi(fromApi);
-    setNotifsLoading(false);
   }, []);
 
   const loadNotifications = useCallback(
@@ -700,8 +705,6 @@ function Topbar({
       }
       if (!force && notifsCache.entry) {
         applyNotifs(notifsCache.entry.data.list, notifsCache.entry.data.fromApi);
-      } else if (!notifsCache.entry) {
-        setNotifsLoading(true);
       }
       const result = await fetchNotificationsOnce(force);
       applyNotifs(result.list, result.fromApi);
@@ -1090,13 +1093,7 @@ function Topbar({
               )}
             </div>
             <div className="notif-list">
-              {notifsLoading ? (
-                <div className="notif-loading">
-                  <div className="notif-loading-row" />
-                  <div className="notif-loading-row" />
-                  <div className="notif-loading-row" />
-                </div>
-              ) : notifications.length === 0 ? (
+              {notifications.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state-icon">
                     <IconBell />

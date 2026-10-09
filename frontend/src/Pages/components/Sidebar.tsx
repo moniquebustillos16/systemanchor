@@ -160,6 +160,7 @@ type NavItem = {
   label: string;
   icon: string;
   path: string;
+  requiredPermission?: string;
 };
 
 type NavSection = {
@@ -189,6 +190,7 @@ const NAV: NavSection[] = [
         label: "Purchase Orders",
         icon: "file",
         path: "/purchase-orders",
+        requiredPermission: "purchase_orders.view",
       },
       {
         id: "sales-orders",
@@ -648,6 +650,12 @@ function Sidebar({
           const visibleItems = section.items.filter((item) => {
   // Don’t show anything until we know the permissions
   if (!permsLoaded) return false;
+
+  if (item.requiredPermission) {
+    return isAdmin || userPermissions.some(
+      (permission) => normPerm(permission) === normPerm(item.requiredPermission!)
+    );
+  }
 
   return canView(userPermissions, item.id, isAdmin);
 });

@@ -171,7 +171,7 @@ export function useUsers(options: UseUsersOptions = {}) {
     queryFn: () => getUsers(params),
     enabled,
     staleTime: STALE_MS,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
     refetchOnMount: true,
   });
 
@@ -205,7 +205,7 @@ export function useUserStats(options: { enabled?: boolean } = {}) {
     queryFn: () => getUserStats(),
     enabled,
     staleTime: STALE_MS,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const stats = useMemo(() => extractUserStats(q.data), [q.data]);

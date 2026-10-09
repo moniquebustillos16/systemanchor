@@ -976,12 +976,11 @@ function normMoveType(t: unknown): string {
 
 function Dashboard() {
   const navigate = useNavigate();
-  const [trendRange, setTrendRange] = useState("7m");
+  const [trendRange, setTrendRange] = useState("10m");
 
   /* ── TanStack Query — single server source of truth ───────── */
   const {
     data: dash,
-    isLoading: dashLoading,
     isFetching: dashFetching,
     refetch: refetchDashboard,
     dataUpdatedAt,
@@ -1174,7 +1173,7 @@ function Dashboard() {
       : boot?.serverStockOut ?? null;
 
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
-  const loading = !dash && dashLoading && !boot;
+  const loading = false;
 
   /* Persist snapshot when live query data arrives (instant re-entry paint) */
   useEffect(() => {
@@ -1259,7 +1258,7 @@ function Dashboard() {
   const invTrend = useMemo(() => {
     if (serverTrend && serverTrend.length) return serverTrend;
     const base = invValue || 1000;
-    const len = trendRange === "3m" ? 3 : trendRange === "1y" ? 12 : 7;
+    const len = trendRange === "3m" ? 3 : trendRange === "10m" ? 10 : trendRange === "1y" ? 12 : 7;
     return Array.from({ length: len }, (_, i) => {
       const t = (i + 1) / len;
       const wave = Math.sin(i * 0.9) * 0.03;
@@ -1270,7 +1269,7 @@ function Dashboard() {
   const trendLabels = useMemo(() => {
     if (serverTrendLabels && serverTrendLabels.length) return serverTrendLabels;
     const now = new Date();
-    const n = trendRange === "3m" ? 3 : trendRange === "1y" ? 12 : 7;
+    const n = trendRange === "3m" ? 3 : trendRange === "10m" ? 10 : trendRange === "1y" ? 12 : 7;
     const labels: string[] = [];
     for (let i = n - 1; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -1661,6 +1660,7 @@ function Dashboard() {
                     [
                       { id: "3m", label: "3M" },
                       { id: "7m", label: "7M" },
+                      { id: "10m", label: "10M" },
                       { id: "1y", label: "1Y" },
                     ] as const
                   ).map((r) => (
@@ -1681,6 +1681,10 @@ function Dashboard() {
                 {loading && !invTrendSeries.length ? (
                   <div className="chart-empty" style={{ height: 200 }}>
                     <span>Loading trend…</span>
+                  </div>
+                ) : !invTrendSeries.length ? (
+                  <div className="chart-empty" style={{ height: 200 }}>
+                    <span>No trend data yet</span>
                   </div>
                 ) : (
                   <InvTrendChart data={invTrendSeries} height={200} />
@@ -1719,6 +1723,10 @@ function Dashboard() {
                 {loading && !stockMoveSeries.length ? (
                   <div className="chart-empty" style={{ minHeight: 200 }}>
                     <span>Loading movements…</span>
+                  </div>
+                ) : !stockMoveSeries.length ? (
+                  <div className="chart-empty" style={{ minHeight: 200 }}>
+                    <span>No stock movement data yet</span>
                   </div>
                 ) : (
                   <StockMoveChart data={stockMoveSeries} height={200} />

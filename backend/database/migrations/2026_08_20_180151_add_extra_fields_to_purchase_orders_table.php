@@ -9,15 +9,26 @@ return new class extends Migration
     /**
      * Run the migrations.
      */
-   public function up()
-{
-    Schema::table('purchase_orders', function (Blueprint $table) {
-        $table->date('expected_date')->nullable()->after('order_date');
-        $table->string('reference', 255)->nullable()->after('expected_date');
-        $table->text('notes')->nullable()->after('reference');
-        $table->string('product_name')->nullable()->change();
-    });
-}
+    public function up(): void
+    {
+        if (!Schema::hasColumn('purchase_orders', 'expected_date')) {
+            Schema::table('purchase_orders', function (Blueprint $table) {
+                $table->date('expected_date')->nullable()->after('order_date');
+            });
+        }
+
+        if (!Schema::hasColumn('purchase_orders', 'reference')) {
+            Schema::table('purchase_orders', function (Blueprint $table) {
+                $table->string('reference', 255)->nullable()->after('expected_date');
+            });
+        }
+
+        if (!Schema::hasColumn('purchase_orders', 'product_name')) {
+            Schema::table('purchase_orders', function (Blueprint $table) {
+                $table->string('product_name')->nullable();
+            });
+        }
+    }
 
     /**
      * Reverse the migrations.
@@ -25,8 +36,7 @@ return new class extends Migration
     public function down(): void
     {
         Schema::table('purchase_orders', function (Blueprint $table) {
-            $table->string('product_name')->nullable(false)->change();
-            //
+            $table->dropColumn(['expected_date', 'reference', 'product_name']);
         });
     }
 };

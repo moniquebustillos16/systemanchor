@@ -15,6 +15,8 @@ class StockMovement extends Model
         'movement_number',
         'type',
         'product_id',
+        'warehouse_id',
+        'quantity',
         'qty',
         'from_warehouse_id',
         'to_warehouse_id',

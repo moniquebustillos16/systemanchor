@@ -56,11 +56,15 @@ export function useCurrentUser(options: { enabled?: boolean } = {}) {
     queryKey: queryKeys.me,
     queryFn: fetchCurrentUser,
     enabled,
-    staleTime: 5 * 60_000,
+    // Roles may be edited from another session. Never treat a cached
+    // permission snapshot as current when deciding what navigation to show.
+    staleTime: 0,
     gcTime: 30 * 60_000,
     retry: 1,
+    refetchOnMount: "always",
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
+    refetchInterval: 30_000,
   });
 
   return {
@@ -91,7 +95,10 @@ export function usePermissions(options: { enabled?: boolean } = {}) {
     const fromStorage = resolvePermissionsFromStorage();
     if (fromStorage) return fromStorage;
     if (isError) {
-      return { list: ["*"], isAdmin: true };
+      // Permission data is unavailable. Keep the UI fail-closed: Laravel
+      // remains authoritative, and an unavailable /me request must never
+      // make a user appear to be an administrator.
+      return { list: [], isAdmin: false };
     }
     return { list: [], isAdmin: false };
   }, [user, isError]);

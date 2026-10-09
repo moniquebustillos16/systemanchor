@@ -49,6 +49,7 @@ export const ROUTE_VIEW: Record<string, string[]> = {
   ],
   "/returns": ["returns.view", "rma.view"],
   "/warehouses": [
+    "capacity.view",
     "warehouses.view",
     "locations.view",
     "bins.view",

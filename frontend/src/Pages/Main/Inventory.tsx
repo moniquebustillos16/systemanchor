@@ -356,8 +356,10 @@ function Inventory() {
   const effectiveWarehouseId =
     filterWh === "all" || !filterWh ? null : filterWh;
 
-    
-  
+  const { can, isLoaded: permsLoaded } = usePermissions();
+  const canViewWarehouseData = can("capacity.view", "warehouses.view", "locations.view");
+  const canViewSupplierData = can("suppliers.view", "supplier.view", "vendors.view");
+
     const {
       
     stats: queryStats,
@@ -389,12 +391,14 @@ function Inventory() {
   const warehousesQuery = useQuery({
     queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
     queryFn: () => getWarehouses({ per_page: 200, all: 1 }),
+    enabled: canViewWarehouseData,
     staleTime: 60_000,
     placeholderData: (prev) => prev,
   });
   const suppliersQuery = useQuery({
     queryKey: queryKeys.suppliers.list({ per_page: 100 }),
     queryFn: () => getSuppliers({ per_page: 100 }),
+    enabled: canViewSupplierData,
     staleTime: 60_000,
     placeholderData: (prev) => prev,
   });
@@ -473,12 +477,6 @@ const warehousesForFilter = allWarehouses;
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const { can, isLoaded: permsLoaded } = usePermissions();
-
-
-
-
-  
 // Sales Orders: keep filter default "all"
   
   const canView = can("inventory.view", "inventories.view", "products.view");

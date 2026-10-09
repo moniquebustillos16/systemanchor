@@ -306,7 +306,7 @@ function SalesOrders() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [total, setTotal] = useState(0);
   const [lastPage, setLastPage] = useState(1);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const bootMeta = soMetaStore().entry ?? readSoMetaSS();

@@ -539,7 +539,7 @@ function PurchaseOrders() {
   const [stats, setStats] = useState<Stats | null>(() => bootStats);
   const [total, setTotal] = useState(() => bootList?.total ?? 0);
   const [lastPage, setLastPage] = useState(() => bootList?.lastPage ?? 1);
-  const [loading, setLoading] = useState(() => !(bootList?.rows?.length));
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [warehouses, setWarehouses] = useState<Warehouse[]>(

@@ -225,7 +225,7 @@ export function usePurchaseOrders(options: OrderListOptions = {}) {
     queryFn: () => getPurchaseOrders(params),
     enabled,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const statsQ = useQuery({
@@ -233,7 +233,7 @@ export function usePurchaseOrders(options: OrderListOptions = {}) {
     queryFn: () => getPurchaseOrderStats(),
     enabled,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const rows = useMemo(
@@ -292,7 +292,7 @@ export function useSalesOrders(options: OrderListOptions = {}) {
     queryFn: () => getSalesOrders(params),
     enabled,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const statsQ = useQuery({
@@ -300,7 +300,7 @@ export function useSalesOrders(options: OrderListOptions = {}) {
     queryFn: () => getSalesOrderStats(),
     enabled,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const rows = useMemo(
@@ -357,7 +357,7 @@ export function useGoodsReceipts(options: OrderListOptions = {}) {
     queryFn: () => getGoodsReceipts(params),
     enabled,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const statsQ = useQuery({

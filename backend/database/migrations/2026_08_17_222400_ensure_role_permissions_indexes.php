@@ -45,6 +45,14 @@ return new class extends Migration
         }
 
         // sqlite / others – try and ignore
+        if ($driver === 'sqlite') {
+            $indexes = DB::select("PRAGMA index_list(\"{$table}\")");
+
+            return collect($indexes)->contains(
+                fn (object $index) => $index->name === $indexName
+            );
+        }
+
         return false;
     }
 

@@ -124,7 +124,7 @@ export function useCustomers(options: PartnerListOptions = {}) {
     queryFn: () => getCustomers(params),
     enabled,
     staleTime: STALE_MS,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
     refetchOnMount: true,
   });
 
@@ -174,7 +174,7 @@ export function useSuppliers(options: PartnerListOptions = {}) {
     queryFn: () => getSuppliers(params),
     enabled,
     staleTime: STALE_MS,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
     refetchOnMount: true,
   });
 

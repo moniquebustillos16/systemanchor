@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\CycleCount;
 use App\Models\Notification;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 
 class CycleCountController extends Controller
@@ -119,6 +120,16 @@ class CycleCountController extends Controller
             'counter'        => 'nullable|string|max:150',
             'status'         => 'nullable|string|in:draft,pending,completed',
         ]);
+
+        foreach (['started_at', 'ended_at'] as $timeField) {
+            if (!array_key_exists($timeField, $data) || $data[$timeField] === null) {
+                continue;
+            }
+
+            if (preg_match('/^\d{2}:\d{2}(?::\d{2})?$/', $data[$timeField])) {
+                $data[$timeField] = Carbon::today()->setTimeFromTimeString($data[$timeField]);
+            }
+        }
 
         if (array_key_exists('counted', $data) || array_key_exists('system_qty', $data)) {
             $counted = $data['counted'] ?? $count->counted;

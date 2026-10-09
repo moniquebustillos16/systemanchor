@@ -90,6 +90,8 @@ class StockMovementController extends Controller
                 ->lockForUpdate()
                 ->findOrFail($validated['product_id']);
 
+            $warehouseId = $fromId ?? $toId ?? $product->warehouse_id;
+
             $current = (float) $product->qty;
 
             if ($type === 'IN') {
@@ -128,13 +130,15 @@ class StockMovementController extends Controller
             $movement = StockMovement::create([
                 'type'              => $type,
                 'product_id'        => $product->id,
+                'warehouse_id'      => $warehouseId,
                 'qty'               => $qty,
+                'quantity'          => (int) round($qty),
                 'from_warehouse_id' => $fromId,
                 'to_warehouse_id'   => $toId,
                 'reference'         => $validated['reference'] ?? null,
                 'notes'             => $validated['notes'] ?? null,
                 'movement_date'     => now(),
-                'status'            => 'posted',
+                'status'            => 'COMPLETED',
             ]);
 
             $movement->load([

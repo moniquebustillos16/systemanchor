@@ -10,6 +10,8 @@ class PermissionSeeder extends Seeder
     public function run(): void
     {
         $permissions = [
+            'dashboard.view',
+
             'inventory.view',
             'inventory.create',
             'inventory.update',
@@ -36,6 +38,13 @@ class PermissionSeeder extends Seeder
             'warehouses.create',
             'warehouses.update',
             'warehouses.delete',
+            'capacity.view',
+            'capacity.create',
+            'capacity.update',
+            'capacity.delete',
+
+            'suppliers.view',
+            'customers.view',
 
             'users.view',
             'users.create',

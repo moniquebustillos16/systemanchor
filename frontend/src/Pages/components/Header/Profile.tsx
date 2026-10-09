@@ -9,6 +9,7 @@ import {
   type ProfileSession,
   type ProfileActivityItem,
 } from "../../../hooks/useProfile";
+import { applyThemePreference } from "../../../lib/theme";
 import "./Profile.css";
 
 /* ===================== ICONS ===================== */
@@ -186,16 +187,6 @@ function broadcastProfileUpdate(payload: {
   }
 }
 
-function applyTheme(theme: UserSettings["theme"]) {
-  const root = document.documentElement;
-  if (theme === "system") {
-    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    root.setAttribute("data-theme", dark ? "dark" : "light");
-  } else {
-    root.setAttribute("data-theme", theme);
-  }
-}
-
 function calcCompleteness(user: ProfileUser | null, hasImage: boolean): number {
   if (!user) return 0;
   const checks = [
@@ -301,7 +292,7 @@ function Profile() {
     setPreviewUrl(null);
     setTwoFactorEnabled(!!query2fa);
     setFormSettings(querySettings);
-    if (querySettings.theme) applyTheme(querySettings.theme);
+    if (querySettings.theme) applyThemePreference(querySettings.theme);
     broadcastProfileUpdate({
       name: queryUser.name,
       email: queryUser.email,
@@ -333,15 +324,19 @@ function Profile() {
   const avatarSrc = (() => {
     const url = previewUrl || user?.image_url || user?.image_path || null;
     if (!url) return null;
+    const apiOrigin = new URL(
+      import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api",
+      window.location.origin
+    ).origin;
     if (url.startsWith("blob:") || url.startsWith("data:")) return url;
     if (/^https?:\/\//i.test(url)) {
       const parsed = new URL(url);
       if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
-        return new URL(import.meta.env.VITE_API_URL).origin + parsed.pathname;
+        return apiOrigin + parsed.pathname;
       }
       return url;
     }
-    return new URL(import.meta.env.VITE_API_URL).origin + (url.startsWith("/") ? url : "/" + url);
+    return apiOrigin + (url.startsWith("/") ? url : "/" + url);
   })();
   const initials = (name || user?.name || "?")
     .split(" ")
@@ -425,7 +420,7 @@ function Profile() {
       const saved = (await saveSettings.mutateAsync(formSettings)) as UserSettings;
       const next = { ...DEFAULT_SETTINGS, ...formSettings, ...saved };
       setFormSettings(next);
-      if (next.theme) applyTheme(next.theme);
+      if (next.theme) applyThemePreference(next.theme);
       broadcastProfileUpdate({ theme: next.theme });
       showToast("success", "Settings saved");
     } catch (err: any) {
@@ -510,7 +505,7 @@ function Profile() {
 
   const updateSetting = <K extends keyof UserSettings>(key: K, value: UserSettings[K]) => {
     setFormSettings((prev) => ({ ...prev, [key]: value }));
-    if (key === "theme") applyTheme(value as UserSettings["theme"]);
+    if (key === "theme") applyThemePreference(value as UserSettings["theme"]);
   };
 
   const handleToggle2FA = async () => {

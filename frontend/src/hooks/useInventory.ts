@@ -105,7 +105,14 @@ export function useInventoryList(options: UseInventoryListOptions = {}) {
     queryKey: queryKeys.inventory.list(params as Record<string, unknown>),
     queryFn: () => getInventoryList(params),
     enabled,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) =>
+      prev ?? {
+        data: [],
+        current_page: page,
+        last_page: 1,
+        per_page: perPage,
+        total: 0,
+      },
   });
 
   const rows = useMemo(() => {
@@ -232,7 +239,7 @@ export function useInventoryPage(options: UseInventoryListOptions = {}) {
     stats: statsView,
     statsQuery: stats,
     list,
-    isLoading: stats.isLoading || list.isLoading,
+    isLoading: list.isLoading,
     isFetching: stats.isFetching || list.isFetching,
     refetchAll: async () => {
       await Promise.all([stats.refetch(), list.refetch()]);

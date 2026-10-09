@@ -98,7 +98,7 @@ export function useWarehouses(options: UseWarehousesOptions = {}) {
     queryFn: () => fetchWarehousesRaw(params),
     enabled,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   // Full records — Location / Capacity keep capacity, utilized, etc.

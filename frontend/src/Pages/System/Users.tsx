@@ -46,6 +46,20 @@ const IconX = () => (
   </svg>
 );
 
+const IconEye = () => (
+  <svg {...svg} width="18" height="18">
+    <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
+const IconEyeOff = () => (
+  <svg {...svg} width="18" height="18">
+    <path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8" />
+    <path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 1.9-.2 2.8-.5" />
+  </svg>
+);
+
 type Role = { id: string; name: string };
 type Warehouse = { id: string; name: string; code?: string; location?: string | null };
 
@@ -287,6 +301,7 @@ function Users() {
   });
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [saving, setSaving] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const showToast = useCallback(
     (type: string, title: string, msg: string) => {
@@ -402,6 +417,7 @@ function Users() {
 
   const openCreate = () => {
     setEditing(null);
+    setShowPassword(false);
     setForm({
       name: "",
       email: "",
@@ -417,6 +433,7 @@ function Users() {
 
   const openEdit = (u: User) => {
     setEditing(u);
+    setShowPassword(false);
     setForm({
       name: u.name || "",
       email: u.email || "",
@@ -1012,29 +1029,42 @@ function Users() {
                   )}
                 </label>
 
-                <label
+                <div
                   className={`form-field ${
                     formErrors.password ? "has-error" : ""
                   }`}
                 >
-                  <span>
+                  <label className="users-password-label" htmlFor="user-password">
                     Password {editing ? "(leave blank to keep)" : "*"}
-                  </span>
-                  <input
-                    type="password"
-                    value={form.password}
-                    onChange={(e) =>
-                      updateFormField("password", e.target.value)
-                    }
-                    placeholder={editing ? "••••••••" : "Min 6 characters"}
-                    minLength={editing ? undefined : 6}
-                    aria-invalid={!!formErrors.password}
-                    autoComplete="new-password"
-                  />
+                  </label>
+                  <div className="users-password-control">
+                    <input
+                      id="user-password"
+                      type={showPassword ? "text" : "password"}
+                      value={form.password}
+                      onChange={(e) =>
+                        updateFormField("password", e.target.value)
+                      }
+                      placeholder={editing ? "Leave blank to keep current password" : "Min 6 characters"}
+                      minLength={editing ? undefined : 6}
+                      aria-invalid={!!formErrors.password}
+                      autoComplete="new-password"
+                    />
+                    <button
+                      type="button"
+                      className="users-password-toggle"
+                      onClick={() => setShowPassword((visible) => !visible)}
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                      aria-pressed={showPassword}
+                      title={showPassword ? "Hide password" : "Show password"}
+                    >
+                      {showPassword ? <IconEyeOff /> : <IconEye />}
+                    </button>
+                  </div>
                   {formErrors.password && (
                     <span className="field-error">{formErrors.password}</span>
                   )}
-                </label>
+                </div>
 
                 <label className="form-field">
                   <span>Role</span>

@@ -88,7 +88,7 @@ export function useStockMovementsList(options: UseStockMovementsListOptions = {}
       }
     },
     enabled,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev ?? [],
   });
 
   const rows = useMemo(

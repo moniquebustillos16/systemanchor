@@ -179,7 +179,7 @@ function CycleCount() {
       return getItems(json) as Count[];
     },
     staleTime: 60_000,
-    placeholderData: (previous) => previous,
+    placeholderData: (previous) => previous ?? [],
   });
 
   const rows = countsQuery.data ?? [];

@@ -61,18 +61,25 @@ export async function prefetchAppData(): Promise<void> {
 
   // Lightweight catalogs shared by forms and filters across Orders, System,
   // Cycle Count, Reports, and Analytics. Keep large transactional lists lazy.
-  tasks.push(
-    queryClient.prefetchQuery({
-      queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
-      queryFn: () => getWarehouses({ per_page: 200, all: 1 }),
-      staleTime: 5 * 60_000,
-    }),
-    queryClient.prefetchQuery({
+  if (canView("/warehouses") || canView("/capacity")) {
+    tasks.push(
+      queryClient.prefetchQuery({
+        queryKey: queryKeys.warehouses.list({ per_page: 200, all: 1 }),
+        queryFn: () => getWarehouses({ per_page: 200, all: 1 }),
+        staleTime: 5 * 60_000,
+      })
+    );
+  }
+
+  if (canView("/products")) {
+    tasks.push(
+      queryClient.prefetchQuery({
       queryKey: queryKeys.categories,
       queryFn: () => getCategories(),
       staleTime: 5 * 60_000,
-    })
-  );
+      })
+    );
+  }
 
   const results = await Promise.allSettled(tasks);
   results.forEach((r) => {
