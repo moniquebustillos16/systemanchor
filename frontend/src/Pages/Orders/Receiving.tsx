@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { isAxiosError } from "axios";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
@@ -15,6 +16,7 @@ import "../css/Orders.css";
 type Supplier = { id: string; name: string };
 type Warehouse = { id: string; code: string; name?: string };
 type User = { id: string; name: string };
+type CatalogProduct = { id: string; sku: string; name: string };
 
 type PoLine = {
   product_id?: string;
@@ -80,9 +82,6 @@ type ToastState = {
 };
 
 /* ── Constants ─────────────────────────────────────────────── */
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 const OPEN_STATUSES = ["pending", "processing", "partial"];
 const PAGE_SIZE = 15;
 
@@ -260,6 +259,8 @@ function Receiving() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [receivers, setReceivers] = useState<User[]>([]);
+  const [products, setProducts] = useState<CatalogProduct[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
 
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<GrForm>(emptyForm);
@@ -367,12 +368,39 @@ function Receiving() {
 
   /* ── Form option loaders (PO + supplier + user). Warehouses = useWarehouses. ─ */
   const loadFormOptions = useCallback(async () => {
+    setProductsLoading(true);
     try {
-      const [poJson, supJson, userJson] = await Promise.all([
+      const [poJson, supJson, userJson, firstProductPage] = await Promise.all([
         fetchCachedLookup("/purchase-orders", lookupKeys.purchaseOrders, { per_page: 200, all: 1 }),
         fetchCachedLookup("/suppliers", lookupKeys.suppliers, { per_page: 200 }),
         fetchCachedLookup("/users", lookupKeys.users, { per_page: 100 }),
+        fetchCachedLookup(
+          "/inventories",
+          [...lookupKeys.products, "page", 1],
+          { per_page: 100, page: 1 }
+        ),
       ]);
+
+      const lastProductPage = Math.max(1, Number(asRecord(firstProductPage).last_page) || 1);
+      const remainingProductPages = await Promise.all(
+        Array.from({ length: lastProductPage - 1 }, (_, index) =>
+          fetchCachedLookup(
+            "/inventories",
+            [...lookupKeys.products, "page", index + 2],
+            { per_page: 100, page: index + 2 }
+          )
+        )
+      );
+      const catalogProducts = [firstProductPage, ...remainingProductPages]
+        .flatMap(getItems)
+        .map((item) => asRecord(item))
+        .filter((item) => item.id != null && item.sku != null && item.name != null)
+        .map((item) => ({
+          id: String(item.id),
+          sku: String(item.sku),
+          name: String(item.name),
+        }));
+      setProducts(catalogProducts);
 
         const pos: PurchaseOrder[] = getItems(poJson).map((item) => {
         const row = asRecord(item);
@@ -463,6 +491,8 @@ function Receiving() {
         sups: [] as Supplier[],
         users: [] as User[],
       };
+    } finally {
+      setProductsLoading(false);
     }
   }, [showToast]);
 
@@ -579,6 +609,11 @@ function Receiving() {
       setFormError("Received quantity must be greater than zero.");
       return;
     }
+    const receivedLines = form.lines.filter((line) => Number(line.received) > 0);
+    if (receivedLines.some((line) => !products.some((product) => product.id === line.product_id))) {
+      setFormError("Choose an active catalog product for every line with a received quantity.");
+      return;
+    }
 
     const po = purchaseOrders.find((p) => p.id === form.purchase_order_id);
 
@@ -592,40 +627,19 @@ function Receiving() {
         date: form.date || null,
         expected,
         received,
+        lines: receivedLines.map((line) => ({
+            product_id: line.product_id,
+            product_name: line.product_name.trim(),
+            expected: Number(line.expected) || 0,
+            received: Number(line.received),
+            unit_price: Number(line.unit_price) || 0,
+          })),
         status: form.status || "pending",
       });
 
       const data = body.data ?? body;
-      const receiptId = String(data.id ?? "");
       const receiptNumber = String(
         data.receipt_number ?? `GR-${Date.now().toString().slice(-6)}`
-      );
-
-      await Promise.all(
-        form.lines
-          .filter((l) => l.product_name.trim() && Number(l.received) > 0)
-          .map(async (l) => {
-            try {
-              await api.post("/product-transactions", {
-                product_id:
-                  l.product_id && UUID_RE.test(l.product_id)
-                    ? l.product_id
-                    : null,
-                product_name: l.product_name.trim(),
-                transaction_type: "receiving",
-                reference_id:
-                  receiptId && UUID_RE.test(receiptId) ? receiptId : null,
-                reference_number: receiptNumber,
-                partner_id: form.supplier_id,
-                partner_type: "supplier",
-                quantity: Number(l.received) || 0,
-                unit_price: Number(l.unit_price) || 0,
-                status: form.status || "pending",
-              });
-            } catch {
-              /* non-blocking */
-            }
-          })
       );
 
       setShowAdd(false);
@@ -666,15 +680,34 @@ function Receiving() {
       showToast(
         "success",
         "Receiving complete",
-        `${receiptNumber} closed. Post stock-in via Stock Movements if needed.`
+        `${receiptNumber} closed and stock posted to the receiving warehouse.`
       );
       await invalidateGoodsReceipts();
       await refetchAll();
-    } catch (err) {
+    } catch (err: unknown) {
+      const responseData =
+        isAxiosError(err) &&
+        typeof err.response?.data === "object" &&
+        err.response.data !== null
+          ? (err.response.data as {
+              message?: unknown;
+              errors?: Record<string, unknown>;
+            })
+          : null;
+      const validationMessages = Object.values(responseData?.errors ?? {}).flatMap(
+        (value) =>
+          Array.isArray(value)
+            ? value.filter((message): message is string => typeof message === "string")
+            : []
+      );
+      const message =
+        (typeof responseData?.message === "string" && responseData.message) ||
+        validationMessages.join(" ") ||
+        (err instanceof Error ? err.message : "Could not complete receipt");
       showToast(
         "error",
         "Complete failed",
-        err instanceof Error ? err.message : "Could not complete receipt"
+        message
       );
     } finally {
       setCompletingId(null);
@@ -1308,17 +1341,32 @@ function Receiving() {
                       <div key={line.key} className="po-line-row">
                         <div className="form-field po-line-product">
                           {idx === 0 && <label>Product</label>}
-                          <input
-                            type="text"
-                            value={line.product_name}
-                            onChange={(e) =>
+                          <select
+                            value={line.product_id}
+                            onChange={(e) => {
+                              const product = products.find((item) => item.id === e.target.value);
                               setLine(line.key, {
-                                product_name: e.target.value,
-                              })
-                            }
-                            disabled={saving}
-                            placeholder="Product name"
-                          />
+                                product_id: e.target.value,
+                                product_name: product?.name ?? "",
+                              });
+                            }}
+                            disabled={saving || productsLoading}
+                            required={rec > 0}
+                          >
+                            <option value="">
+                              {productsLoading ? "Loading catalog…" : "— Select catalog product —"}
+                            </option>
+                            {line.product_id && !products.some((item) => item.id === line.product_id) && (
+                              <option value={line.product_id}>
+                                Unavailable catalog product — {line.product_name || "select a replacement"}
+                              </option>
+                            )}
+                            {products.map((product) => (
+                              <option key={product.id} value={product.id}>
+                                {product.sku} — {product.name}
+                              </option>
+                            ))}
+                          </select>
                           {exp > 0 && (
                             <span
                               className={`po-line-meta ${

@@ -43,10 +43,10 @@ class User extends Authenticatable
     ];
 
     protected $casts = [
-        'email_verified_at'     => 'datetime',
-        'last_login_at'         => 'datetime',
-        'password'              => 'hashed',
-        'deleted_at'            => 'datetime',
+        'email_verified_at' => 'datetime',
+        'last_login_at' => 'datetime',
+        'password' => 'hashed',
+        'deleted_at' => 'datetime',
         'access_all_warehouses' => 'boolean',
     ];
 
@@ -65,7 +65,7 @@ class User extends Authenticatable
     public function hasPermission(string $permission): bool
     {
         // No role = no permission
-        if (!$this->role) {
+        if (! $this->role) {
             return false;
         }
 
@@ -123,7 +123,8 @@ class User extends Authenticatable
      */
     public function canAccessAllWarehouses(): bool
     {
-        return $this->access_all_warehouses === true;
+        return $this->access_all_warehouses === true
+            || strcasecmp((string) $this->role?->name, 'Admin') === 0;
     }
 
     /**

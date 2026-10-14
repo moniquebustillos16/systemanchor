@@ -7,6 +7,13 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (DB::getDriverName() === 'sqlite') {
+            return;
+        }
+        if (DB::getDriverName() !== 'pgsql') {
+            throw new RuntimeException('Supplier and purchase-order UUID alignment is only supported on PostgreSQL.');
+        }
+
         DB::statement('ALTER TABLE suppliers ADD COLUMN id_uuid UUID');
         DB::statement('UPDATE suppliers SET id_uuid = gen_random_uuid()');
         DB::statement('ALTER TABLE purchase_orders ADD COLUMN supplier_uuid UUID');

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { queryClient, queryKeys } from "../lib/queryClient";
 import {
   getStockMovements,
+  getStockMovementStats,
   getProductOptions,
   createStockMovement,
 } from "../api/stockMovements";
@@ -139,6 +140,15 @@ export function useStockMovementsList(options: UseStockMovementsListOptions = {}
     error: query.error,
     refetch: query.refetch,
   };
+}
+
+export function useStockMovementStats(options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: queryKeys.stockMovements.stats,
+    queryFn: () => getStockMovementStats(),
+    enabled: options.enabled !== false,
+    staleTime: 30_000,
+  });
 }
 
 export function useStockProductOptions(options: { enabled?: boolean } = {}) {

@@ -20,15 +20,26 @@ class StockMovement extends Model
         'qty',
         'from_warehouse_id',
         'to_warehouse_id',
+        'reason',
         'reference',
         'notes',
         'performed_by',
         'movement_date',
         'status',
+        'idempotency_key',
+        'request_hash',
+        'source_balance_before',
+        'source_balance_after',
+        'destination_balance_before',
+        'destination_balance_after',
     ];
 
     protected $casts = [
         'qty' => 'float',
+        'source_balance_before' => 'float',
+        'source_balance_after' => 'float',
+        'destination_balance_before' => 'float',
+        'destination_balance_after' => 'float',
         'movement_date' => 'datetime',
     ];
 

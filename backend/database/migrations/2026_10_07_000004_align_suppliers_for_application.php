@@ -27,11 +27,27 @@ return new class extends Migration
             }
         });
 
+        if (DB::getDriverName() !== 'pgsql') {
+            if (DB::getDriverName() !== 'sqlite') {
+                throw new RuntimeException('Supplier status alignment is only supported on PostgreSQL.');
+            }
+
+            return;
+        }
+
         DB::statement("ALTER TABLE suppliers ALTER COLUMN status TYPE VARCHAR(30) USING CASE WHEN status THEN 'active' ELSE 'inactive' END");
     }
 
     public function down(): void
     {
+        if (DB::getDriverName() !== 'pgsql') {
+            if (DB::getDriverName() !== 'sqlite') {
+                throw new RuntimeException('Supplier status rollback is only supported on PostgreSQL.');
+            }
+
+            return;
+        }
+
         DB::statement("ALTER TABLE suppliers ALTER COLUMN status TYPE BOOLEAN USING status = 'active'");
 
         Schema::table('suppliers', function (Blueprint $table) {

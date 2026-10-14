@@ -499,6 +499,7 @@ function Sidebar({
   defaultCollapsed = false,
 }: SidebarProps = {}) {
   const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const collapsed = controlledCollapsed ?? internalCollapsed;
   const location = useLocation();
 
@@ -561,6 +562,11 @@ function Sidebar({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && mobileOpen) {
+        setMobileOpen(false);
+        window.dispatchEvent(new CustomEvent("sa-mobile-nav-state", { detail: false }));
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
         e.preventDefault();
         toggleSidebar();
@@ -568,7 +574,42 @@ function Sidebar({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleSidebar]);
+  }, [mobileOpen, toggleSidebar]);
+
+  useEffect(() => {
+    const onToggle = (event: Event) => {
+      const { detail } = event as CustomEvent<boolean>;
+      setMobileOpen(detail);
+    };
+    const onBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches) setMobileOpen(false);
+    };
+    const desktopBreakpoint = window.matchMedia("(min-width: 901px)");
+
+    window.addEventListener("sa-mobile-nav-toggle", onToggle);
+    desktopBreakpoint.addEventListener("change", onBreakpointChange);
+    return () => {
+      window.removeEventListener("sa-mobile-nav-toggle", onToggle);
+      desktopBreakpoint.removeEventListener("change", onBreakpointChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+
+    const mainWrapper = document.querySelector(".main-wrapper");
+    mainWrapper?.setAttribute("inert", "");
+    document.body.classList.add("mobile-nav-open");
+    const focusFrame = requestAnimationFrame(() => {
+      navRef.current?.querySelector<HTMLAnchorElement>(".nav-item")?.focus();
+    });
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      mainWrapper?.removeAttribute("inert");
+      document.body.classList.remove("mobile-nav-open");
+      document.getElementById("mobile-nav-toggle")?.focus();
+    };
+  }, [mobileOpen]);
 
   /* ---- active route ---- */
 
@@ -595,53 +636,67 @@ function Sidebar({
       if (navRef.current) saveScroll(navRef.current.scrollTop);
       e.currentTarget.blur();
       e.stopPropagation();
+      if (mobileOpen) {
+        setMobileOpen(false);
+        window.dispatchEvent(new CustomEvent("sa-mobile-nav-state", { detail: false }));
+      }
     },
-    [saveScroll]
+    [mobileOpen, saveScroll]
   );
+
+  const handleSidebarHeaderClick = useCallback(() => {
+    if (window.matchMedia("(max-width: 900px)").matches) {
+      setMobileOpen(false);
+      window.dispatchEvent(new CustomEvent("sa-mobile-nav-state", { detail: false }));
+      return;
+    }
+    toggleSidebar();
+  }, [toggleSidebar]);
 
   /* ---- render ---- */
 
   return (
-    <aside
-      className={`sidebar ${collapsed ? "collapsed" : ""}`}
-      id="sidebar"
-      aria-expanded={!collapsed}
-    >
-      <div
-        className="sidebar-header sidebar-toggle-hit"
-        onClick={toggleSidebar}
-        data-tooltip="Collapse / Expand"
-        style={{ cursor: "pointer" }}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggleSidebar();
-          }
-        }}
-        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        title={
-          collapsed ? "Expand sidebar (⌘B)" : "Collapse sidebar (⌘B)"
-        }
+    <>
+      <aside
+        className={`sidebar ${collapsed ? "collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`}
+        id="sidebar"
+        role={mobileOpen ? "dialog" : undefined}
+        aria-label="Application navigation"
+        aria-modal={mobileOpen || undefined}
       >
-        <div className="sidebar-logo" aria-hidden="true">
-          <img src={mainLogo} alt="" className="sidebar-logo-img" />
+        <div
+          className="sidebar-header sidebar-toggle-hit"
+          onClick={handleSidebarHeaderClick}
+          data-tooltip="Collapse / Expand"
+          style={{ cursor: "pointer" }}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleSidebarHeaderClick();
+            }
+          }}
+          aria-label={mobileOpen ? "Close navigation" : collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={mobileOpen ? "Close navigation" : collapsed ? "Expand sidebar (⌘B)" : "Collapse sidebar (⌘B)"}
+        >
+          <div className="sidebar-logo" aria-hidden="true">
+            <img src={mainLogo} alt="" className="sidebar-logo-img" />
+          </div>
+          <div className="sidebar-brand-wrap">
+            <span className="sidebar-brand">System Anchor</span>
+            <span className="sidebar-tagline">Warehouse Management</span>
+          </div>
         </div>
-        <div className="sidebar-brand-wrap">
-          <span className="sidebar-brand">System Anchor</span>
-          <span className="sidebar-tagline">Warehouse Management</span>
-        </div>
-      </div>
 
-      <nav
-        className="sidebar-nav"
-        id="sidebar-nav"
-        aria-label="Main navigation"
-        ref={navRef}
-        onScroll={handleNavScroll}
-      >
-        {NAV.map((section) => {
+        <nav
+          className="sidebar-nav"
+          id="sidebar-nav"
+          aria-label="Main navigation"
+          ref={navRef}
+          onScroll={handleNavScroll}
+        >
+          {NAV.map((section) => {
           // Entire System section is hidden for non-admins
           if (section.section === "System" && !isAdmin) {
             return null;
@@ -699,9 +754,21 @@ function Sidebar({
               </div>
             </div>
           );
-        })}
-      </nav>
-    </aside>
+          })}
+        </nav>
+      </aside>
+      {mobileOpen && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close navigation menu"
+          onClick={() => {
+            setMobileOpen(false);
+            window.dispatchEvent(new CustomEvent("sa-mobile-nav-state", { detail: false }));
+          }}
+        />
+      )}
+    </>
   );
 }
 

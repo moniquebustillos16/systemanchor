@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\GoodsReceipt;
 use App\Models\Notification;
 use App\Models\PurchaseOrder;
 use App\Models\User;
@@ -27,9 +28,9 @@ class PurchaseOrderController extends Controller
         if ($search = $request->query('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('po_number', 'ilike', "%{$search}%")
-                  ->orWhereHas('supplier', function ($sq) use ($search) {
-                      $sq->where('name', 'ilike', "%{$search}%");
-                  });
+                    ->orWhereHas('supplier', function ($sq) use ($search) {
+                        $sq->where('name', 'ilike', "%{$search}%");
+                    });
             });
         }
 
@@ -46,7 +47,7 @@ class PurchaseOrderController extends Controller
         }
 
         $sort = $request->query('sort', 'order_date');
-        $dir  = $request->query('dir', 'desc') === 'asc' ? 'asc' : 'desc';
+        $dir = $request->query('dir', 'desc') === 'asc' ? 'asc' : 'desc';
         if (in_array($sort, ['po_number', 'order_date', 'total', 'status', 'created_at'], true)) {
             $query->orderBy($sort, $dir);
         } else {
@@ -71,7 +72,7 @@ class PurchaseOrderController extends Controller
             return response()->json($payload);
         }
 
-        $cacheKey = 'purchase_orders:stats:user:' . $user->id;
+        $cacheKey = 'purchase_orders:stats:user:'.$user->id;
         $payload = Cache::remember($cacheKey, self::STATS_CACHE_TTL, function () use ($allowed) {
             return $this->computeStats($allowed);
         });
@@ -93,17 +94,22 @@ class PurchaseOrderController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'po_number'      => 'nullable|string|max:50|unique:purchase_orders,po_number',
-            'supplier_id'    => 'required|uuid|exists:suppliers,id',
-            'warehouse_id'   => 'nullable|uuid|exists:warehouses,id',
-            'order_date'     => 'nullable|date',
-            'expected_date'  => 'nullable|date',
-            'reference'      => 'nullable|string|max:255',
-            'notes'          => 'nullable|string|max:2000',
-            'product_name'   => 'nullable|string|max:255',
-            'items'          => 'nullable|numeric|min:0',
-            'total'          => 'nullable|numeric|min:0',
-            'status'         => ['nullable', Rule::in([
+            'po_number' => 'nullable|string|max:50|unique:purchase_orders,po_number',
+            'supplier_id' => 'required|uuid|exists:suppliers,id',
+            'warehouse_id' => 'nullable|uuid|exists:warehouses,id',
+            'order_date' => 'nullable|date',
+            'expected_date' => 'nullable|date',
+            'reference' => 'nullable|string|max:255',
+            'notes' => 'nullable|string|max:2000',
+            'product_name' => 'nullable|string|max:255',
+            'items' => 'nullable|numeric|min:0',
+            'total' => 'nullable|numeric|min:0',
+            'lines' => 'required|array|min:1',
+            'lines.*.product_id' => 'required_with:lines|uuid|exists:products,id',
+            'lines.*.product_name' => 'nullable|string|max:255',
+            'lines.*.qty' => 'required_with:lines|numeric|gt:0',
+            'lines.*.unit_price' => 'nullable|numeric|min:0',
+            'status' => ['nullable', Rule::in([
                 'pending', 'processing', 'completed', 'received', 'shipped', 'cancelled',
             ])],
         ]);
@@ -126,17 +132,18 @@ class PurchaseOrderController extends Controller
         }
 
         $po = PurchaseOrder::create([
-            'po_number'     => $poNumber,
-            'supplier_id'   => $validated['supplier_id'],
-            'warehouse_id'  => $validated['warehouse_id'] ?? null,
-            'order_date'    => $validated['order_date'] ?? now()->toDateString(),
+            'po_number' => $poNumber,
+            'supplier_id' => $validated['supplier_id'],
+            'warehouse_id' => $validated['warehouse_id'] ?? null,
+            'order_date' => $validated['order_date'] ?? now()->toDateString(),
             'expected_date' => $validated['expected_date'] ?? null,
-            'reference'     => $validated['reference'] ?? null,
-            'notes'         => $validated['notes'] ?? null,
-            'product_name'  => $validated['product_name'] ?? 'Product offer',
-            'items'         => (int) max(1, round((float) ($validated['items'] ?? 1))),
-            'total'         => (float) ($validated['total'] ?? 0),
-            'status'        => $validated['status'] ?? 'pending',
+            'reference' => $validated['reference'] ?? null,
+            'notes' => $validated['notes'] ?? null,
+            'product_name' => $validated['product_name'] ?? 'Product offer',
+            'items' => (int) max(1, round((float) ($validated['items'] ?? 1))),
+            'total' => (float) ($validated['total'] ?? 0),
+            'lines' => $validated['lines'] ?? [],
+            'status' => $validated['status'] ?? 'pending',
         ]);
 
         $po->load(['supplier:id,name', 'warehouse:id,code,name']);
@@ -146,16 +153,16 @@ class PurchaseOrderController extends Controller
             $this->notifyAll(
                 'info',
                 'Purchase order created',
-                ($po->po_number ?? 'PO') . ' was created',
+                ($po->po_number ?? 'PO').' was created',
                 '/purchase-orders'
             );
         } catch (\Throwable $e) {
-            Log::warning('PO notifyAll failed: ' . $e->getMessage());
+            Log::warning('PO notifyAll failed: '.$e->getMessage());
         }
 
         return response()->json([
             'message' => 'Purchase order created',
-            'data'    => $po,
+            'data' => $po,
         ], 201);
     }
 
@@ -164,24 +171,47 @@ class PurchaseOrderController extends Controller
         $po = PurchaseOrder::whereNull('deleted_at')->findOrFail($id);
         $this->assertCanAccessPurchaseOrder($request->user(), $po);
 
+        if ($request->exists('warehouse_id')
+            && (string) $request->input('warehouse_id') !== (string) $po->warehouse_id
+            && GoodsReceipt::query()->where('purchase_order_id', $po->id)->exists()) {
+            abort(409, 'A purchase order warehouse cannot change after a receipt has been created.');
+        }
+
+        if ($request->exists('lines') && GoodsReceipt::query()
+            ->where('purchase_order_id', $po->id)
+            ->where('status', 'completed')
+            ->exists()) {
+            abort(409, 'Purchase order lines cannot change after stock has been received.');
+        }
+
         $oldStatus = $po->status;
 
         $validated = $request->validate([
-            'supplier_id'    => 'sometimes|uuid|exists:suppliers,id',
-            'warehouse_id'   => 'sometimes|nullable|uuid|exists:warehouses,id',
-            'order_date'     => 'sometimes|date',
-            'expected_date'  => 'sometimes|nullable|date',
-            'reference'      => 'sometimes|nullable|string|max:255',
-            'notes'          => 'sometimes|nullable|string|max:2000',
-            'items'          => 'sometimes|numeric|min:0',
-            'total'          => 'sometimes|numeric|min:0',
-            'status'         => ['sometimes', Rule::in([
+            'supplier_id' => 'sometimes|uuid|exists:suppliers,id',
+            'warehouse_id' => 'sometimes|nullable|uuid|exists:warehouses,id',
+            'order_date' => 'sometimes|date',
+            'expected_date' => 'sometimes|nullable|date',
+            'reference' => 'sometimes|nullable|string|max:255',
+            'notes' => 'sometimes|nullable|string|max:2000',
+            'items' => 'sometimes|numeric|min:0',
+            'total' => 'sometimes|numeric|min:0',
+            'lines' => 'sometimes|array|min:1',
+            'lines.*.product_id' => 'required_with:lines|uuid|exists:products,id',
+            'lines.*.product_name' => 'nullable|string|max:255',
+            'lines.*.qty' => 'required_with:lines|numeric|gt:0',
+            'lines.*.unit_price' => 'nullable|numeric|min:0',
+            'status' => ['sometimes', Rule::in([
                 'pending', 'processing', 'completed', 'received', 'shipped', 'cancelled',
             ])],
         ]);
 
-        if (array_key_exists('warehouse_id', $validated) && $validated['warehouse_id'] !== null) {
-            $this->assertCanAccessWarehouseId($request->user(), (string) $validated['warehouse_id']);
+        if (array_key_exists('warehouse_id', $validated)) {
+            if ($validated['warehouse_id'] === null && is_array($this->allowedWarehouseIds($request->user()))) {
+                abort(422, 'A warehouse is required for your account.');
+            }
+            if ($validated['warehouse_id'] !== null) {
+                $this->assertCanAccessWarehouseId($request->user(), (string) $validated['warehouse_id']);
+            }
         }
 
         if (array_key_exists('items', $validated)) {
@@ -204,17 +234,17 @@ class PurchaseOrderController extends Controller
                 $this->notifyAll(
                     $type,
                     'Purchase order updated',
-                    ($po->po_number ?? 'PO') . " is now {$validated['status']}",
+                    ($po->po_number ?? 'PO')." is now {$validated['status']}",
                     '/purchase-orders'
                 );
             } catch (\Throwable $e) {
-                Log::warning('PO notifyAll failed: ' . $e->getMessage());
+                Log::warning('PO notifyAll failed: '.$e->getMessage());
             }
         }
 
         return response()->json([
             'message' => 'Purchase order updated',
-            'data'    => $po,
+            'data' => $po,
         ]);
     }
 
@@ -222,6 +252,12 @@ class PurchaseOrderController extends Controller
     {
         $po = PurchaseOrder::whereNull('deleted_at')->findOrFail($id);
         $this->assertCanAccessPurchaseOrder($request->user(), $po);
+        if (GoodsReceipt::query()
+            ->where('purchase_order_id', $po->id)
+            ->where('status', 'completed')
+            ->exists()) {
+            abort(409, 'A purchase order with posted receipts cannot be deleted.');
+        }
 
         $po->delete();
         $this->forgetStatsCache($request->user());
@@ -234,11 +270,11 @@ class PurchaseOrderController extends Controller
      ───────────────────────────────────────────── */
 
     /**
-     * @return list<string>|null  null = all warehouses
+     * @return list<string>|null null = all warehouses
      */
     private function allowedWarehouseIds(?User $user): ?array
     {
-        if (!$user) {
+        if (! $user) {
             return [];
         }
 
@@ -246,7 +282,7 @@ class PurchaseOrderController extends Controller
             return null;
         }
 
-        if (!empty($user->access_all_warehouses)) {
+        if (! empty($user->access_all_warehouses)) {
             return null;
         }
 
@@ -259,7 +295,7 @@ class PurchaseOrderController extends Controller
                 ->all();
         }
 
-        if (!empty($user->warehouse_id)) {
+        if (! empty($user->warehouse_id)) {
             $ids[] = (string) $user->warehouse_id;
         }
 
@@ -276,14 +312,16 @@ class PurchaseOrderController extends Controller
 
         if ($allowed === []) {
             $query->whereRaw('1 = 0');
+
             return;
         }
 
         if ($request->filled('warehouse_id') && $request->warehouse_id !== 'all') {
             $requested = (string) $request->warehouse_id;
-            if (!in_array($requested, $allowed, true)) {
+            if (! in_array($requested, $allowed, true)) {
                 abort(403, 'You do not have access to this warehouse.');
             }
+
             return;
         }
 
@@ -300,7 +338,7 @@ class PurchaseOrderController extends Controller
 
         $wid = $po->warehouse_id !== null ? (string) $po->warehouse_id : null;
 
-        if ($wid === null || !in_array($wid, $allowed, true)) {
+        if ($wid === null || ! in_array($wid, $allowed, true)) {
             abort(403, 'You do not have access to this purchase order warehouse.');
         }
     }
@@ -313,7 +351,7 @@ class PurchaseOrderController extends Controller
             return;
         }
 
-        if (!in_array($warehouseId, $allowed, true)) {
+        if (! in_array($warehouseId, $allowed, true)) {
             abort(403, 'You do not have access to this warehouse.');
         }
     }
@@ -328,9 +366,9 @@ class PurchaseOrderController extends Controller
         if (is_array($allowedWarehouseIds)) {
             if ($allowedWarehouseIds === []) {
                 return [
-                    'all'         => 0,
-                    'pending'     => 0,
-                    'done'        => 0,
+                    'all' => 0,
+                    'pending' => 0,
+                    'done' => 0,
                     'total_value' => 0.0,
                 ];
             }
@@ -347,9 +385,9 @@ class PurchaseOrderController extends Controller
             ->first();
 
         return [
-            'all'         => (int) ($row->all_count ?? 0),
-            'pending'     => (int) ($row->pending ?? 0),
-            'done'        => (int) ($row->done ?? 0),
+            'all' => (int) ($row->all_count ?? 0),
+            'pending' => (int) ($row->pending ?? 0),
+            'done' => (int) ($row->done ?? 0),
             'total_value' => (float) ($row->total_value ?? 0),
         ];
     }
@@ -358,20 +396,21 @@ class PurchaseOrderController extends Controller
     {
         Cache::forget('purchase_orders:stats');
         if ($user) {
-            Cache::forget('purchase_orders:stats:user:' . $user->id);
+            Cache::forget('purchase_orders:stats:user:'.$user->id);
         }
     }
 
     private function generatePoNumber(): string
     {
-        $prefix = 'PO-' . now()->format('Ymd') . '-';
+        $prefix = 'PO-'.now()->format('Ymd').'-';
         for ($i = 0; $i < 8; $i++) {
-            $candidate = $prefix . strtoupper(Str::random(4));
-            if (!PurchaseOrder::where('po_number', $candidate)->exists()) {
+            $candidate = $prefix.strtoupper(Str::random(4));
+            if (! PurchaseOrder::where('po_number', $candidate)->exists()) {
                 return $candidate;
             }
         }
-        return $prefix . strtoupper(Str::random(8));
+
+        return $prefix.strtoupper(Str::random(8));
     }
 
     private function notifyAll(string $type, string $title, string $message, string $page): void
@@ -384,10 +423,10 @@ class PurchaseOrderController extends Controller
                 foreach ($users as $user) {
                     Notification::create([
                         'user_id' => $user->id,
-                        'type'    => $type,
-                        'title'   => $title,
+                        'type' => $type,
+                        'title' => $title,
                         'message' => $message,
-                        'page'    => $page,
+                        'page' => $page,
                         'is_read' => false,
                     ]);
                 }

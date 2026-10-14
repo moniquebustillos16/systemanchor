@@ -26,6 +26,7 @@ export const queryClient = new QueryClient({
  */
 export const queryKeys = {
   me: ["me"] as const,
+  analytics: ["analytics", "snapshot"] as const,
   dashboard: (range: string = "7m") => ["dashboard", range] as const,
 
   inventory: {
@@ -38,6 +39,7 @@ export const queryKeys = {
 
   stockMovements: {
     all: ["stock-movements"] as const,
+    stats: ["stock-movements", "stats"] as const,
     list: (params: Record<string, unknown>) =>
       ["stock-movements", "list", params] as const,
     products: ["stock-movements", "products"] as const,

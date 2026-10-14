@@ -22,7 +22,7 @@ class WarehouseController extends Controller
     public function index(Request $request)
     {
         try {
-            if (!Schema::hasTable('warehouses')) {
+            if (! Schema::hasTable('warehouses')) {
                 return response()->json(['success' => true, 'data' => []]);
             }
 
@@ -34,24 +34,24 @@ class WarehouseController extends Controller
             $search = trim((string) $request->query('search', ''));
             $status = $request->query('status');
             $sort = $request->query('sort', in_array('code', $cols, true) ? 'code' : $cols[0]);
-            if (!in_array($sort, $cols, true)) {
+            if (! in_array($sort, $cols, true)) {
                 $sort = $cols[0];
             }
             $dir = $request->query('dir', 'asc') === 'desc' ? 'desc' : 'asc';
             $perPage = min(max((int) $request->query('per_page', 100), 1), 200);
             $plain = $request->boolean('all')
                 || $request->has('all')
-                || !$request->boolean('paginate', true);
+                || ! $request->boolean('paginate', true);
             $page = max((int) $request->query('page', 1), 1);
 
             // Scope: null = all warehouses; array = only assigned ids
             $allowed = $this->allowedWarehouseIds($request->user());
 
             // Cache must be per-user when scoped, otherwise every user gets the full list
-            $useCache = $search === '' && !$request->filled('status');
+            $useCache = $search === '' && ! $request->filled('status');
             $scopeKey = $allowed === null
                 ? 'all'
-                : ('u:' . ($request->user()?->id ?? 'guest') . ':' . md5(implode(',', $allowed)));
+                : ('u:'.($request->user()?->id ?? 'guest').':'.md5(implode(',', $allowed)));
             $cacheKey = $useCache
                 ? sprintf(
                     'warehouses:list:%s:%s:%s:%d:%d:%s',
@@ -79,9 +79,9 @@ class WarehouseController extends Controller
                 if ($allowed === []) {
                     $payload = [
                         'success' => true,
-                        'data'    => [],
+                        'data' => [],
                     ];
-                    if (!$plain) {
+                    if (! $plain) {
                         $payload['current_page'] = 1;
                         $payload['last_page'] = 1;
                         $payload['total'] = 0;
@@ -90,6 +90,7 @@ class WarehouseController extends Controller
                     if ($cacheKey) {
                         Cache::put($cacheKey, $payload, self::LIST_CACHE_TTL);
                     }
+
                     return response()->json($payload);
                 }
                 $query->whereIn('id', $allowed);
@@ -115,17 +116,17 @@ class WarehouseController extends Controller
             if ($plain) {
                 $payload = [
                     'success' => true,
-                    'data'    => $query->limit($perPage)->get(),
+                    'data' => $query->limit($perPage)->get(),
                 ];
             } else {
                 $total = (clone $query)->count();
                 $payload = [
-                    'success'      => true,
-                    'data'         => $query->forPage($page, $perPage)->get(),
+                    'success' => true,
+                    'data' => $query->forPage($page, $perPage)->get(),
                     'current_page' => $page,
-                    'last_page'    => (int) ceil($total / max($perPage, 1)) ?: 1,
-                    'total'        => $total,
-                    'per_page'     => $perPage,
+                    'last_page' => (int) ceil($total / max($perPage, 1)) ?: 1,
+                    'total' => $total,
+                    'per_page' => $perPage,
                 ];
             }
 
@@ -136,11 +137,12 @@ class WarehouseController extends Controller
             return response()->json($payload);
         } catch (\Throwable $e) {
             report($e);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to load warehouses',
-                'error'   => config('app.debug') ? $e->getMessage() : null,
-                'data'    => [],
+                'error' => config('app.debug') ? $e->getMessage() : null,
+                'data' => [],
             ], 200);
         }
     }
@@ -148,14 +150,14 @@ class WarehouseController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate([
-            'name'     => 'required|string|max:255',
-            'code'     => 'required|string|max:50',
-            'address'  => 'nullable|string',
+            'name' => 'required|string|max:255',
+            'code' => 'required|string|max:50',
+            'address' => 'nullable|string',
             'location' => 'nullable|string',
             'capacity' => 'nullable|numeric|min:0',
             'utilized' => 'nullable|numeric|min:0|max:100',
-            'status'   => 'nullable',
-            'manager'  => 'nullable|string|max:255',
+            'status' => 'nullable',
+            'manager' => 'nullable|string|max:255',
         ]);
 
         $status = $this->normalizeStatus($data['status'] ?? 'active');
@@ -163,8 +165,8 @@ class WarehouseController extends Controller
         $all = $this->allTableColumns();
 
         $payload = [
-            'name'   => $data['name'],
-            'code'   => $data['code'],
+            'name' => $data['name'],
+            'code' => $data['code'],
             'status' => $status,
         ];
 
@@ -189,7 +191,7 @@ class WarehouseController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Warehouse created successfully',
-            'data'    => $warehouse,
+            'data' => $warehouse,
         ], 201);
     }
 
@@ -200,36 +202,37 @@ class WarehouseController extends Controller
 
         return response()->json([
             'success' => true,
-            'data'    => $warehouse,
+            'data' => $warehouse,
         ]);
     }
 
     public function update(Request $request, string $id)
     {
         $warehouse = Warehouse::query()->findOrFail($id);
+        $this->assertCanAccessWarehouse($request->user(), (string) $id);
 
         $data = $request->validate([
-            'name'     => 'sometimes|string|max:255',
-            'code'     => 'sometimes|string|max:50',
-            'address'  => 'nullable|string',
+            'name' => 'sometimes|string|max:255',
+            'code' => 'sometimes|string|max:50',
+            'address' => 'nullable|string',
             'location' => 'nullable|string',
             'capacity' => 'nullable|numeric|min:0',
             'utilized' => 'nullable|numeric|min:0|max:100',
-            'status'   => 'nullable',
-            'manager'  => 'nullable|string|max:255',
+            'status' => 'nullable',
+            'manager' => 'nullable|string|max:255',
         ]);
 
         if (array_key_exists('status', $data)) {
             $data['status'] = $this->normalizeStatus($data['status']);
         }
-        if (!isset($data['location']) && isset($data['address'])) {
+        if (! isset($data['location']) && isset($data['address'])) {
             $data['location'] = $data['address'];
         }
         unset($data['address']);
 
         $all = $this->allTableColumns();
         foreach (array_keys($data) as $key) {
-            if (!in_array($key, $all, true)) {
+            if (! in_array($key, $all, true)) {
                 unset($data[$key]);
             }
         }
@@ -240,13 +243,15 @@ class WarehouseController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Warehouse updated successfully',
-            'data'    => $warehouse->fresh(),
+            'data' => $warehouse->fresh(),
         ]);
     }
 
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
-        Warehouse::query()->findOrFail($id)->delete();
+        $warehouse = Warehouse::query()->findOrFail($id);
+        $this->assertCanAccessWarehouse($request->user(), (string) $id);
+        $warehouse->delete();
         $this->bustListCache();
 
         return response()->json([
@@ -267,7 +272,7 @@ class WarehouseController extends Controller
      */
     private function allowedWarehouseIds(?User $user): ?array
     {
-        if (!$user) {
+        if (! $user) {
             return [];
         }
 
@@ -275,7 +280,7 @@ class WarehouseController extends Controller
             return null;
         }
 
-        if (!empty($user->access_all_warehouses)) {
+        if (! empty($user->access_all_warehouses)) {
             return null;
         }
 
@@ -288,7 +293,7 @@ class WarehouseController extends Controller
                 ->all();
         }
 
-        if (!empty($user->warehouse_id)) {
+        if (! empty($user->warehouse_id)) {
             $ids[] = (string) $user->warehouse_id;
         }
 
@@ -303,7 +308,7 @@ class WarehouseController extends Controller
             return;
         }
 
-        if (!in_array($warehouseId, $allowed, true)) {
+        if (! in_array($warehouseId, $allowed, true)) {
             abort(403, 'You do not have access to this warehouse.');
         }
     }
@@ -316,6 +321,7 @@ class WarehouseController extends Controller
         if (is_string($status)) {
             return strtolower($status) === 'active' ? 'active' : 'inactive';
         }
+
         return 'active';
     }
 
@@ -335,6 +341,7 @@ class WarehouseController extends Controller
         } catch (\Throwable $e) {
             $cached = ['id', 'code', 'name'];
         }
+
         return $cached;
     }
 
@@ -350,6 +357,7 @@ class WarehouseController extends Controller
         } catch (\Throwable $e) {
             $cols = [];
         }
+
         return $cols;
     }
 

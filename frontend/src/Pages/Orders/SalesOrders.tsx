@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { isAxiosError } from "axios";
+import { useQuery } from "@tanstack/react-query";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { useSalesOrders } from "../../hooks/useOrders";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidateSalesOrders } from "../../lib/invalidate";
+import { lookupKeys } from "../../lib/cachedLookups";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Orders.css";
 
@@ -62,6 +65,7 @@ type ProductOpt = {
   qty?: number | string;
   status?: string;
 };
+const EMPTY_CUSTOMERS: Customer[] = [];
 
 type SoLine = {
   key: string;
@@ -97,14 +101,6 @@ type SalesOrder = {
   lines?: SoLineServer[];
 };
 
-type Stats = {
-  all: number;
-  pending: number;
-  total_value: number;
-  done: number;
-};
-
-
 type SoForm = {
   customer_id: string;
   warehouse_id: string;
@@ -114,9 +110,6 @@ type SoForm = {
   reference: string;
   lines: SoLine[];
 };
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 let lineKeySeq = 0;
 const newLineKey = () => `line-${Date.now()}-${++lineKeySeq}`;
@@ -180,26 +173,6 @@ function truncateText(s: string, max = 40): string {
   return `${t.slice(0, max - 1)}…`;
 }
 
-function cacheSoLines(soNumber: string, lines: SoLineServer[]) {
-  try {
-    if (!soNumber || lines.length === 0) return;
-    localStorage.setItem(`sa-so-lines:${soNumber}`, JSON.stringify(lines));
-  } catch {
-    /* ignore */
-  }
-}
-
-function readCachedSoLines(soNumber: string): SoLineServer[] {
-  try {
-    const raw = localStorage.getItem(`sa-so-lines:${soNumber}`);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as SoLineServer[]) : [];
-  } catch {
-    return [];
-  }
-}
-
 function lineDisplayName(ln: SoLineServer): string {
   return ln.product_name || ln.name || "Product";
 }
@@ -235,48 +208,6 @@ function extractList<T = unknown>(json: unknown): T[] {
   return [];
 }
 
-/* ── Meta cache (instant reopen of New SO modal) ───────────── */
-const SO_META_TTL = 60_000;
-const SS_SO_META = "so:lastMeta";
-
-type SoMetaSnap = {
-  at: number;
-  warehouses: Warehouse[];
-  customers: Customer[];
-  products: ProductOpt[];
-};
-
-type SoMetaStore = {
-  entry: SoMetaSnap | null;
-  inflight: Promise<SoMetaSnap> | null;
-};
-
-function soMetaStore(): SoMetaStore {
-  const g = globalThis as unknown as { __saSoMetaCache?: SoMetaStore };
-  if (!g.__saSoMetaCache) g.__saSoMetaCache = { entry: null, inflight: null };
-  return g.__saSoMetaCache;
-}
-
-function readSoMetaSS(): SoMetaSnap | null {
-  try {
-    const raw = sessionStorage.getItem(SS_SO_META);
-    if (!raw) return null;
-    const snap = JSON.parse(raw) as SoMetaSnap;
-    if (!snap?.at || Date.now() - snap.at > 10 * 60_000) return null;
-    return snap;
-  } catch {
-    return null;
-  }
-}
-
-function writeSoMetaSS(snap: SoMetaSnap) {
-  try {
-    sessionStorage.setItem(SS_SO_META, JSON.stringify(snap));
-  } catch {
-    /* quota */
-  }
-}
-
 function SalesOrders() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -291,6 +222,8 @@ function SalesOrders() {
     stats: soStats,
     isLoading: soLoading,
     isFetching: soFetching,
+    isError: soIsError,
+    error: soError,
     refetchAll: refetchSOs,
   } = useSalesOrders({
     page,
@@ -301,15 +234,6 @@ function SalesOrders() {
     enabled: true,
   });
 
-
-  const [orders, setOrders] = useState<SalesOrder[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [total, setTotal] = useState(0);
-  const [lastPage, setLastPage] = useState(1);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const bootMeta = soMetaStore().entry ?? readSoMetaSS();
 
   // Shared React Query cache (same key as prefetchAppData) — fast like SO list
   const {
@@ -331,18 +255,43 @@ function SalesOrders() {
       })
       .filter((w) => !!w.id)
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
-    if (fromQuery.length > 0) return fromQuery;
-    // Fallback to session/module cache while query boots
-    return bootMeta?.warehouses ?? [];
-  }, [warehouseRows, bootMeta?.warehouses]);
+    return fromQuery;
+  }, [warehouseRows]);
 
-  const [customers, setCustomers] = useState<Customer[]>(
-    () => bootMeta?.customers ?? []
-  );
-  const [products, setProducts] = useState<ProductOpt[]>(
-    () => bootMeta?.products ?? []
-  );
-  const [metaLoading, setMetaLoading] = useState(false);
+  const customerLookup = useQuery({
+    queryKey: lookupKeys.customers,
+    queryFn: async () => {
+      const { data } = await api.get("/customers", { params: { per_page: 100 } });
+      return extractList<Customer>(data)
+        .map((customer) => ({ id: String(customer.id), name: customer.name }))
+        .filter((customer) => !!customer.id)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+    staleTime: 5 * 60_000,
+  });
+  const productLookup = useQuery({
+    queryKey: [...lookupKeys.products, "sales-order-catalog"],
+    queryFn: async () => {
+      const { data } = await api.get("/inventories", {
+        params: { per_page: 200, paginate: false },
+      });
+      return extractList<ProductOpt>(data)
+        .map((product) => ({
+          id: String(product.id),
+          sku: product.sku,
+          name: product.name,
+          price: product.price,
+          qty: product.qty,
+          status: product.status,
+        }))
+        .filter((product) => !!product.id && (!product.status || product.status === "active"))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+    staleTime: 5 * 60_000,
+  });
+  const customers = customerLookup.data ?? EMPTY_CUSTOMERS;
+  const products = Array.isArray(productLookup.data) ? productLookup.data : [];
+  const metaLoading = customerLookup.isFetching || productLookup.isFetching;
   const whBusy = warehousesLoading || warehousesFetching || metaLoading;
 
   const [showAdd, setShowAdd] = useState(false);
@@ -385,176 +334,23 @@ function SalesOrders() {
     return () => clearTimeout(t);
   }, [search]);
 
-  /** Customers + products only. Warehouses come from useWarehouses (React Query). */
-  const fetchMeta = useCallback(async (force = false): Promise<SoMetaSnap> => {
-    const store = soMetaStore();
-
-    if (
-      !force &&
-      store.entry &&
-      Date.now() - store.entry.at < SO_META_TTL &&
-      (store.entry.customers.length > 0 || store.entry.products.length > 0)
-    ) {
-      setCustomers(store.entry.customers);
-      setProducts(store.entry.products);
-      return store.entry;
-    }
-
-    if (store.inflight && !force) {
-      const snap = await store.inflight;
-      setCustomers(snap.customers);
-      setProducts(snap.products);
-      return snap;
-    }
-
-    if (!force && store.entry) {
-      setCustomers(store.entry.customers);
-      setProducts(store.entry.products);
-    }
-
-    setMetaLoading(true);
-    const work = (async (): Promise<SoMetaSnap> => {
-      const cuSettled = await api
-        .get("/customers", { params: { per_page: 100 }, timeout: 12000 })
-        .then((r) => r.data)
-        .catch(() => null);
-
-      let nextCu: Customer[] = store.entry?.customers ?? [];
-      if (cuSettled != null) {
-        nextCu = extractList<Customer>(cuSettled)
-          .map((c) => ({ id: String(c.id), name: c.name }))
-          .filter((c) => !!c.id)
-          .sort((a, b) => a.name.localeCompare(b.name));
-      }
-      setCustomers(nextCu);
-
-      let nextProd: ProductOpt[] = store.entry?.products ?? [];
-      try {
-        const { data: invJson } = await api.get("/inventories", {
-          params: { per_page: 200 },
-          timeout: 15000,
-        });
-        nextProd = extractList<ProductOpt>(invJson)
-          .map((p) => ({
-            id: String(p.id),
-            sku: p.sku,
-            name: p.name,
-            price: p.price,
-            qty: p.qty,
-            status: (p as ProductOpt & { status?: string }).status,
-          }))
-          .filter((p) => !!p.id && (!p.status || p.status === "active"))
-          .sort((a, b) => a.name.localeCompare(b.name));
-      } catch {
-        try {
-          const { data } = await api.get("/products", {
-            params: { per_page: 200 },
-            timeout: 12000,
-          });
-          nextProd = extractList<ProductOpt>(data)
-            .map((p) => ({
-              id: String(p.id),
-              sku: p.sku,
-              name: p.name,
-              price: p.price,
-              qty: p.qty,
-            }))
-            .filter((p) => !!p.id)
-            .sort((a, b) => a.name.localeCompare(b.name));
-        } catch {
-          /* keep previous */
-        }
-      }
-      setProducts(nextProd);
-
-      const snap: SoMetaSnap = {
-        at: Date.now(),
-        warehouses: store.entry?.warehouses ?? [],
-        customers: nextCu,
-        products: nextProd,
-      };
-      store.entry = snap;
-      if (nextCu.length > 0 || nextProd.length > 0) writeSoMetaSS(snap);
-      return snap;
-    })();
-
-    store.inflight = work;
-    try {
-      return await work;
-    } catch (e) {
-      console.error("[SalesOrders] meta fetch failed:", e);
-      return (
-        store.entry ?? {
-          at: Date.now(),
-          warehouses: [],
-          customers: [],
-          products: [],
-        }
-      );
-    } finally {
-      store.inflight = null;
-      setMetaLoading(false);
-    }
-  }, []);
-
-  /* Phase 7: TanStack Query owns list + stats */
-  useEffect(() => {
-    if (!soRows) return;
-    const rows = (soRows as SalesOrder[]).map((row) => {
-      const cached = readCachedSoLines(row.so_number);
-      return {
-        ...row,
-        lines: row.lines?.length ? row.lines : cached.length ? cached : row.lines,
-      };
-    });
-    setOrders(rows);
-    setTotal(soMeta.total);
-    setLastPage(soMeta.last_page);
-    setLoading(false);
-    setError(null);
-  }, [soRows, soMeta]);
-
-  useEffect(() => {
-    if (!soStats) return;
-    setStats(soStats as Stats);
-  }, [soStats]);
-
-  useEffect(() => {
-    if (soRows.length === 0 && soLoading) setLoading(true);
-    else if (!soLoading) setLoading(false);
-  }, [soLoading, soRows.length]);
-
-  // Warm meta on mount (non-blocking)
-  useEffect(() => {
-    void fetchMeta(false);
-  }, [fetchMeta]);
-
-  // Auto-select first warehouse when list arrives while create modal is open
-  useEffect(() => {
-    if (!showAdd) return;
-    if (warehouses.length === 0) return;
-    setForm((f) => {
-      if (f.warehouse_id && warehouses.some((w) => w.id === f.warehouse_id)) return f;
-      return { ...f, warehouse_id: warehouses[0].id };
-    });
-  }, [showAdd, warehouses]);
-
-  // Auto-select first customer when list arrives while create modal is open
-  useEffect(() => {
-    if (!showAdd) return;
-    if (customers.length === 0) return;
-    setForm((f) => {
-      if (f.customer_id && customers.some((c) => c.id === f.customer_id)) return f;
-      return { ...f, customer_id: customers[0].id };
-    });
-  }, [showAdd, customers]);
+  const orders = soRows as SalesOrder[];
+  const stats = soStats;
+  const total = soMeta.total;
+  const lastPage = soMeta.last_page;
+  const loading = soLoading;
+  const error = soIsError
+    ? soError instanceof Error
+      ? soError.message
+      : "Unable to load sales orders."
+    : null;
 
   useEffect(() => {
     document.body.classList.toggle("modal-open", showAdd || !!viewOrder);
     return () => document.body.classList.remove("modal-open");
   }, [showAdd, viewOrder]);
 
-  const statsView = stats ?? { all: 0, pending: 0, total_value: 0, done: 0 };
+  const statsView = stats;
 
   /** Open modal immediately — never block on network. */
   const openAdd = () => {
@@ -571,24 +367,34 @@ function SalesOrders() {
     setShowAdd(true);
 
     // Background only — does not delay the modal
-    if (warehouses.length === 0) void refetchWarehouses();
-    if (customers.length === 0 || products.length === 0) void fetchMeta(true);
+    if (warehouses.length === 0) {
+      void refetchWarehouses().then(({ data }) => {
+        const firstWarehouse = extractList<Record<string, unknown>>(data).find(
+          (warehouse) => warehouse.id
+        );
+        if (firstWarehouse?.id) {
+          setForm((current) => current.warehouse_id
+            ? current
+            : { ...current, warehouse_id: String(firstWarehouse.id) });
+        }
+      });
+    }
+    if (customers.length === 0 || products.length === 0) {
+      void Promise.all([customerLookup.refetch(), productLookup.refetch()]).then(
+        ([customerResult, productResult]) => {
+          if (customerResult.isError || productResult.isError) {
+            setFormError("Could not load customers or products. Try refreshing the page.");
+          }
+          const firstCustomer = customerResult.data?.[0];
+          if (firstCustomer) {
+            setForm((current) => current.customer_id
+              ? current
+              : { ...current, customer_id: firstCustomer.id });
+          }
+        }
+      );
+    }
   };
-
-  // Keep session cache in sync when React Query warehouses arrive
-  useEffect(() => {
-    if (warehouses.length === 0) return;
-    const store = soMetaStore();
-    const prev = store.entry;
-    const snap: SoMetaSnap = {
-      at: Date.now(),
-      warehouses,
-      customers: prev?.customers ?? customers,
-      products: prev?.products ?? products,
-    };
-    store.entry = snap;
-    writeSoMetaSS(snap);
-  }, [warehouses, customers, products]);
 
   const setLine = (key: string, patch: Partial<SoLine>) => {
     setForm((f) => ({
@@ -705,6 +511,12 @@ function SalesOrders() {
       order_date: form.order_date || null,
       items: itemsTotal,
       total: orderTotal,
+      lines: validLines.map((line) => ({
+        product_id: line.product_id,
+        product_name: line.product_name.trim(),
+        qty: Number(line.qty),
+        unit_price: Number(line.unit_price) || 0,
+      })),
       status: form.status || "pending",
     };
 
@@ -729,54 +541,14 @@ function SalesOrders() {
         };
       });
 
-      // ProductTransactionController — one sale transaction per line
-      let txOk = 0;
-      let txFail = 0;
-      await Promise.all(
-        validLines.map(async (l) => {
-          const q = Math.max(1, Math.round(Number(l.qty) || 1));
-          const price = Number(l.unit_price) || 0;
-          try {
-            await api.post("/product-transactions", {
-              product_id:
-                l.product_id && UUID_RE.test(l.product_id) ? l.product_id : null,
-              product_name: l.product_name.trim(),
-              transaction_type: "sale",
-              reference_id: soId && UUID_RE.test(soId) ? soId : null,
-              reference_number: soNumber,
-              partner_id: form.customer_id,
-              partner_type: "customer",
-              quantity: q,
-              unit_price: price,
-              status: form.status || "pending",
-            });
-            txOk += 1;
-          } catch {
-            txFail += 1;
-          }
-        })
-      );
-
-      cacheSoLines(soNumber, createdLines);
-
       setShowAdd(false);
       showToast(
         "success",
         "SO created",
         `${soNumber} · ${primaryName}${validLines.length > 1 ? ` +${validLines.length - 1}` : ""} · ${formatPeso(orderTotal)}`
       );
-      if (txFail > 0) {
-        setTimeout(() => {
-          showToast(
-            "info",
-            "Partial product transactions",
-            `${txOk} saved, ${txFail} failed`
-          );
-        }, 500);
-      }
       setPage(1);
-      await refetchSOs();
-         void invalidateSalesOrders();
+      await invalidateSalesOrders();
       setViewOrder({
         id: soId || String(Date.now()),
         so_number: soNumber,
@@ -798,12 +570,28 @@ function SalesOrders() {
           null,
         lines: createdLines,
       });
-    } catch (err: any) {
-      const body = err?.response?.data;
+    } catch (err: unknown) {
+      const responseData =
+        isAxiosError(err) &&
+        typeof err.response?.data === "object" &&
+        err.response.data !== null &&
+        !Array.isArray(err.response.data)
+          ? err.response.data as Record<string, unknown>
+          : null;
+      const validationErrors =
+        responseData?.errors &&
+        typeof responseData.errors === "object" &&
+        !Array.isArray(responseData.errors)
+          ? Object.values(responseData.errors).flatMap((value) =>
+              Array.isArray(value)
+                ? value.filter((message): message is string => typeof message === "string")
+                : []
+            )
+          : [];
       const msg =
-        body?.message ||
-        (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        err?.message ||
+        (typeof responseData?.message === "string" && responseData.message) ||
+        validationErrors.join(" ") ||
+        (err instanceof Error && err.message) ||
         "Failed to create SO";
       setFormError(String(msg));
     } finally {
@@ -813,25 +601,15 @@ function SalesOrders() {
 
   const updateStatus = async (order: SalesOrder, nextStatus: string) => {
     if (!canUpdate) { showToast("error", "Permission denied", "You cannot update sales orders."); return; }
-    const prev = order.status;
     setUpdatingId(order.id);
-    setOrders((rows) =>
-      rows.map((r) => (r.id === order.id ? { ...r, status: nextStatus } : r))
-    );
-    if (viewOrder?.id === order.id) {
-      setViewOrder({ ...order, status: nextStatus });
-    }
     try {
       await api.put(`/sales-orders/${order.id}`, { status: nextStatus });
-      showToast("success", "Status updated", `${order.so_number} → ${nextStatus}`);
-      void invalidateSalesOrders();
-    } catch (err) {
-      setOrders((rows) =>
-        rows.map((r) => (r.id === order.id ? { ...r, status: prev } : r))
-      );
       if (viewOrder?.id === order.id) {
-        setViewOrder({ ...order, status: prev });
+        setViewOrder((current) => current ? { ...current, status: nextStatus } : current);
       }
+      showToast("success", "Status updated", `${order.so_number} → ${nextStatus}`);
+      await invalidateSalesOrders();
+    } catch (err) {
       showToast(
         "error",
         "Update failed",
@@ -870,7 +648,7 @@ function SalesOrders() {
                 onClick={() => {
                   void refetchSOs();
                   void refetchWarehouses();
-                  void fetchMeta(true);
+                  void Promise.all([customerLookup.refetch(), productLookup.refetch()]);
                   showToast("success", "Refreshed", "Orders reloaded.");
                 }}
                 disabled={soFetching || loading}
@@ -1105,7 +883,7 @@ function SalesOrders() {
                     </tr>
                   ) : (
                     orders.map((o) => {
-                      const lines = o.lines ?? readCachedSoLines(o.so_number);
+                      const lines = o.lines ?? [];
                       const productLabel = lines[0]
                         ? lineDisplayName(lines[0])
                         : "";
@@ -1614,10 +1392,7 @@ function SalesOrders() {
       {/* Minimal detail drawer */}
       {viewOrder && (() => {
         const busy = updatingId === viewOrder.id;
-        const lines =
-          viewOrder.lines?.length
-            ? viewOrder.lines
-            : readCachedSoLines(viewOrder.so_number);
+        const lines = viewOrder.lines ?? [];
         const linesTotal = lines.reduce((sum, ln) => {
           const qty = Number(ln.qty) || 0;
           const price = Number(ln.unit_price) || 0;
@@ -1798,8 +1573,15 @@ function SalesOrders() {
                         }}
                       >
                         {STATUS_OPTIONS.map((s) => (
-                          <option key={s} value={s}>
+                          <option
+                            key={s}
+                            value={s}
+                            disabled={s === "shipped" || s === "completed"}
+                          >
                             {s.charAt(0).toUpperCase() + s.slice(1)}
+                            {s === "shipped" || s === "completed"
+                              ? " (managed by shipments)"
+                              : ""}
                           </option>
                         ))}
                       </select>

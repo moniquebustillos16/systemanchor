@@ -14,7 +14,13 @@ class CustomerController extends Controller
      */
     public function index(Request $request)
     {
-        $query = Customer::query();
+        $query = Customer::query()
+            ->withCount('salesOrders as orders')
+            ->withSum('salesOrders as revenue', 'total')
+            ->withCount([
+                'salesOrders as open' => fn ($orders) => $orders
+                    ->whereIn('status', ['pending', 'processing', 'shipped']),
+            ]);
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -24,10 +30,10 @@ class CustomerController extends Controller
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'ilike', "%{$search}%")
-                  ->orWhere('contact', 'ilike', "%{$search}%")
-                  ->orWhere('email', 'ilike', "%{$search}%")
-                  ->orWhere('city', 'ilike', "%{$search}%")
-                  ->orWhere('phone', 'ilike', "%{$search}%");
+                    ->orWhere('contact', 'ilike', "%{$search}%")
+                    ->orWhere('email', 'ilike', "%{$search}%")
+                    ->orWhere('city', 'ilike', "%{$search}%")
+                    ->orWhere('phone', 'ilike', "%{$search}%");
             });
         }
 
@@ -43,12 +49,12 @@ class CustomerController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'name'    => 'required|string|max:255',
+            'name' => 'required|string|max:255',
             'contact' => 'nullable|string|max:150',
-            'email'   => 'nullable|email|max:255',
-            'phone'   => 'nullable|string|max:50',
-            'city'    => 'nullable|string|max:100',
-            'status'  => ['nullable', 'string', 'max:30', Rule::in(['active', 'inactive', 'pending'])],
+            'email' => 'nullable|email|max:255',
+            'phone' => 'nullable|string|max:50',
+            'city' => 'nullable|string|max:100',
+            'status' => ['nullable', 'string', 'max:30', Rule::in(['active', 'inactive', 'pending'])],
         ]);
 
         $validated['status'] = $validated['status'] ?? 'active';
@@ -76,12 +82,12 @@ class CustomerController extends Controller
         $customer = Customer::findOrFail($id);
 
         $validated = $request->validate([
-            'name'    => 'sometimes|required|string|max:255',
+            'name' => 'sometimes|required|string|max:255',
             'contact' => 'nullable|string|max:150',
-            'email'   => 'nullable|email|max:255',
-            'phone'   => 'nullable|string|max:50',
-            'city'    => 'nullable|string|max:100',
-            'status'  => ['nullable', 'string', 'max:30', Rule::in(['active', 'inactive', 'pending'])],
+            'email' => 'nullable|email|max:255',
+            'phone' => 'nullable|string|max:50',
+            'city' => 'nullable|string|max:100',
+            'status' => ['nullable', 'string', 'max:30', Rule::in(['active', 'inactive', 'pending'])],
         ]);
 
         $customer->update($validated);

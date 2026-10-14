@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import "../css/Insights.css";
+import { queryClient, queryKeys } from "../../lib/queryClient";
 import { fetchInventoryStatsCached } from "../../hooks/useInventory";
 import {
   fetchSalesOrderStatsCached,
@@ -49,18 +51,6 @@ type AnalyticsSnapshot = {
   updatedAt: number;
 };
 
-let analyticsSnapshot: AnalyticsSnapshot | null = null;
-
-if (typeof window !== "undefined") {
-  const clearAnalyticsSnapshot = () => {
-    analyticsSnapshot = null;
-  };
-  window.addEventListener("sa-auth-changed", clearAnalyticsSnapshot);
-  window.addEventListener("sa-logout", clearAnalyticsSnapshot);
-}
-
-
-
 function toNum(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -80,149 +70,147 @@ function resolveUtilPct(w: Warehouse): number {
   return Math.min(100, Math.max(0, raw));
 }
 
+function asStats(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asOptionalString(value: unknown): string | null | undefined {
+  return typeof value === "string" || value === null ? value : undefined;
+}
+
+function asOptionalNumberOrString(value: unknown): number | string | null | undefined {
+  return typeof value === "number" || typeof value === "string" || value === null
+    ? value
+    : undefined;
+}
+
+async function fetchAnalyticsSnapshot(): Promise<AnalyticsSnapshot> {
+  const results = await Promise.allSettled([
+    fetchInventoryStatsCached(),
+    fetchSalesOrderStatsCached(),
+    fetchPurchaseOrderStatsCached(),
+    fetchWarehousesCached({ per_page: 100 }),
+    fetchGoodsReceiptStatsCached(),
+    fetchShipmentStatsCached(),
+  ] as const);
+
+  if (results.every((result) => result.status === "rejected")) {
+    throw new Error("Unable to load analytics data from the API.");
+  }
+
+  const previous = queryClient.getQueryData<AnalyticsSnapshot>(queryKeys.analytics);
+  const snapshot: AnalyticsSnapshot = {
+    invValue: previous?.invValue ?? 0,
+    lowStock: previous?.lowStock ?? 0,
+    outOfStock: previous?.outOfStock ?? 0,
+    totalProducts: previous?.totalProducts ?? 0,
+    soAll: previous?.soAll ?? 0,
+    soPending: previous?.soPending ?? 0,
+    soDone: previous?.soDone ?? 0,
+    soValue: previous?.soValue ?? 0,
+    poAll: previous?.poAll ?? 0,
+    poPending: previous?.poPending ?? 0,
+    poValue: previous?.poValue ?? 0,
+    grPending: previous?.grPending ?? 0,
+    shipInTransit: previous?.shipInTransit ?? 0,
+    warehouses: previous?.warehouses ?? [],
+    updatedAt: Date.now(),
+  };
+
+  if (results[0].status === "fulfilled") {
+    const stats = asStats(results[0].value);
+    snapshot.invValue = toNum(stats.inventory_value);
+    snapshot.lowStock = toNum(stats.low_stock);
+    snapshot.outOfStock = toNum(stats.out_of_stock);
+    snapshot.totalProducts = toNum(stats.total_products);
+  }
+  if (results[1].status === "fulfilled") {
+    const stats = asStats(results[1].value);
+    snapshot.soAll = toNum(stats.all);
+    snapshot.soPending = toNum(stats.pending);
+    snapshot.soDone = toNum(stats.done);
+    snapshot.soValue = toNum(stats.total_value);
+  }
+  if (results[2].status === "fulfilled") {
+    const stats = asStats(results[2].value);
+    snapshot.poAll = toNum(stats.all ?? stats.total);
+    snapshot.poPending = toNum(stats.pending);
+    snapshot.poValue = toNum(stats.total_value ?? stats.value);
+  }
+  if (results[3].status === "fulfilled") {
+    snapshot.warehouses = results[3].value.map((warehouse) => ({
+      id: String(warehouse.id ?? ""),
+      code: asOptionalString(warehouse.code) ?? undefined,
+      name: String(warehouse.name ?? ""),
+      location: asOptionalString(warehouse.location),
+      address: asOptionalString(warehouse.address),
+      manager: asOptionalString(warehouse.manager),
+      utilized: asOptionalNumberOrString(warehouse.utilized),
+      capacity: asOptionalNumberOrString(warehouse.capacity),
+      status: asOptionalString(warehouse.status),
+    }));
+  }
+  if (results[4].status === "fulfilled") {
+    const stats = asStats(results[4].value);
+    snapshot.grPending = toNum(stats.pending ?? stats.open ?? stats.in_progress);
+  }
+  if (results[5].status === "fulfilled") {
+    const stats = asStats(results[5].value);
+    snapshot.shipInTransit = toNum(
+      stats.open ?? stats.in_transit ?? stats.shipped ?? stats.pending
+    );
+  }
+
+  return snapshot;
+}
+
 
 /* ── Role permissions ─────────────────────────────────────── */
 
 function Analytics() {
   const [period, setPeriod] = useState("Last 30 days");
   const [autoRefresh, setAutoRefresh] = useState(false);
-  const [loading, setLoading] = useState(!analyticsSnapshot);
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(() =>
-    analyticsSnapshot ? new Date(analyticsSnapshot.updatedAt) : null
-  );
-
-  const [invValue, setInvValue] = useState(() => analyticsSnapshot?.invValue ?? 0);
-  const [lowStock, setLowStock] = useState(() => analyticsSnapshot?.lowStock ?? 0);
-  const [outOfStock, setOutOfStock] = useState(() => analyticsSnapshot?.outOfStock ?? 0);
-  const [totalProducts, setTotalProducts] = useState(() => analyticsSnapshot?.totalProducts ?? 0);
-
-  const [soAll, setSoAll] = useState(() => analyticsSnapshot?.soAll ?? 0);
-  const [soPending, setSoPending] = useState(() => analyticsSnapshot?.soPending ?? 0);
-  const [soDone, setSoDone] = useState(() => analyticsSnapshot?.soDone ?? 0);
-  const [soValue, setSoValue] = useState(() => analyticsSnapshot?.soValue ?? 0);
-
-  const [poAll, setPoAll] = useState(() => analyticsSnapshot?.poAll ?? 0);
-  const [poPending, setPoPending] = useState(() => analyticsSnapshot?.poPending ?? 0);
-  const [poValue, setPoValue] = useState(() => analyticsSnapshot?.poValue ?? 0);
-
-  const [grPending, setGrPending] = useState(() => analyticsSnapshot?.grPending ?? 0);
-  const [shipInTransit, setShipInTransit] = useState(() => analyticsSnapshot?.shipInTransit ?? 0);
-
-  const [warehouses, setWarehouses] = useState<Warehouse[]>(() => analyticsSnapshot?.warehouses ?? []);
-
-
   const { can, isLoaded: permsLoaded } = usePermissions();
 
   const canView = can("analytics.view", "reports.view", "dashboard.view");
- 
+  const {
+    data: snapshot,
+    error: queryError,
+    isError,
+    isFetching,
+    isLoading,
+    refetch,
+  } = useQuery({
+    queryKey: queryKeys.analytics,
+    queryFn: fetchAnalyticsSnapshot,
+    refetchInterval: autoRefresh ? 60_000 : false,
+  });
 
-  const load = useCallback(async (showProgress = false) => {
-    if (showProgress) setLoading(true);
-    setError(null);
-    try {
-      const results = await Promise.allSettled([
-      fetchInventoryStatsCached(),
-      fetchSalesOrderStatsCached(),
-      fetchPurchaseOrderStatsCached(),
-      fetchWarehousesCached({ per_page: 100 }),
-      fetchGoodsReceiptStatsCached(),
-      fetchShipmentStatsCached(),
-]);
-
-      if (results[0].status === "fulfilled") {
-        const j = results[0].value as Record<string, number>;
-        setInvValue(toNum(j.inventory_value));
-        setLowStock(toNum(j.low_stock));
-        setOutOfStock(toNum(j.out_of_stock));
-        setTotalProducts(toNum(j.total_products));
-      }
-      if (results[1].status === "fulfilled") {
-        const j = results[1].value as Record<string, number>;
-        setSoAll(toNum(j.all));
-        setSoPending(toNum(j.pending));
-        setSoDone(toNum(j.done));
-        setSoValue(toNum(j.total_value));
-      }
-      if (results[2].status === "fulfilled") {
-        const j = results[2].value as Record<string, number>;
-        setPoAll(toNum(j.all ?? j.total));
-        setPoPending(toNum(j.pending));
-        setPoValue(toNum(j.total_value ?? j.value));
-      }
-      if (results[3].status === "fulfilled") {
-  const list = results[3].value as Warehouse[];
-  setWarehouses(list.map((w) => ({ ...w, id: String(w.id) })));
-}
-      if (results[4].status === "fulfilled") {
-        const j = results[4].value as Record<string, number>;
-        setGrPending(toNum(j.pending ?? j.open ?? j.in_progress));
-      }
-      if (results[5].status === "fulfilled") {
-        const j = results[5].value as Record<string, number>;
-        setShipInTransit(toNum(j.open ?? j.in_transit ?? j.shipped ?? j.pending));
-      }
-
-      if (results.every((r) => r.status === "rejected")) {
-        setError("Unable to load analytics data from the API.");
-      } else {
-        setLastUpdated(new Date());
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load analytics");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useEffect(() => {
-    if (!autoRefresh) return;
-    const id = setInterval(() => void load(), 60_000);
-    return () => clearInterval(id);
-  }, [autoRefresh, load]);
-
-  useEffect(() => {
-    if (!lastUpdated) return;
-    analyticsSnapshot = {
-      invValue,
-      lowStock,
-      outOfStock,
-      totalProducts,
-      soAll,
-      soPending,
-      soDone,
-      soValue,
-      poAll,
-      poPending,
-      poValue,
-      grPending,
-      shipInTransit,
-      warehouses,
-      updatedAt: lastUpdated.getTime(),
-    };
-  }, [
-    lastUpdated,
-    invValue,
-    lowStock,
-    outOfStock,
-    totalProducts,
-    soAll,
-    soPending,
-    soDone,
-    soValue,
-    poAll,
-    poPending,
-    poValue,
-    grPending,
-    shipInTransit,
-    warehouses,
-  ]);
-
-  const initialLoading = false;
+  const invValue = snapshot?.invValue ?? 0;
+  const lowStock = snapshot?.lowStock ?? 0;
+  const outOfStock = snapshot?.outOfStock ?? 0;
+  const totalProducts = snapshot?.totalProducts ?? 0;
+  const soAll = snapshot?.soAll ?? 0;
+  const soPending = snapshot?.soPending ?? 0;
+  const soDone = snapshot?.soDone ?? 0;
+  const soValue = snapshot?.soValue ?? 0;
+  const poAll = snapshot?.poAll ?? 0;
+  const poPending = snapshot?.poPending ?? 0;
+  const poValue = snapshot?.poValue ?? 0;
+  const grPending = snapshot?.grPending ?? 0;
+  const shipInTransit = snapshot?.shipInTransit ?? 0;
+  const warehouses = useMemo(() => snapshot?.warehouses ?? [], [snapshot?.warehouses]);
+  const lastUpdated = snapshot ? new Date(snapshot.updatedAt) : null;
+  const error = isError
+    ? queryError instanceof Error
+      ? queryError.message
+      : "Failed to load analytics"
+    : null;
+  const loading = isFetching;
+  const initialLoading = isLoading;
+  const refresh = () => void refetch();
 
   const avgUtil = useMemo(() => {
     if (!warehouses.length) return 0;
@@ -429,7 +417,7 @@ function Analytics() {
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => void load(true)}
+                onClick={refresh}
                 disabled={loading}
               >
                 {loading ? "Refreshing…" : "Refresh"}
@@ -453,7 +441,7 @@ function Analytics() {
                 type="button"
                 className="btn btn-sm btn-secondary"
                 style={{ marginLeft: 12 }}
-                onClick={() => void load(true)}
+                onClick={refresh}
               >
                 Retry
               </button>

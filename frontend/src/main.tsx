@@ -43,6 +43,7 @@ import Users from "./Pages/System/Users.tsx";
 import Roles from "./Pages/System/Roles.tsx";
 import Settings from "./Pages/System/Settings.tsx";
 import Profile from "./Pages/components/Header/Profile.tsx";
+import "./Pages/css/Responsive.css";
 
 
 function guard(path: string, element: React.ReactNode) {

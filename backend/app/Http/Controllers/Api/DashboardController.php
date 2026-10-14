@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Product;
+use App\Models\Inventory;
 use App\Models\SalesOrder;
 use App\Models\PurchaseOrder;
 use App\Models\Warehouse;
@@ -128,11 +129,11 @@ class DashboardController extends Controller
     /* ------------------------------------------------------------------ */
 
     /**
-     * Shared cache key with InventoryController — always include active_skus.
+     * Dashboard-specific aggregate; InventoryController uses warehouse-balance stats.
      */
     private function inventoryStats(): array
     {
-        return Cache::remember('inventory:stats', 20, function () {
+        return Cache::remember('dashboard:inventory:stats', 20, function () {
             $row = Product::query()
                 ->whereNull('deleted_at')
                 ->selectRaw("
@@ -308,11 +309,11 @@ class DashboardController extends Controller
             ->orderBy('code')
             ->get(['id', 'code', 'name', 'location', 'capacity', 'utilized', 'status']);
 
-        $qtyByWh = Product::query()
-            ->whereNull('deleted_at')
-            ->whereNotNull('warehouse_id')
-            ->selectRaw('warehouse_id, COALESCE(SUM(qty), 0) as assigned')
-            ->groupBy('warehouse_id')
+        $qtyByWh = Inventory::query()
+            ->join('products', 'products.id', '=', 'inventories.product_id')
+            ->whereNull('products.deleted_at')
+            ->selectRaw('inventories.warehouse_id, COALESCE(SUM(inventories.qty), 0) as assigned')
+            ->groupBy('inventories.warehouse_id')
             ->pluck('assigned', 'warehouse_id');
 
         return $warehouses->map(function ($w) use ($qtyByWh) {

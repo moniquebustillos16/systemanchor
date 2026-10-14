@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { isAxiosError } from "axios";
 import api from "./api/axios";
 import mainLogo from "./assets/main_logo.png";
 import { schedulePrefetch } from "./lib/prefetch";
@@ -48,9 +49,9 @@ function App() {
       window.dispatchEvent(new Event("sa-permissions-refresh"));
       schedulePrefetch();
       navigate("/dashboard");
-    } catch (error: any) {
-      if (error.response) {
-        setError(error.response.data.message || "Invalid email or password.");
+    } catch (error: unknown) {
+      if (isAxiosError<{ message?: string }>(error) && error.response) {
+        setError(error.response.data?.message || "Invalid email or password.");
       } else {
         setError("Unable to connect to server.");
       }
@@ -129,6 +130,10 @@ function App() {
           <div className="form-card">
             <header className="form-header">
               <img src={mainLogo} alt="SystemAnchor" className="form-logo" />
+              <span className="workspace-badge">
+                <span className="workspace-badge__pip" />
+                YOUR WORKSPACE, SECURED
+              </span>
               <h2>Welcome back</h2>
               <p>Sign in to your workspace</p>
             </header>
@@ -142,6 +147,7 @@ function App() {
                   autoComplete="username"
                   placeholder="you@company.com"
                   value={email}
+                  aria-invalid={Boolean(error)}
                   onChange={(e) => {
                     setEmail(e.target.value);
                     setError("");
@@ -165,6 +171,7 @@ function App() {
                     autoComplete="current-password"
                     placeholder="Your password"
                     value={password}
+                    aria-invalid={Boolean(error)}
                     onChange={(e) => {
                       setPassword(e.target.value);
                       setError("");
@@ -174,6 +181,8 @@ function App() {
                   <button
                     type="button"
                     className="affix"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-pressed={showPassword}
                     onClick={() => setShowPassword((v) => !v)}
                   >
                     {showPassword ? "Hide" : "Show"}
@@ -190,6 +199,26 @@ function App() {
                 <span>Remember this device</span>
               </label>
 
+              <button
+                type="button"
+                className="demo-access"
+                disabled={loading}
+                onClick={() => {
+                  setEmail("admin@systemanchor.com");
+                  setPassword("SystemAnchor@123");
+                  setError("");
+                }}
+              >
+                <span className="demo-access__icon" aria-hidden="true">
+                  ↗
+                </span>
+                <span className="demo-access__copy">
+                  <strong>Exploring the demo?</strong>
+                  <span>Fill in the demo account</span>
+                </span>
+                <span className="demo-access__action">Use demo</span>
+              </button>
+
               {error && (
                 <div className="error-banner" role="alert">
                   <span className="error-icon">!</span>
@@ -197,16 +226,24 @@ function App() {
                 </div>
               )}
 
-              <button type="submit" className="cta" disabled={loading}>
-                {loading ? "Signing in..." : "Sign in"}
+              <button
+                type="submit"
+                className="cta"
+                disabled={loading}
+                aria-busy={loading}
+              >
+                {loading && <span className="spin" aria-hidden="true" />}
+                <span>{loading ? "Signing in..." : "Sign in"}</span>
               </button>
             </form>
 
             <div className="form-meta">
               <p>
-                Demo ·
-                <kbd>admin@systemanchor.com</kbd> /
-                <kbd>SystemAnchor@123</kbd>
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M10 2.2 16 4.5v4.8c0 4-2.5 6.7-6 8.5-3.5-1.8-6-4.5-6-8.5V4.5l6-2.3Z" />
+                  <path d="m7.3 9.8 1.8 1.8 3.7-3.9" />
+                </svg>
+                Secure sign-in · Workspace access protected
               </p>
             </div>
           </div>

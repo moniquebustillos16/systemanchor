@@ -363,6 +363,7 @@ function Inventory() {
     const {
       
     stats: queryStats,
+    statsQuery,
     list,
     isLoading: invLoading,
     isFetching: invFetching,
@@ -952,20 +953,24 @@ const warehousesForFilter = allWarehouses;
     setImagePreviews((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const buildPayload = () => ({
-    sku: form.sku.trim(),
-    name: form.name.trim(),
-    barcode: form.barcode.trim() || null,
-    serial: form.serial.trim() || null,
-    category_id: form.category_id || null,
-    warehouse_id: form.warehouse_id || null,
-    supplier_id: form.supplier_id || null,
-    qty: Number(form.qty) || 0,
-    min_stock: Number(form.min_stock) || 0,
-    max_stock: Number(form.max_stock) || 0,
-    price: Number(form.price) || 0,
-    status: form.status || "active",
-  });
+  const buildPayload = () => {
+    const product = {
+      sku: form.sku.trim(),
+      name: form.name.trim(),
+      barcode: form.barcode.trim() || null,
+      serial: form.serial.trim() || null,
+      category_id: form.category_id || null,
+      warehouse_id: form.warehouse_id || null,
+      supplier_id: form.supplier_id || null,
+      min_stock: Number(form.min_stock) || 0,
+      max_stock: Number(form.max_stock) || 0,
+      price: Number(form.price) || 0,
+      status: form.status || "active",
+    };
+    return modalMode === "add"
+      ? { ...product, qty: Number(form.qty) || 0 }
+      : product;
+  };
 
   const enrichProduct = useCallback(
     (raw: Partial<Product> & { id: string }): Product => {
@@ -1227,12 +1232,7 @@ const warehousesForFilter = allWarehouses;
     }
   };
 
-     const statsView = stats ?? {
-    total_products: 0,
-    low_stock: 0,
-    out_of_stock: 0,
-    inventory_value: 0,
-  };
+  const statsUnavailableLabel = statsQuery.isError ? "Unavailable" : "—";
 
   if (pageLoading) {
     return (
@@ -1363,20 +1363,28 @@ const warehousesForFilter = allWarehouses;
               <div className="stats-grid">
                 <div className="stat-card">
                   <div className="stat-label">Total Products</div>
-                  <div className="stat-value">{statsView.total_products.toLocaleString()}</div>
+                  <div className="stat-value">
+                    {stats?.total_products.toLocaleString() ?? statsUnavailableLabel}
+                  </div>
                 </div>
                 <div className="stat-card">
                   <div className="stat-label">Low Stock</div>
-                  <div className="stat-value warning">{statsView.low_stock.toLocaleString()}</div>
+                  <div className="stat-value warning">
+                    {stats?.low_stock.toLocaleString() ?? statsUnavailableLabel}
+                  </div>
                 </div>
                 <div className="stat-card">
                   <div className="stat-label">Out of Stock</div>
-                  <div className="stat-value danger">{statsView.out_of_stock.toLocaleString()}</div>
+                  <div className="stat-value danger">
+                    {stats?.out_of_stock.toLocaleString() ?? statsUnavailableLabel}
+                  </div>
                 </div>
                 <div className="stat-card">
                   <div className="stat-label">Inventory Value</div>
                   <div className="stat-value">
-                    {formatPeso(Number(statsView.inventory_value))}
+                    {stats
+                      ? formatPeso(Number(stats.inventory_value))
+                      : statsUnavailableLabel}
                   </div>
                 </div>
               </div>
@@ -1900,14 +1908,18 @@ const warehousesForFilter = allWarehouses;
                   </select>
                 </div>
                 <div className="form-field">
-                  <label>Qty</label>
+                  <label>{modalMode === "add" ? "Opening Qty" : "Qty"}</label>
                   <input
                     type="number"
                     min="0"
                     step="any"
                     value={form.qty}
                     onChange={(e) => setField("qty", e.target.value)}
+                    disabled={modalMode === "edit"}
                   />
+                  {modalMode === "edit" && (
+                    <small>Use Stock Movements to change the on-hand quantity.</small>
+                  )}
                 </div>
                 <div className="form-field">
                   <label>Min stock</label>

@@ -61,6 +61,13 @@ type Customer = {
   updated_at?: string;
 };
 
+function formatPeso(amount: number): string {
+  return `₱${Number(amount).toLocaleString("en-PH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 function healthClass(orders: number, open: number) {
   if (open > 1) return "mid";
   if (orders >= 50) return "high";
@@ -363,7 +370,7 @@ function Customers() {
             <div className="stat-card">
               <div className="stat-label">Total Revenue</div>
               <div className="stat-value">
-                ${stats.totalRev.toLocaleString()}
+                {formatPeso(stats.totalRev)}
               </div>
               <div className="stat-hint">From sales orders</div>
             </div>
@@ -379,7 +386,7 @@ function Customers() {
               </div>
               <div className="stat-hint">
                 {stats.top
-                  ? `$${(stats.top.revenue ?? 0).toLocaleString()}`
+                  ? formatPeso(stats.top.revenue ?? 0)
                   : ""}
               </div>
             </div>
@@ -474,7 +481,7 @@ function Customers() {
                           </td>
                           <td className="fw-600">{orders}</td>
                           <td className="fw-600">
-                            ${revenue.toLocaleString()}
+                            {formatPeso(revenue)}
                           </td>
                           <td>{open}</td>
                           <td>

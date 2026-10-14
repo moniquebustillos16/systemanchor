@@ -467,6 +467,7 @@ function Topbar({
   const [isDark, setIsDark] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notif[]>(() =>
     notifsCache.entry ? notifsCache.entry.data.list : []
   );
@@ -490,6 +491,23 @@ function Topbar({
   const notifRef = useRef<HTMLDivElement>(null);
   const userRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onMobileNavState = (event: Event) => {
+      setMobileNavOpen((event as CustomEvent<boolean>).detail);
+    };
+    const desktopBreakpoint = window.matchMedia("(min-width: 901px)");
+    const onBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches) setMobileNavOpen(false);
+    };
+
+    window.addEventListener("sa-mobile-nav-state", onMobileNavState);
+    desktopBreakpoint.addEventListener("change", onBreakpointChange);
+    return () => {
+      window.removeEventListener("sa-mobile-nav-state", onMobileNavState);
+      desktopBreakpoint.removeEventListener("change", onBreakpointChange);
+    };
+  }, []);
 
   const unreadCount = useMemo(
     () => notifications.filter((n) => !n.read).length,
@@ -959,6 +977,31 @@ function Topbar({
 
   return (
     <header className="header">
+      <button
+        type="button"
+        className="header-btn mobile-nav-toggle"
+        id="mobile-nav-toggle"
+        aria-label={mobileNavOpen ? "Close navigation menu" : "Open navigation menu"}
+        aria-controls="sidebar"
+        aria-expanded={mobileNavOpen}
+        onClick={() => {
+          const nextOpen = !mobileNavOpen;
+          setMobileNavOpen(nextOpen);
+          window.dispatchEvent(new CustomEvent("sa-mobile-nav-toggle", { detail: nextOpen }));
+        }}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+          {mobileNavOpen ? (
+            <>
+              <path d="m6 6 12 12M18 6 6 18" />
+            </>
+          ) : (
+            <>
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </>
+          )}
+        </svg>
+      </button>
       <div className="global-search" ref={searchWrapRef}>
         <button
           type="button"

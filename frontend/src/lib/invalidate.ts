@@ -2,7 +2,10 @@ import { queryClient, queryKeys } from "./queryClient";
 
 /** All dashboard ranges (dashboard is a key factory, not an array). */
 async function invalidateDashboard() {
-  await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.analytics }),
+  ]);
 }
 
 export async function invalidateInventory() {
@@ -32,6 +35,7 @@ export async function invalidatePurchaseOrders() {
 export async function invalidateSalesOrders() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.salesOrders.all }),
+    queryClient.invalidateQueries({ queryKey: ["customers"] }),
     invalidateDashboard(),
   ]);
 }
@@ -67,6 +71,7 @@ export async function invalidateShipments() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: queryKeys.shipments.all }),
     queryClient.invalidateQueries({ queryKey: queryKeys.salesOrders.all }),
+    queryClient.invalidateQueries({ queryKey: ["customers"] }),
     queryClient.invalidateQueries({ queryKey: queryKeys.inventory.all }),
     invalidateDashboard(),
   ]);

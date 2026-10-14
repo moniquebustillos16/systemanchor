@@ -231,7 +231,12 @@ const MODULE_CATALOG: {
       {
         key: "sales_orders",
         label: "Sales Orders",
-        aliases: ["sales_orders", "sales_order", "so",  "sales"],
+        aliases: [
+          "sales_orders",
+          "sales_order",
+          "so",
+          "sales",
+        ],
         description: "Customer sales orders and fulfillment",
       },
       {
@@ -856,6 +861,28 @@ function Roles() {
   const selectedIsAdmin = isAdminRole(selected?.name);
   const catalogReady = permissions.length > 0;
   const adminLocked = selectedIsAdmin && catalogReady;
+  const systemPermissionIds = useMemo(
+    () =>
+      new Set(
+        permissions
+          .filter(
+            (permission) =>
+              resolveModule(parsePermName(permission.name).group).section ===
+              "SYSTEM"
+          )
+          .map((permission) => permission.id)
+      ),
+    [permissions]
+  );
+  const legacySalesOrderPermissionIds = useMemo(
+    () =>
+      new Set(
+        permissions
+          .filter((permission) => /^orders[._-]/i.test(permission.name))
+          .map((permission) => permission.id)
+      ),
+    [permissions]
+  );
 
   /* Auto-select first role once only */
   useEffect(() => {
@@ -917,13 +944,24 @@ function Roles() {
       }
     } else {
       for (const id of rolePermsQ.ids) {
-        if (id) next.add(String(id));
+        if (
+          id &&
+          !systemPermissionIds.has(String(id)) &&
+          !legacySalesOrderPermissionIds.has(String(id))
+        ) {
+          next.add(String(id));
+        }
       }
     }
 
     setAssigned(next);
     setAssignedRoleId(selectedId);
-    setDirty(false);
+    setDirty(
+      !isAdmin &&
+        Array.from(rolePermsQ.ids).some((id) =>
+          systemPermissionIds.has(String(id))
+        )
+    );
   }, [
     selectedId,
     serverPermKey,
@@ -935,6 +973,8 @@ function Roles() {
     permissions,
     roles,
     assigned.size,
+    systemPermissionIds,
+    legacySalesOrderPermissionIds,
   ]);
 
   const permCounts = useMemo(() => {
@@ -953,7 +993,15 @@ function Roles() {
     return m;
   }, [roles]);
 
-  const allGroups = useMemo(() => buildGroups(permissions), [permissions]);
+  const allGroups = useMemo(
+    () =>
+      buildGroups(
+        permissions.filter(
+          (permission) => !/^orders[._-]/i.test(permission.name)
+        )
+      ),
+    [permissions]
+  );
 
   const sectionOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -1043,7 +1091,7 @@ function Roles() {
   const canSavePerms = canEditPerms && dirty && !permSaving;
 
   const togglePerm = (id: string) => {
-    if (!canEditPerms || !id) return;
+    if (!canEditPerms || !id || systemPermissionIds.has(id)) return;
     setAssigned((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -1157,7 +1205,14 @@ function Roles() {
     const roleIdToSave = selectedId;
     setPermSaving(true);
 
-    const ids = Array.from(assigned).map(String).filter(Boolean);
+    const ids = Array.from(assigned)
+      .map(String)
+      .filter(
+        (id) =>
+          Boolean(id) &&
+          !systemPermissionIds.has(id) &&
+          !legacySalesOrderPermissionIds.has(id)
+      );
     const payload = { permission_ids: ids, permissions: ids };
 
     const tryRoutes: SyncRoute[] = [
@@ -1578,6 +1633,20 @@ function Roles() {
                                             }}
                                           >
                                             {row.section}
+                                            {row.section === "SYSTEM" &&
+                                              !selectedIsAdmin && (
+                                                <span
+                                                  style={{
+                                                    marginLeft: 8,
+                                                    fontSize: 10,
+                                                    letterSpacing: "0.04em",
+                                                    textTransform: "none",
+                                                    color: "rgba(255,255,255,0.35)",
+                                                  }}
+                                                >
+                                                  Admin only
+                                                </span>
+                                              )}
                                           </span>
                                         </td>
                                       </tr>
@@ -1640,7 +1709,12 @@ function Roles() {
                                         }
                                         const checked = adminLocked
                                           ? true
-                                          : matrixReady && assigned.has(p.id);
+                                          : g.section !== "SYSTEM" &&
+                                            matrixReady &&
+                                            assigned.has(p.id);
+                                        const systemLocked =
+                                          g.section === "SYSTEM" &&
+                                          !selectedIsAdmin;
                                         return (
                                           <td
                                             key={action}
@@ -1653,13 +1727,16 @@ function Roles() {
                                               disabled={
                                                 permLoading ||
                                                 adminLocked ||
+                                                systemLocked ||
                                                 !matrixReady
                                               }
                                               onChange={() => togglePerm(p.id)}
                                               title={
                                                 adminLocked
                                                   ? "Admin — full access"
-                                                  : p.name
+                                                  : systemLocked
+                                                    ? "System permissions are reserved for the Admin role"
+                                                    : p.name
                                               }
                                             />
                                           </td>

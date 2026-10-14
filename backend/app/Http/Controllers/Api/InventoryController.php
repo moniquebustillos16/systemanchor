@@ -3,11 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Inventory;
 use App\Models\Product;
 use App\Models\User;
+use App\Services\InventoryService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class InventoryController extends Controller
@@ -16,7 +19,7 @@ class InventoryController extends Controller
     private const LIST_COLUMNS = [
         'id', 'sku', 'name', 'barcode', 'serial',
         'category_id', 'warehouse_id', 'supplier_id',
-        'qty', 'min_stock', 'max_stock', 'price', 'status',
+        'qty', 'unallocated_qty', 'min_stock', 'max_stock', 'price', 'status',
         'created_at', 'updated_at',
     ];
 
@@ -35,7 +38,21 @@ class InventoryController extends Controller
         // Enforce assigned-warehouse scope for non–access-all users
         $this->applyWarehouseScope($query, $request);
 
-        $with = ['category:id,name', 'warehouse:id,code,name', 'supplier:id,name'];
+        $with = [
+            'category:id,name',
+            'supplier:id,name',
+        ];
+        $allowedWarehouses = $this->allowedWarehouseIds($request->user());
+        if (is_array($allowedWarehouses)) {
+            $balanceWarehouses = $request->filled('warehouse_id')
+                ? [(string) $request->warehouse_id]
+                : $allowedWarehouses;
+            $with['inventoryBalances'] = fn ($balances) => $balances->whereIn('warehouse_id', $balanceWarehouses);
+        } else {
+            $with[] = 'inventoryBalances';
+        }
+        $with[] = 'inventoryBalances.warehouse:id,code,name';
+        $with[] = 'warehouse:id,code,name';
         if ($request->boolean('with_images')) {
             $with[] = 'images';
             $with[] = 'primaryImage';
@@ -47,9 +64,9 @@ class InventoryController extends Controller
             $op = $driver === 'pgsql' ? 'ilike' : 'like';
             $query->where(function ($q) use ($search, $op) {
                 $q->where('sku', $op, "%{$search}%")
-                  ->orWhere('name', $op, "%{$search}%")
-                  ->orWhere('barcode', $op, "%{$search}%")
-                  ->orWhere('serial', $op, "%{$search}%");
+                    ->orWhere('name', $op, "%{$search}%")
+                    ->orWhere('barcode', $op, "%{$search}%")
+                    ->orWhere('serial', $op, "%{$search}%");
             });
         }
 
@@ -59,7 +76,7 @@ class InventoryController extends Controller
 
         // Optional client filter — must still be within allowed set (checked in applyWarehouseScope)
         if ($request->filled('warehouse_id')) {
-            $query->where('warehouse_id', $request->warehouse_id);
+            $this->whereWarehouseStock($query, (string) $request->warehouse_id);
         }
 
         if ($request->filled('supplier_id')) {
@@ -67,16 +84,21 @@ class InventoryController extends Controller
         }
 
         if ($status = $request->query('status')) {
-            match ($status) {
-                'out-of-stock' => $query->where('qty', '<=', 0),
-                'low-stock'    => $query->whereColumn('qty', '<', 'min_stock')->where('qty', '>', 0),
-                'active'       => $query->whereColumn('qty', '>=', 'min_stock'),
-                default        => null,
-            };
+            $warehouseId = $request->query('warehouse_id');
+            if ($warehouseId) {
+                $this->whereWarehouseStock($query, (string) $warehouseId, $status);
+            } else {
+                match ($status) {
+                    'out-of-stock' => $query->where('qty', '<=', 0),
+                    'low-stock' => $query->whereColumn('qty', '<', 'min_stock')->where('qty', '>', 0),
+                    'active' => $query->whereColumn('qty', '>=', 'min_stock'),
+                    default => null,
+                };
+            }
         }
 
         $sort = $request->query('sort', 'sku');
-        $dir  = $request->query('dir', 'asc') === 'desc' ? 'desc' : 'asc';
+        $dir = $request->query('dir', 'asc') === 'desc' ? 'desc' : 'asc';
         if (in_array($sort, ['sku', 'name', 'qty', 'price', 'created_at'], true)) {
             $query->orderBy($sort, $dir);
         } else {
@@ -85,19 +107,19 @@ class InventoryController extends Controller
 
         $perPage = min(max((int) $request->query('per_page', 15), 1), 100);
 
-        if ($request->boolean('all') || !$request->boolean('paginate', true)) {
+        if ($request->boolean('all') || ! $request->boolean('paginate', true)) {
             $items = $query->limit($perPage)->get();
-            $items->transform(fn (Product $p) => $this->decorate($p));
+            $items->transform(fn (Product $p) => $this->decorate($p, $request->query('warehouse_id'), $allowedWarehouses));
 
             return response()->json([
                 'success' => true,
-                'data'    => $items,
-                'total'   => $items->count(),
+                'data' => $items,
+                'total' => $items->count(),
             ]);
         }
 
         $page = $query->paginate($perPage);
-        $page->getCollection()->transform(fn (Product $p) => $this->decorate($p));
+        $page->getCollection()->transform(fn (Product $p) => $this->decorate($p, $request->query('warehouse_id'), $allowedWarehouses));
 
         return response()->json($page);
     }
@@ -121,7 +143,7 @@ class InventoryController extends Controller
         }
 
         // Scoped users: cache per user so numbers match their warehouses
-        $cacheKey = 'inventory:stats:user:' . $user->id;
+        $cacheKey = 'inventory:stats:user:'.$user->id;
         $payload = Cache::remember($cacheKey, self::STATS_CACHE_TTL, function () use ($allowed) {
             return $this->computeStats($allowed);
         });
@@ -135,44 +157,63 @@ class InventoryController extends Controller
 
     public function show(Request $request, string $id)
     {
-        $product = Product::with([
-                'category:id,name',
-                'warehouse:id,code,name',
-                'supplier:id,name',
-                'images',
-                'primaryImage',
-            ])
+        $allowed = $this->allowedWarehouseIds($request->user());
+        $relations = [
+            'category:id,name',
+            'supplier:id,name',
+            'images',
+            'primaryImage',
+        ];
+        if (is_array($allowed)) {
+            $relations['inventoryBalances'] = fn ($balances) => $balances->whereIn('warehouse_id', $allowed);
+        } else {
+            $relations[] = 'inventoryBalances';
+        }
+        $relations[] = 'inventoryBalances.warehouse:id,code,name';
+        $relations[] = 'warehouse:id,code,name';
+        $product = Product::with($relations)
             ->whereNull('deleted_at')
             ->findOrFail($id);
 
         $this->assertCanAccessProduct($request->user(), $product);
 
-        return response()->json($this->decorate($product));
+        return response()->json($this->decorate($product, null, $allowed));
     }
 
     /* ─────────────────────────────────────────────
      |  CREATE
      ───────────────────────────────────────────── */
 
-    public function store(Request $request)
+    public function store(Request $request, InventoryService $inventoryService)
     {
         $validated = $request->validate([
-            'sku'          => 'required|string|max:100|unique:products,sku',
-            'name'         => 'required|string|max:255',
-            'barcode'      => 'nullable|string|max:100',
-            'serial'       => 'nullable|string|max:100',
-            'category_id'  => 'nullable|uuid|exists:categories,id',
+            'sku' => [
+                'required',
+                'string',
+                'max:100',
+                Rule::unique('products', 'sku')->whereNull('deleted_at'),
+            ],
+            'name' => 'required|string|max:255',
+            'barcode' => 'nullable|string|max:100',
+            'serial' => 'nullable|string|max:100',
+            'category_id' => 'nullable|uuid|exists:categories,id',
             'warehouse_id' => 'nullable|uuid|exists:warehouses,id',
-            'supplier_id'  => 'nullable|uuid|exists:suppliers,id',
-            'qty'          => 'nullable|numeric|min:0',
-            'min_stock'    => 'nullable|numeric|min:0',
-            'max_stock'    => 'nullable|numeric|min:0',
-            'price'        => 'nullable|numeric|min:0',
-            'status'       => ['nullable', Rule::in(['active', 'inactive'])],
+            'supplier_id' => 'nullable|uuid|exists:suppliers,id',
+            'qty' => 'nullable|numeric|min:0',
+            'min_stock' => 'nullable|numeric|min:0',
+            'max_stock' => 'nullable|numeric|min:0',
+            'price' => 'nullable|numeric|min:0',
+            'status' => ['nullable', Rule::in(['active', 'inactive'])],
         ]);
 
         // Non–access-all users may only create products in assigned warehouses
         $warehouseId = $validated['warehouse_id'] ?? null;
+        $initialQty = round((float) ($validated['qty'] ?? 0), 4);
+        if ($initialQty > 0 && $warehouseId === null) {
+            return response()->json([
+                'message' => 'A warehouse is required when creating opening stock.',
+            ], 422);
+        }
         if ($warehouseId !== null) {
             $this->assertCanAccessWarehouseId($request->user(), (string) $warehouseId);
         } else {
@@ -185,20 +226,48 @@ class InventoryController extends Controller
             }
         }
 
-        $product = Product::create([
-            'sku'          => $validated['sku'],
-            'name'         => $validated['name'],
-            'barcode'      => $validated['barcode'] ?? null,
-            'serial'       => $validated['serial'] ?? null,
-            'category_id'  => $validated['category_id'] ?? null,
-            'warehouse_id' => $validated['warehouse_id'] ?? null,
-            'supplier_id'  => $validated['supplier_id'] ?? null,
-            'qty'          => $validated['qty'] ?? 0,
-            'min_stock'    => $validated['min_stock'] ?? 0,
-            'max_stock'    => $validated['max_stock'] ?? 0,
-            'price'        => $validated['price'] ?? 0,
-            'status'       => $validated['status'] ?? 'active',
-        ]);
+        $product = DB::transaction(function () use ($validated, $warehouseId, $initialQty, $inventoryService, $request) {
+            $product = Product::create([
+                'sku' => $validated['sku'],
+                'name' => $validated['name'],
+                'barcode' => $validated['barcode'] ?? null,
+                'serial' => $validated['serial'] ?? null,
+                'category_id' => $validated['category_id'] ?? null,
+                'warehouse_id' => $validated['warehouse_id'] ?? null,
+                'supplier_id' => $validated['supplier_id'] ?? null,
+                'qty' => 0,
+                'min_stock' => $validated['min_stock'] ?? 0,
+                'max_stock' => $validated['max_stock'] ?? 0,
+                'price' => $validated['price'] ?? 0,
+                'status' => $validated['status'] ?? 'active',
+            ]);
+
+            if ($initialQty > 0) {
+                $inventoryService->post([
+                    'type' => 'ADJUSTMENT',
+                    'product_id' => $product->id,
+                    'qty' => $initialQty,
+                    'warehouse_id' => $warehouseId,
+                    'from_warehouse_id' => $warehouseId,
+                    'reason' => 'opening-balance',
+                    'reference' => 'Opening stock',
+                    'idempotency_key' => 'opening-stock:'.$product->id,
+                ], $request->user()?->id);
+            } elseif ($warehouseId !== null) {
+                Inventory::firstOrCreate(
+                    ['product_id' => $product->id, 'warehouse_id' => $warehouseId],
+                    [
+                        'qty' => 0,
+                        'min_stock' => $product->min_stock,
+                        'max_stock' => $product->max_stock,
+                        'reserved_qty' => 0,
+                        'status' => 'active',
+                    ]
+                );
+            }
+
+            return $product->fresh();
+        });
 
         $product->load(['category:id,name', 'warehouse:id,code,name', 'supplier:id,name']);
 
@@ -207,7 +276,7 @@ class InventoryController extends Controller
 
         return response()->json([
             'message' => 'Product created successfully',
-            'data'    => $this->decorate($product),
+            'data' => $this->decorate($product),
         ], 201);
     }
 
@@ -222,22 +291,27 @@ class InventoryController extends Controller
         // Must already be allowed to see this product
         $this->assertCanAccessProduct($request->user(), $product);
 
+        if ($request->exists('qty')) {
+            return response()->json([
+                'message' => 'Use a stock movement adjustment to change inventory quantity.',
+            ], 422);
+        }
+
         $validated = $request->validate([
             'sku' => [
                 'sometimes', 'required', 'string', 'max:100',
-                Rule::unique('products', 'sku')->ignore($product->id),
+                Rule::unique('products', 'sku')->ignore($product->id)->whereNull('deleted_at'),
             ],
-            'name'         => 'sometimes|required|string|max:255',
-            'barcode'      => 'sometimes|nullable|string|max:100',
-            'serial'       => 'sometimes|nullable|string|max:100',
-            'category_id'  => 'sometimes|nullable|uuid|exists:categories,id',
+            'name' => 'sometimes|required|string|max:255',
+            'barcode' => 'sometimes|nullable|string|max:100',
+            'serial' => 'sometimes|nullable|string|max:100',
+            'category_id' => 'sometimes|nullable|uuid|exists:categories,id',
             'warehouse_id' => 'sometimes|nullable|uuid|exists:warehouses,id',
-            'supplier_id'  => 'sometimes|nullable|uuid|exists:suppliers,id',
-            'qty'          => 'sometimes|numeric|min:0',
-            'min_stock'    => 'sometimes|numeric|min:0',
-            'max_stock'    => 'sometimes|numeric|min:0',
-            'price'        => 'sometimes|numeric|min:0',
-            'status'       => ['sometimes', Rule::in(['active', 'inactive'])],
+            'supplier_id' => 'sometimes|nullable|uuid|exists:suppliers,id',
+            'min_stock' => 'sometimes|numeric|min:0',
+            'max_stock' => 'sometimes|numeric|min:0',
+            'price' => 'sometimes|numeric|min:0',
+            'status' => ['sometimes', Rule::in(['active', 'inactive'])],
         ]);
 
         // Moving to another warehouse must also be allowed
@@ -246,13 +320,21 @@ class InventoryController extends Controller
         }
 
         $product->update($validated);
-        $product->load([
+        $allowed = $this->allowedWarehouseIds($request->user());
+        $relations = [
             'category:id,name',
-            'warehouse:id,code,name',
             'supplier:id,name',
             'images',
             'primaryImage',
-        ]);
+        ];
+        if (is_array($allowed)) {
+            $relations['inventoryBalances'] = fn ($balances) => $balances->whereIn('warehouse_id', $allowed);
+        } else {
+            $relations[] = 'inventoryBalances';
+        }
+        $relations[] = 'inventoryBalances.warehouse:id,code,name';
+        $relations[] = 'warehouse:id,code,name';
+        $product->load($relations);
 
         if (array_key_exists('qty', $validated) || array_key_exists('min_stock', $validated)) {
             $this->notifyStockLevel($product);
@@ -261,7 +343,7 @@ class InventoryController extends Controller
 
         return response()->json([
             'message' => 'Inventory updated successfully',
-            'data'    => $this->decorate($product),
+            'data' => $this->decorate($product, null, $allowed),
         ]);
     }
 
@@ -295,7 +377,7 @@ class InventoryController extends Controller
      */
     private function allowedWarehouseIds(?User $user): ?array
     {
-        if (!$user) {
+        if (! $user) {
             return [];
         }
 
@@ -303,7 +385,7 @@ class InventoryController extends Controller
             return null;
         }
 
-        if (!empty($user->access_all_warehouses)) {
+        if (! empty($user->access_all_warehouses)) {
             return null;
         }
 
@@ -317,7 +399,7 @@ class InventoryController extends Controller
         }
 
         // Include primary warehouse_id if set
-        if (!empty($user->warehouse_id)) {
+        if (! empty($user->warehouse_id)) {
             $ids[] = (string) $user->warehouse_id;
         }
 
@@ -339,19 +421,55 @@ class InventoryController extends Controller
         if ($allowed === []) {
             // No warehouses assigned → no products
             $query->whereRaw('1 = 0');
+
             return;
         }
 
         if ($request->filled('warehouse_id')) {
             $requested = (string) $request->warehouse_id;
-            if (!in_array($requested, $allowed, true)) {
+            if (! in_array($requested, $allowed, true)) {
                 abort(403, 'You do not have access to this warehouse.');
             }
-            // index() will also apply where warehouse_id = requested
+
             return;
         }
 
-        $query->whereIn('warehouse_id', $allowed);
+        $query->where(function ($warehouseQuery) use ($allowed) {
+            $warehouseQuery
+                ->whereHas('inventoryBalances', fn ($balance) => $balance->whereIn('warehouse_id', $allowed))
+                ->orWhere(function ($legacyProducts) use ($allowed) {
+                    $legacyProducts
+                        ->whereIn('warehouse_id', $allowed)
+                        ->whereDoesntHave('inventoryBalances');
+                });
+        });
+    }
+
+    private function whereWarehouseStock($query, string $warehouseId, ?string $status = null): void
+    {
+        $query->where(function ($warehouseQuery) use ($warehouseId, $status) {
+            $warehouseQuery
+                ->whereHas('inventoryBalances', function ($balance) use ($warehouseId, $status) {
+                    $balance->where('warehouse_id', $warehouseId);
+                    $this->applyStockStatus($balance, $status);
+                })
+                ->orWhere(function ($legacyProduct) use ($warehouseId, $status) {
+                    $legacyProduct
+                        ->where('warehouse_id', $warehouseId)
+                        ->whereDoesntHave('inventoryBalances');
+                    $this->applyStockStatus($legacyProduct, $status);
+                });
+        });
+    }
+
+    private function applyStockStatus($query, ?string $status): void
+    {
+        match ($status) {
+            'out-of-stock' => $query->where('qty', '<=', 0),
+            'low-stock' => $query->whereColumn('qty', '<', 'min_stock')->where('qty', '>', 0),
+            'active' => $query->whereColumn('qty', '>=', 'min_stock'),
+            default => null,
+        };
     }
 
     private function assertCanAccessProduct(?User $user, Product $product): void
@@ -362,9 +480,10 @@ class InventoryController extends Controller
             return;
         }
 
-        $wid = $product->warehouse_id !== null ? (string) $product->warehouse_id : null;
-
-        if ($wid === null || !in_array($wid, $allowed, true)) {
+        $hasAllowedBalance = $product->inventoryBalances()
+            ->whereIn('warehouse_id', $allowed)
+            ->exists();
+        if (! $hasAllowedBalance) {
             abort(403, 'You do not have access to this product warehouse.');
         }
     }
@@ -377,7 +496,7 @@ class InventoryController extends Controller
             return;
         }
 
-        if (!in_array($warehouseId, $allowed, true)) {
+        if (! in_array($warehouseId, $allowed, true)) {
             abort(403, 'You do not have access to this warehouse.');
         }
     }
@@ -387,33 +506,51 @@ class InventoryController extends Controller
      */
     private function computeStats(?array $allowedWarehouseIds): array
     {
-        $query = Product::query()->whereNull('deleted_at');
+        if ($allowedWarehouseIds === null) {
+            $row = Product::query()
+                ->selectRaw('
+                    COUNT(*) as total_products,
+                    COALESCE(SUM(CASE WHEN qty > 0 AND qty < min_stock THEN 1 ELSE 0 END), 0) as low_stock,
+                    COALESCE(SUM(CASE WHEN qty <= 0 THEN 1 ELSE 0 END), 0) as out_of_stock,
+                    COALESCE(SUM(qty * price), 0) as inventory_value
+                ')
+                ->first();
 
-        if (is_array($allowedWarehouseIds)) {
-            if ($allowedWarehouseIds === []) {
-                return [
-                    'total_products'  => 0,
-                    'low_stock'       => 0,
-                    'out_of_stock'    => 0,
-                    'inventory_value' => 0.0,
-                ];
-            }
-            $query->whereIn('warehouse_id', $allowedWarehouseIds);
+            return [
+                'total_products' => (int) ($row->total_products ?? 0),
+                'low_stock' => (int) ($row->low_stock ?? 0),
+                'out_of_stock' => (int) ($row->out_of_stock ?? 0),
+                'inventory_value' => (float) ($row->inventory_value ?? 0),
+            ];
         }
 
+        $query = Inventory::query()
+            ->join('products', 'products.id', '=', 'inventories.product_id')
+            ->whereNull('products.deleted_at');
+
+        if ($allowedWarehouseIds === []) {
+            return [
+                'total_products' => 0,
+                'low_stock' => 0,
+                'out_of_stock' => 0,
+                'inventory_value' => 0.0,
+            ];
+        }
+        $query->whereIn('inventories.warehouse_id', $allowedWarehouseIds);
+
         $row = $query
-            ->selectRaw("
-                COUNT(*) as total_products,
-                COALESCE(SUM(CASE WHEN qty > 0 AND qty < min_stock THEN 1 ELSE 0 END), 0) as low_stock,
-                COALESCE(SUM(CASE WHEN qty <= 0 THEN 1 ELSE 0 END), 0) as out_of_stock,
-                COALESCE(SUM(qty * price), 0) as inventory_value
-            ")
+            ->selectRaw('
+                COUNT(DISTINCT inventories.product_id) as total_products,
+                COALESCE(SUM(CASE WHEN inventories.qty > 0 AND inventories.qty < inventories.min_stock THEN 1 ELSE 0 END), 0) as low_stock,
+                COALESCE(SUM(CASE WHEN inventories.qty <= 0 THEN 1 ELSE 0 END), 0) as out_of_stock,
+                COALESCE(SUM(inventories.qty * products.price), 0) as inventory_value
+            ')
             ->first();
 
         return [
-            'total_products'  => (int) ($row->total_products ?? 0),
-            'low_stock'       => (int) ($row->low_stock ?? 0),
-            'out_of_stock'    => (int) ($row->out_of_stock ?? 0),
+            'total_products' => (int) ($row->total_products ?? 0),
+            'low_stock' => (int) ($row->low_stock ?? 0),
+            'out_of_stock' => (int) ($row->out_of_stock ?? 0),
             'inventory_value' => (float) ($row->inventory_value ?? 0),
         ];
     }
@@ -422,7 +559,7 @@ class InventoryController extends Controller
     {
         Cache::forget('inventory:stats');
         if ($user) {
-            Cache::forget('inventory:stats:user:' . $user->id);
+            Cache::forget('inventory:stats:user:'.$user->id);
         }
     }
 
@@ -430,10 +567,48 @@ class InventoryController extends Controller
      |  HELPERS
      ───────────────────────────────────────────── */
 
-    private function decorate(Product $p): Product
+    private function decorate(Product $p, ?string $warehouseId = null, ?array $allowedWarehouses = null): Product
     {
+        $balances = $p->inventoryBalances;
+        $p->inventory_balances = $balances->map(fn (Inventory $balance) => [
+            'warehouse_id' => $balance->warehouse_id,
+            'warehouse' => $balance->warehouse,
+            'qty' => (float) $balance->qty,
+            'min_stock' => (float) $balance->min_stock,
+            'max_stock' => (float) $balance->max_stock,
+        ])->values();
+
+        if ($warehouseId !== null) {
+            $balance = $balances->firstWhere('warehouse_id', $warehouseId);
+            $legacyQty = ! $balance && (string) $p->warehouse_id === $warehouseId
+                ? (float) $p->qty
+                : 0.0;
+            $p->total_qty = is_array($allowedWarehouses)
+                ? (float) $balances->sum(fn (Inventory $row) => (float) $row->qty) + $legacyQty
+                : (float) $p->qty;
+            $p->qty = (float) ($balance?->qty ?? $legacyQty);
+            $p->warehouse_id = $warehouseId;
+            if ($balance) {
+                $p->min_stock = $balance->min_stock;
+                $p->max_stock = $balance->max_stock;
+                $p->setRelation('warehouse', $balance->warehouse);
+            }
+        } elseif (is_array($allowedWarehouses)) {
+            $legacyQty = $balances->isEmpty()
+                && $p->warehouse_id !== null
+                && in_array((string) $p->warehouse_id, $allowedWarehouses, true)
+                    ? (float) $p->qty
+                    : 0.0;
+            $p->qty = (float) $balances->sum(fn (Inventory $balance) => (float) $balance->qty) + $legacyQty;
+            $p->unallocated_qty = 0;
+            if (! in_array((string) $p->warehouse_id, $allowedWarehouses, true)) {
+                $p->warehouse_id = null;
+                $p->setRelation('warehouse', null);
+            }
+        }
+
         $p->display_status = $this->displayStatus($p);
-        $p->stock_value    = (float) $p->qty * (float) $p->price;
+        $p->stock_value = (float) $p->qty * (float) $p->price;
 
         return $p;
     }
@@ -459,7 +634,7 @@ class InventoryController extends Controller
             return;
         }
 
-        $type  = $qty <= 0 ? 'danger' : 'warning';
+        $type = $qty <= 0 ? 'danger' : 'warning';
         $title = $qty <= 0 ? 'Out of stock' : 'Low stock alert';
         $message = $qty <= 0
             ? "{$product->sku} {$product->name} has reached zero quantity"
@@ -470,17 +645,17 @@ class InventoryController extends Controller
             ->whereNull('deleted_at')
             ->select('id')
             ->chunkById(200, function ($users) use ($type, $title, $message) {
-                $now  = now();
+                $now = now();
                 $rows = [];
                 foreach ($users as $user) {
                     $rows[] = [
-                        'id'         => (string) \Illuminate\Support\Str::uuid(),
-                        'user_id'    => $user->id,
-                        'type'       => $type,
-                        'title'      => $title,
-                        'message'    => $message,
-                        'page'       => '/products',
-                        'is_read'    => false,
+                        'id' => (string) Str::uuid(),
+                        'user_id' => $user->id,
+                        'type' => $type,
+                        'title' => $title,
+                        'message' => $message,
+                        'page' => '/products',
+                        'is_read' => false,
                         'created_at' => $now,
                         'updated_at' => $now,
                     ];

@@ -48,11 +48,11 @@ class SampleDataSeeder extends Seeder
             'Warehouse Manager' => ['description' => 'Manages warehouse operations and staff', 'permissions' => ['warehouses.view', 'warehouses.create', 'warehouses.update', 'inventory.view', 'inventory.update', 'stock.view', 'stock.transfer', 'users.view']],
             'Inventory Manager' => ['description' => 'Manages products, stock, and inventory accuracy', 'permissions' => ['inventory.view', 'inventory.create', 'inventory.update', 'inventory.delete', 'stock.view', 'stock.in', 'stock.out', 'stock.transfer', 'stock.adjust', 'reports.view']],
             'Procurement Officer' => ['description' => 'Manages purchasing and replenishment', 'permissions' => ['purchase_orders.view', 'purchase_orders.create', 'purchase_orders.update', 'inventory.view', 'warehouses.view']],
-            'Sales Manager' => ['description' => 'Oversees customer orders and fulfillment', 'permissions' => ['orders.view', 'orders.create', 'orders.update', 'orders.delete', 'orders.cancel', 'inventory.view', 'warehouses.view', 'reports.view']],
+            'Sales Manager' => ['description' => 'Oversees customer orders and fulfillment', 'permissions' => ['sales_orders.view', 'sales_orders.create', 'sales_orders.update', 'sales_orders.delete', 'inventory.view', 'warehouses.view', 'reports.view']],
             'Receiving Clerk' => ['description' => 'Records inbound goods and receipts', 'permissions' => ['purchase_orders.view', 'inventory.view', 'stock.view', 'stock.in', 'warehouses.view']],
-            'Shipping Clerk' => ['description' => 'Prepares outbound orders and shipments', 'permissions' => ['orders.view', 'orders.update', 'inventory.view', 'stock.view', 'stock.out', 'warehouses.view']],
+            'Shipping Clerk' => ['description' => 'Prepares outbound orders and shipments', 'permissions' => ['sales_orders.view', 'sales_orders.update', 'inventory.view', 'stock.view', 'stock.out', 'warehouses.view']],
             'Cycle Count Auditor' => ['description' => 'Reviews inventory counts and variances', 'permissions' => ['inventory.view', 'stock.view', 'stock.adjust', 'reports.view', 'warehouses.view']],
-            'Viewer' => ['description' => 'Read-only access to operational data', 'permissions' => ['inventory.view', 'stock.view', 'orders.view', 'purchase_orders.view', 'warehouses.view', 'reports.view']],
+            'Viewer' => ['description' => 'Read-only access to operational data', 'permissions' => ['inventory.view', 'stock.view', 'sales_orders.view', 'purchase_orders.view', 'warehouses.view', 'reports.view']],
         ];
 
         $roles = [];
@@ -288,6 +288,12 @@ class SampleDataSeeder extends Seeder
                 'product_name' => 'Safety Gloves',
                 'items' => 50,
                 'total' => 425,
+                'lines' => [[
+                    'product_id' => $products[1]->id,
+                    'product_name' => $products[1]->name,
+                    'qty' => 50,
+                    'unit_price' => $products[1]->price,
+                ]],
                 'status' => 'pending',
             ]
         );
@@ -303,6 +309,12 @@ class SampleDataSeeder extends Seeder
                 'product_name' => 'Steel Fasteners',
                 'items' => 100,
                 'total' => 275,
+                'lines' => [[
+                    'product_id' => $products[0]->id,
+                    'product_name' => $products[0]->name,
+                    'qty' => 100,
+                    'unit_price' => $products[0]->price,
+                ]],
                 'status' => 'received',
             ]
         );
@@ -315,6 +327,12 @@ class SampleDataSeeder extends Seeder
                 'order_date' => now()->subDays(2)->toDateString(),
                 'items' => 12,
                 'total' => 386.50,
+                'lines' => [[
+                    'product_id' => $products[1]->id,
+                    'product_name' => $products[1]->name,
+                    'qty' => 12,
+                    'unit_price' => 386.50 / 12,
+                ]],
                 'status' => 'processing',
             ]
         );
@@ -357,6 +375,12 @@ class SampleDataSeeder extends Seeder
                     'product_name' => $products[$index % count($products)]->name,
                     'items' => $expected,
                     'total' => $expected * (float) $products[$index % count($products)]->price,
+                    'lines' => [[
+                        'product_id' => $products[$index % count($products)]->id,
+                        'product_name' => $products[$index % count($products)]->name,
+                        'qty' => $expected,
+                        'unit_price' => $products[$index % count($products)]->price,
+                    ]],
                     'status' => $received === $expected ? 'received' : 'pending',
                 ]
             );
@@ -369,6 +393,12 @@ class SampleDataSeeder extends Seeder
                     'order_date' => date('Y-m-d', strtotime($operation['shipment_date'] . ' -3 days')),
                     'items' => 3 + $index,
                     'total' => 145 + ($index * 37.5),
+                    'lines' => [[
+                        'product_id' => $products[$index % count($products)]->id,
+                        'product_name' => $products[$index % count($products)]->name,
+                        'qty' => 3 + $index,
+                        'unit_price' => (145 + ($index * 37.5)) / (3 + $index),
+                    ]],
                     'status' => $shipmentStatuses[$index] === 'completed' ? 'completed' : 'processing',
                 ]
             );

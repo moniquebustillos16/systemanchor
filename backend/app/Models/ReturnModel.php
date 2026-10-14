@@ -21,12 +21,14 @@ class ReturnModel extends Model
         'disposition',
         'items',
         'date',
+        'lines',
         'status',
     ];
 
     protected $casts = [
         'items' => 'integer',
         'date'  => 'date',
+        'lines' => 'array',
     ];
 
     // Relationships

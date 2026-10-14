@@ -6,6 +6,11 @@ export async function getStockMovements(params: Record<string, unknown> = {}) {
   return data;
 }
 
+export async function getStockMovementStats(): Promise<{ today: number }> {
+  const { data } = await api.get("/stock-movements/stats");
+  return data as { today: number };
+}
+
 export async function createStockMovement(payload: Record<string, unknown>) {
   const { data } = await api.post("/stock-movements", payload);
   return extractData(data) ?? data;

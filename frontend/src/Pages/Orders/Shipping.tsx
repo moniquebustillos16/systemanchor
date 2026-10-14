@@ -1,5 +1,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { isAxiosError } from "axios";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
@@ -19,6 +20,11 @@ type ProductOpt = {
   name: string;
   price?: number | string;
   qty?: number | string;
+  warehouse_id?: string | null;
+  inventory_balances?: Array<{
+    warehouse_id: string;
+    qty: number | string;
+  }>;
   status?: string;
 };
 
@@ -40,6 +46,13 @@ type SalesOrder = {
   customer?: Customer | null;
   warehouse?: Warehouse | null;
   lines?: SoLine[];
+  transaction_lines?: Array<{
+    product_id: string;
+    product_name?: string | null;
+    ordered_qty: number;
+    shipped_qty: number;
+    remaining_to_ship: number;
+  }>;
 };
 
 type Shipment = {
@@ -89,9 +102,6 @@ const CARRIERS = [
   "Ninja Van",
   "Grab Express",
 ] as const;
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const PAGE_SIZE = 15;
 
@@ -318,11 +328,30 @@ function Shipping() {
   /* ── Lookups: SO + products + warehouses (for create form) ─ */
   const loadLookups = useCallback(async () => {
     try {
-      const [soJson, prodJson, whJson] = await Promise.all([
+      const [soJson, whJson, firstProductPage] = await Promise.all([
         fetchCachedLookup("/sales-orders", lookupKeys.salesOrders, { per_page: 200, all: 1 }),
-        fetchCachedLookup("/products", lookupKeys.products, { per_page: 200, paginate: false }),
         fetchCachedLookup("/warehouses", lookupKeys.warehouses, { per_page: 200, all: 1 }),
+        fetchCachedLookup(
+          "/inventories",
+          [...lookupKeys.products, "shipping-stock-balances", "page", 1],
+          { per_page: 100, page: 1 }
+        ),
       ]);
+
+      const lastProductPage = Math.max(
+        1,
+        Number(asRecord(firstProductPage).last_page) || 1
+      );
+      const remainingProductPages = await Promise.all(
+        Array.from({ length: lastProductPage - 1 }, (_, index) =>
+          fetchCachedLookup(
+            "/inventories",
+            [...lookupKeys.products, "shipping-stock-balances", "page", index + 2],
+            { per_page: 100, page: index + 2 }
+          )
+        )
+      );
+      const prodJson = [firstProductPage, ...remainingProductPages];
 
         const soList: SalesOrder[] = getItems(soJson).map((item) => {
         const row = asRecord(item);
@@ -374,10 +403,27 @@ function Shipping() {
               : cached.length
                 ? cached
                 : [],
+          transaction_lines: Array.isArray(row.transaction_lines)
+            ? row.transaction_lines.map((line) => {
+                const transactionLine = asRecord(line);
+                return {
+                  product_id: String(transactionLine.product_id ?? ""),
+                  product_name:
+                    transactionLine.product_name != null
+                      ? String(transactionLine.product_name)
+                      : null,
+                  ordered_qty: Number(transactionLine.ordered_qty) || 0,
+                  shipped_qty: Number(transactionLine.shipped_qty) || 0,
+                  remaining_to_ship:
+                    Number(transactionLine.remaining_to_ship) || 0,
+                };
+              })
+            : [],
         };
       });
 
-      const prodList: ProductOpt[] = getItems(prodJson)
+      const prodList: ProductOpt[] = prodJson
+        .flatMap(getItems)
         .map((p) => {
           const row = asRecord(p);
           return {
@@ -386,6 +432,17 @@ function Shipping() {
             name: String(row.name ?? ""),
             price: row.price as number | string | undefined,
             qty: row.qty as number | string | undefined,
+            warehouse_id:
+              row.warehouse_id != null ? String(row.warehouse_id) : null,
+            inventory_balances: Array.isArray(row.inventory_balances)
+              ? row.inventory_balances
+                  .map((balance) => asRecord(balance))
+                  .filter((balance) => balance.warehouse_id != null)
+                  .map((balance) => ({
+                    warehouse_id: String(balance.warehouse_id),
+                    qty: balance.qty as number | string,
+                  }))
+              : undefined,
             status: row.status != null ? String(row.status) : undefined,
           };
         })
@@ -443,6 +500,29 @@ function Shipping() {
   const soToShipLines = (so: SalesOrder | undefined): ShipLine[] => {
     if (!so) return [emptyLine()];
 
+    if (so.transaction_lines) {
+      const remainingLines = so.transaction_lines.filter(
+        (line) => line.remaining_to_ship > 0
+      );
+      return remainingLines.length > 0
+        ? remainingLines.map((line) => {
+            const matched = products.find(
+              (product) => product.id === line.product_id
+            );
+            const orderQty = line.remaining_to_ship;
+
+            return {
+              key: newLineKey(),
+              product_id: line.product_id,
+              product_name:
+                matched?.name ?? line.product_name ?? "Unavailable product",
+              qty: String(orderQty),
+              unit_price: String(Number(matched?.price) || 0),
+            };
+          })
+        : [];
+    }
+
     const sourceLines =
       so.lines && so.lines.length > 0
         ? so.lines
@@ -483,10 +563,11 @@ function Shipping() {
 
   const shippableOrders = salesOrders.filter(
     (s) =>
-      !s.status ||
-      !["cancelled", "completed"].includes(String(s.status).toLowerCase())
+      !["cancelled", "completed"].includes(String(s.status ?? "").toLowerCase()) &&
+      (!s.transaction_lines ||
+        s.transaction_lines.some((line) => line.remaining_to_ship > 0))
   );
-  const soOptions = shippableOrders.length > 0 ? shippableOrders : salesOrders;
+  const soOptions = shippableOrders;
 
   const openAdd = async () => {
     if (!canCreate) {
@@ -504,12 +585,13 @@ function Shipping() {
     const { soList, whList } = await loadLookups();
     void refetchWarehouses();
 
-    const shippable = soList.filter(
+    const options = soList.filter(
       (s) =>
-        !s.status ||
-        !["cancelled", "completed"].includes(String(s.status).toLowerCase())
+        (!s.status ||
+          !["cancelled", "completed"].includes(String(s.status).toLowerCase())) &&
+        (!s.transaction_lines ||
+          s.transaction_lines.some((line) => line.remaining_to_ship > 0))
     );
-    const options = shippable.length > 0 ? shippable : soList;
     const first = options[0];
 
     if (first) {
@@ -527,6 +609,7 @@ function Shipping() {
       setForm({
         ...emptyForm(),
         warehouse_id: whList[0]?.id ?? "",
+        lines: [emptyLine()],
       });
     }
   };
@@ -543,6 +626,16 @@ function Shipping() {
   };
 
   const selectedSo = salesOrders.find((s) => s.id === form.sales_order_id);
+  const salesOrderWarehouseId =
+    selectedSo?.warehouse_id ?? selectedSo?.warehouse?.id ?? "";
+  const selectableShipProducts = selectedSo?.transaction_lines
+    ? products.filter((product) =>
+        selectedSo.transaction_lines?.some(
+          (line) =>
+            line.product_id === product.id && line.remaining_to_ship > 0
+        )
+      )
+    : products;
 
   const setLine = (key: string, patch: Partial<ShipLine>) => {
     setForm((f) => ({
@@ -553,7 +646,23 @@ function Shipping() {
 
   const stockOf = (productId: string): number | null => {
     const p = products.find((x) => x.id === productId);
-    if (!p || p.qty == null || p.qty === "") return null;
+    if (!p) return null;
+    const balances = p.inventory_balances;
+    if (Array.isArray(balances)) {
+      const warehouseBalance = balances.find(
+        (balance) => String(balance.warehouse_id) === form.warehouse_id
+      );
+      if (warehouseBalance) {
+        const qty = Number(warehouseBalance.qty);
+        return Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
+      }
+      if (p.warehouse_id && p.warehouse_id === form.warehouse_id) {
+        const legacyQty = Number(p.qty);
+        return Number.isFinite(legacyQty) ? Math.max(0, Math.floor(legacyQty)) : 0;
+      }
+      return 0;
+    }
+    if (p.qty == null || p.qty === "") return null;
     const n = Number(p.qty);
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : null;
   };
@@ -588,10 +697,16 @@ function Shipping() {
 
   const lineStockError = (line: ShipLine): string | null => {
     if (!line.product_id) return null;
+    const orderRemaining = selectedSo?.transaction_lines?.find(
+      (orderLine) => orderLine.product_id === line.product_id
+    )?.remaining_to_ship;
+    const qty = Number(line.qty) || 0;
+    if (orderRemaining != null && qty > orderRemaining) {
+      return `Only ${orderRemaining.toLocaleString()} units remain on this sales order.`;
+    }
     const stock = stockOf(line.product_id);
     if (stock === null) return null;
-    const qty = Number(line.qty) || 0;
-    if (stock <= 0) return "Out of stock";
+    if (stock <= 0) return "No stock in the sales order warehouse. Transfer stock there first.";
     if (qty > stock) return `Only ${stock.toLocaleString()} in stock`;
     return null;
   };
@@ -662,40 +777,18 @@ function Shipping() {
         tracking: form.tracking.trim() || null,
         packages: pkgs,
         date: form.date || null,
+        lines: shipLines.map((line) => ({
+          product_id: line.product_id,
+          product_name: line.product_name.trim(),
+          qty: Number(line.qty),
+          unit_price: Number(line.unit_price) || 0,
+        })),
         status: form.status || "processing",
       });
 
       const data = (body.data ?? body) as Record<string, unknown>;
-      const shipId = String(data.id ?? "");
       const shipNumber = String(
         data.shipment_number ?? `SH-${Date.now().toString().slice(-6)}`
-      );
-
-      const customerId = so?.customer_id ?? so?.customer?.id ?? null;
-      await Promise.all(
-        shipLines.map(async (l) => {
-          try {
-            await api.post("/product-transactions", {
-              product_id:
-                l.product_id && UUID_RE.test(l.product_id)
-                  ? l.product_id
-                  : null,
-              product_name: l.product_name.trim(),
-              transaction_type: "shipment",
-              reference_id:
-                shipId && UUID_RE.test(shipId) ? shipId : null,
-              reference_number: shipNumber,
-              partner_id:
-                customerId && UUID_RE.test(customerId) ? customerId : null,
-              partner_type: "customer",
-              quantity: Number(l.qty) || 0,
-              unit_price: Number(l.unit_price) || 0,
-              status: form.status || "processing",
-            });
-          } catch {
-            /* non-blocking */
-          }
-        })
       );
 
       setShowAdd(false);
@@ -709,13 +802,28 @@ function Shipping() {
       await refetchAll();
       void loadLookups();
     } catch (err: unknown) {
-      const body = (err as { response?: { data?: any } })?.response?.data;
+      const body =
+        isAxiosError(err) &&
+        typeof err.response?.data === "object" &&
+        err.response.data !== null
+          ? (err.response.data as {
+              message?: unknown;
+              errors?: Record<string, unknown>;
+            })
+          : null;
+      const validationMessages = Object.values(body?.errors ?? {}).flatMap(
+        (value) =>
+          Array.isArray(value)
+            ? value.filter((message): message is string => typeof message === "string")
+            : []
+      );
       const msg =
-        body?.message ||
-        (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        (err as Error)?.message ||
+        validationMessages.join(" ") ||
+        (typeof body?.message === "string" && body.message) ||
+        (err instanceof Error ? err.message : undefined) ||
         "Failed to create shipment";
       setFormError(String(msg));
+      showToast("error", "Shipment failed", String(msg));
     } finally {
       setSaving(false);
     }
@@ -909,6 +1017,11 @@ function Shipping() {
                       <option value="completed">Completed</option>
                       <option value="cancelled">Cancelled</option>
                     </select>
+                    {salesOrderWarehouseId && (
+                      <span className="po-field-hint">
+                        Shipment warehouse must match the selected sales order.
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -1193,7 +1306,11 @@ function Shipping() {
                       <option key={o.id} value={o.id}>
                         {o.so_number}
                         {o.customer?.name ? ` · ${o.customer.name}` : ""}
-                        {o.items != null ? ` · ${o.items} units` : ""}
+                        {o.transaction_lines
+                          ? ` · ${o.transaction_lines.reduce((sum, line) => sum + line.remaining_to_ship, 0)} remaining`
+                          : o.items != null
+                            ? ` · ${o.items} units`
+                            : ""}
                         {o.status ? ` (${o.status})` : ""}
                       </option>
                     ))}
@@ -1201,6 +1318,18 @@ function Shipping() {
                   {salesOrders.length === 0 && (
                     <span className="po-field-hint">
                       No sales orders found. Create an SO first.
+                    </span>
+                  )}
+                  {salesOrders.length > 0 && soOptions.length === 0 && (
+                    <span className="po-field-hint">
+                      No sales orders have remaining quantities to ship.
+                    </span>
+                  )}
+                  {selectedSo?.transaction_lines?.every(
+                    (line) => line.remaining_to_ship <= 0
+                  ) && (
+                    <span className="po-field-hint">
+                      This sales order has no remaining quantities to ship.
                     </span>
                   )}
                   {selectedSo && (
@@ -1228,13 +1357,14 @@ function Shipping() {
                   <label htmlFor="ship-wh">Warehouse</label>
                   <select
                     id="ship-wh"
+                    required
                     value={form.warehouse_id}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, warehouse_id: e.target.value }))
                     }
-                    disabled={saving}
+                    disabled={saving || !!salesOrderWarehouseId}
                   >
-                    <option value="">— None —</option>
+                    <option value="">— Select warehouse —</option>
                     {warehouseOptions.map((w) => (
                       <option key={w.id} value={w.id}>
                         {w.name ? `${w.code} — ${w.name}` : w.code}
@@ -1320,8 +1450,10 @@ function Shipping() {
                   >
                     <option value="processing">Processing</option>
                     <option value="shipped">Shipped</option>
-                    <option value="completed">Completed</option>
                   </select>
+                  <span className="po-field-hint">
+                    Mark the shipment delivered after creating it.
+                  </span>
                 </div>
               </div>
 
@@ -1386,15 +1518,12 @@ function Shipping() {
                             required
                           >
                             <option value="">— Select product —</option>
-                            {products.map((p) => {
+                            {selectableShipProducts.map((p) => {
                               const usedElsewhere = form.lines.some(
                                 (l) =>
                                   l.key !== line.key && l.product_id === p.id
                               );
-                              const pStock =
-                                p.qty != null
-                                  ? Math.max(0, Math.floor(Number(p.qty) || 0))
-                                  : null;
+                              const pStock = stockOf(p.id);
                               const out = pStock !== null && pStock <= 0;
                               return (
                                 <option

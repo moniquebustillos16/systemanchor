@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { isAxiosError } from "axios";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
@@ -40,6 +41,14 @@ type SalesOrder = {
   customer?: Customer | null;
   warehouse?: Warehouse | null;
   lines?: SoLine[];
+  transaction_lines?: Array<{
+    product_id: string;
+    product_name?: string | null;
+    ordered_qty: number;
+    shipped_qty: number;
+    returned_qty: number;
+    remaining_to_return: number;
+  }>;
 };
 
 type ReturnItem = {
@@ -95,9 +104,6 @@ const DISPOSITIONS = [
   "Refund",
   "Scrap",
 ] as const;
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const PAGE_SIZE = 15;
 
@@ -319,7 +325,11 @@ function Returns() {
     try {
       const [soSettled, prodSettled] = await Promise.allSettled([
         fetchCachedLookup("/sales-orders", lookupKeys.salesOrders, { per_page: 200, all: 1 }),
-        fetchCachedLookup("/products", lookupKeys.products, { per_page: 200, paginate: false }),
+        fetchCachedLookup(
+          "/products",
+          [...lookupKeys.products, "returns-catalog"],
+          { per_page: 200, paginate: false }
+        ),
       ]);
 
       if (soSettled.status === "fulfilled") {
@@ -364,6 +374,23 @@ function Returns() {
                 : cached.length
                   ? cached
                   : [],
+            transaction_lines: Array.isArray(row.transaction_lines)
+              ? row.transaction_lines.map((line) => {
+                  const transactionLine = asRecord(line);
+                  return {
+                    product_id: String(transactionLine.product_id ?? ""),
+                    product_name:
+                      transactionLine.product_name != null
+                        ? String(transactionLine.product_name)
+                        : null,
+                    ordered_qty: Number(transactionLine.ordered_qty) || 0,
+                    shipped_qty: Number(transactionLine.shipped_qty) || 0,
+                    returned_qty: Number(transactionLine.returned_qty) || 0,
+                    remaining_to_return:
+                      Number(transactionLine.remaining_to_return) || 0,
+                  };
+                })
+              : [],
           };
         });
         setSalesOrders(list);
@@ -414,6 +441,23 @@ function Returns() {
 
   const soToRetLines = (so: SalesOrder | undefined): RetLine[] => {
     if (!so) return [emptyLine()];
+    if (so.transaction_lines) {
+      return so.transaction_lines
+        .filter((line) => line.remaining_to_return > 0)
+        .map((line) => {
+          const matched = products.find(
+            (product) => product.id === line.product_id
+          );
+          return {
+            key: newLineKey(),
+            product_id: line.product_id,
+            product_name:
+              matched?.name ?? line.product_name ?? "Unavailable product",
+            qty: String(line.remaining_to_return),
+            unit_price: String(Number(matched?.price) || 0),
+          };
+        });
+    }
     const source =
       so.lines && so.lines.length > 0
         ? so.lines
@@ -465,9 +509,8 @@ function Returns() {
       );
       return;
     }
-
     setFormError(null);
-    const first = salesOrders[0];
+    const first = returnableOrders[0];
     if (first) {
       setForm(
         applySo(first.id, {
@@ -515,6 +558,17 @@ function Returns() {
     }));
 
   const selectedSo = salesOrders.find((s) => s.id === form.sales_order_id);
+  const returnableOrders = salesOrders.filter((order) =>
+    order.transaction_lines?.some((line) => line.remaining_to_return > 0)
+  );
+  const selectableReturnProducts = selectedSo?.transaction_lines
+    ? products.filter((product) =>
+        selectedSo.transaction_lines?.some(
+          (line) =>
+            line.product_id === product.id && line.remaining_to_return > 0
+        )
+      )
+    : products;
   const itemsTotal = form.lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
 
   /* ── Create RMA ──────────────────────────────────────────── */
@@ -537,6 +591,24 @@ function Returns() {
       return;
     }
 
+    const returnableQtyByProduct = new Map(
+      (selectedSo?.transaction_lines ?? []).map((line) => [
+        line.product_id,
+        line.remaining_to_return,
+      ])
+    );
+    if (
+      validLines.some(
+        (line) =>
+          Number(line.qty) > (returnableQtyByProduct.get(line.product_id) ?? 0)
+      )
+    ) {
+      setFormError(
+        "Return quantities cannot exceed the remaining shipped quantity for each product."
+      );
+      return;
+    }
+
     const so = salesOrders.find((s) => s.id === form.sales_order_id);
     const totalItems = validLines.reduce(
       (s, l) => s + (Number(l.qty) || 0),
@@ -551,41 +623,19 @@ function Returns() {
         reason: form.reason,
         disposition: form.disposition,
         items: totalItems,
+        lines: validLines.map((line) => ({
+          product_id: line.product_id,
+          product_name: line.product_name.trim(),
+          qty: Number(line.qty),
+          unit_price: Number(line.unit_price) || 0,
+        })),
         date: form.date || null,
         status: form.status || "pending",
       });
 
       const data = (body.data ?? body) as Record<string, unknown>;
-      const retId = String(data.id ?? "");
       const retNumber = String(
         data.return_number ?? `RMA-${Date.now().toString().slice(-6)}`
-      );
-
-      const customerId = so?.customer_id ?? so?.customer?.id ?? null;
-
-      await Promise.all(
-        validLines.map(async (l) => {
-          try {
-            await api.post("/product-transactions", {
-              product_id:
-                l.product_id && UUID_RE.test(l.product_id)
-                  ? l.product_id
-                  : null,
-              product_name: l.product_name.trim(),
-              transaction_type: "return",
-              reference_id: retId && UUID_RE.test(retId) ? retId : null,
-              reference_number: retNumber,
-              partner_id:
-                customerId && UUID_RE.test(customerId) ? customerId : null,
-              partner_type: "customer",
-              quantity: Number(l.qty) || 0,
-              unit_price: Number(l.unit_price) || 0,
-              status: form.status || "pending",
-            });
-          } catch {
-            /* non-blocking */
-          }
-        })
       );
 
       setShowAdd(false);
@@ -598,13 +648,28 @@ function Returns() {
       await invalidateReturns();
       await refetchAll();
     } catch (err: unknown) {
-      const body = (err as { response?: { data?: any } })?.response?.data;
+      const body =
+        isAxiosError(err) &&
+        typeof err.response?.data === "object" &&
+        err.response.data !== null
+          ? (err.response.data as {
+              message?: unknown;
+              errors?: Record<string, unknown>;
+            })
+          : null;
+      const validationMessages = Object.values(body?.errors ?? {}).flatMap(
+        (value) =>
+          Array.isArray(value)
+            ? value.filter((message): message is string => typeof message === "string")
+            : []
+      );
       const msg =
-        body?.message ||
-        (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        (err as Error)?.message ||
+        validationMessages.join(" ") ||
+        (typeof body?.message === "string" && body.message) ||
+        (err instanceof Error ? err.message : undefined) ||
         "Failed to create return";
       setFormError(String(msg));
+      showToast("error", "Return failed", String(msg));
     } finally {
       setSaving(false);
     }
@@ -619,7 +684,12 @@ function Returns() {
     setClosingId(id);
     try {
       await api.post(`/returns/${id}/complete`);
-      showToast("success", "RMA closed", `${number} closed.`);
+      const returned = returnRows.find((row) => row.id === id);
+      showToast(
+        "success",
+        "RMA closed",
+        `${number} closed${returned?.disposition === "Inspect & restock" ? " and returned stock added." : "."}`
+      );
       await invalidateReturns();
       await refetchAll();
     } catch (err) {
@@ -1069,10 +1139,13 @@ function Returns() {
                     disabled={saving}
                   >
                     <option value="">— Select SO —</option>
-                    {salesOrders.map((o) => (
+                    {returnableOrders.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.so_number}
                         {o.customer?.name ? ` · ${o.customer.name}` : ""}
+                        {o.transaction_lines
+                          ? ` · ${o.transaction_lines.reduce((sum, line) => sum + line.remaining_to_return, 0)} returnable`
+                          : ""}
                         {o.status ? ` (${o.status})` : ""}
                       </option>
                     ))}
@@ -1080,6 +1153,11 @@ function Returns() {
                   {salesOrders.length === 0 && (
                     <span className="po-field-hint">
                       No sales orders found. Create an SO first.
+                    </span>
+                  )}
+                  {salesOrders.length > 0 && returnableOrders.length === 0 && (
+                    <span className="po-field-hint">
+                      No sales orders have shipped quantities available for return.
                     </span>
                   )}
                   {selectedSo && (
@@ -1111,7 +1189,7 @@ function Returns() {
                     onChange={(e) =>
                       setForm((f) => ({ ...f, warehouse_id: e.target.value }))
                     }
-                    disabled={saving}
+                    disabled={saving || !!(selectedSo?.warehouse_id ?? selectedSo?.warehouse?.id)}
                     required={warehouses.length > 0}
                   >
                     {warehouses.length === 0 ? (
@@ -1219,7 +1297,7 @@ function Returns() {
                           required
                         >
                           <option value="">— Select product —</option>
-                          {products.map((p) => {
+                          {selectableReturnProducts.map((p) => {
                             const used = form.lines.some(
                               (l) =>
                                 l.key !== line.key && l.product_id === p.id
@@ -1244,6 +1322,12 @@ function Returns() {
                         <input
                           type="number"
                           min={1}
+                          max={
+                            selectedSo?.transaction_lines?.find(
+                              (eligibleLine) =>
+                                eligibleLine.product_id === line.product_id
+                            )?.remaining_to_return
+                          }
                           value={line.qty}
                           onChange={(e) =>
                             setLine(line.key, { qty: e.target.value })

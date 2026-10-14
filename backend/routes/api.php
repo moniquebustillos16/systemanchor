@@ -1,32 +1,31 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
-use App\Http\Controllers\Api\DashboardController;
-use App\Http\Controllers\Api\UserController;
-use App\Http\Controllers\Api\UserWarehouseController;
-use App\Http\Controllers\Api\RolesController;
-use App\Http\Controllers\Api\ProductController;
 use App\Http\Controllers\Api\CategoryController;
-use App\Http\Controllers\Api\WarehouseController;
-use App\Http\Controllers\Api\InventoryController;
-use App\Http\Controllers\Api\StockMovementController;
-use App\Http\Controllers\Api\SupplierController;
 use App\Http\Controllers\Api\CustomerController;
-use App\Http\Controllers\Api\PurchaseOrderController;
-use App\Http\Controllers\Api\SalesOrderController;
-use App\Http\Controllers\Api\GoodsReceiptController;
-use App\Http\Controllers\Api\ShipmentController;
-use App\Http\Controllers\Api\ReturnController;
-use App\Http\Controllers\Api\LocationController;
-use App\Http\Controllers\Api\ProductImageController;
 use App\Http\Controllers\Api\CycleCountController;
-use App\Http\Controllers\Api\SettingsController;
-use App\Http\Controllers\Api\ProfileController;
-use App\Http\Controllers\Api\ProductTransactionController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\GoodsReceiptController;
+use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PermissionController;
+use App\Http\Controllers\Api\ProductController;
+use App\Http\Controllers\Api\ProductImageController;
+use App\Http\Controllers\Api\ProductTransactionController;
+use App\Http\Controllers\Api\ProfileController;
+use App\Http\Controllers\Api\PurchaseOrderController;
+use App\Http\Controllers\Api\ReturnController;
 use App\Http\Controllers\Api\RolePermissionController;
+use App\Http\Controllers\Api\RolesController;
+use App\Http\Controllers\Api\SalesOrderController;
+use App\Http\Controllers\Api\SettingsController;
+use App\Http\Controllers\Api\ShipmentController;
+use App\Http\Controllers\Api\StockMovementController;
+use App\Http\Controllers\Api\SupplierController;
+use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\UserWarehouseController;
+use App\Http\Controllers\Api\WarehouseController;
+use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
@@ -42,7 +41,7 @@ Route::post('/login', [AuthController::class, 'login']);
 |--------------------------------------------------------------------------
 */
 
-Route::middleware(['auth:sanctum'])->group(function () {
+Route::middleware(['auth:sanctum', 'active'])->group(function () {
 
     /*
     |--------------------------------------------------------------------------
@@ -79,16 +78,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
         ->middleware('permission:users.view');
 
     Route::post('/users', [UserController::class, 'store'])
-        ->middleware('permission:users.create');
+        ->middleware(['permission:users.create', 'administrator']);
 
     Route::put('/users/{id}', [UserController::class, 'update'])
-        ->middleware('permission:users.update');
+        ->middleware(['permission:users.update', 'administrator']);
 
     Route::patch('/users/{id}', [UserController::class, 'update'])
-        ->middleware('permission:users.update');
+        ->middleware(['permission:users.update', 'administrator']);
 
     Route::delete('/users/{id}', [UserController::class, 'destroy'])
-        ->middleware('permission:users.delete');
+        ->middleware(['permission:users.delete', 'administrator']);
 
     /*
     |--------------------------------------------------------------------------
@@ -103,18 +102,18 @@ Route::middleware(['auth:sanctum'])->group(function () {
         ->middleware('permission:warehouses.view');
 
     Route::post('/user-warehouses', [UserWarehouseController::class, 'store'])
-        ->middleware('permission:users.update');
+        ->middleware(['permission:users.update', 'administrator']);
 
     Route::delete('/user-warehouses/{id}', [UserWarehouseController::class, 'destroy'])
-        ->middleware('permission:users.update');
+        ->middleware(['permission:users.update', 'administrator']);
 
     Route::get('/users/{user}/warehouses', [UserWarehouseController::class, 'forUser']);
 
     Route::put('/users/{user}/warehouses', [UserWarehouseController::class, 'sync'])
-        ->middleware('permission:users.update');
+        ->middleware(['permission:users.update', 'administrator']);
 
     Route::delete('/users/{user}/warehouses/{warehouse}', [UserWarehouseController::class, 'detach'])
-        ->middleware('permission:users.update');
+        ->middleware(['permission:users.update', 'administrator']);
 
     /*
     |--------------------------------------------------------------------------
@@ -132,16 +131,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
         ->middleware('permission:roles.view');
 
     Route::post('/roles', [RolesController::class, 'store'])
-        ->middleware('permission:roles.create');
+        ->middleware(['permission:roles.create', 'administrator']);
 
     Route::put('/roles/{id}', [RolesController::class, 'update'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::patch('/roles/{id}', [RolesController::class, 'update'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::delete('/roles/{id}', [RolesController::class, 'destroy'])
-        ->middleware('permission:roles.delete');
+        ->middleware(['permission:roles.delete', 'administrator']);
 
     /*
     |--------------------------------------------------------------------------
@@ -197,16 +196,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
         ->middleware('permission:roles.view');
 
     Route::post('/permissions', [PermissionController::class, 'store'])
-        ->middleware('permission:roles.create');
+        ->middleware(['permission:roles.create', 'administrator']);
 
     Route::put('/permissions/{id}', [PermissionController::class, 'update'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::patch('/permissions/{id}', [PermissionController::class, 'update'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::delete('/permissions/{id}', [PermissionController::class, 'destroy'])
-        ->middleware('permission:roles.delete');
+        ->middleware(['permission:roles.delete', 'administrator']);
 
     /*
     |--------------------------------------------------------------------------
@@ -218,28 +217,28 @@ Route::middleware(['auth:sanctum'])->group(function () {
         ->middleware('permission:roles.view');
 
     Route::post('/role-permissions', [RolePermissionController::class, 'store'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::delete('/role-permissions', [RolePermissionController::class, 'destroy'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::get('/roles/{role}/permissions', [RolePermissionController::class, 'forRole'])
         ->middleware('permission:roles.view');
 
     Route::put('/roles/{role}/permissions', [RolePermissionController::class, 'sync'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::post('/roles/{role}/permissions', [RolePermissionController::class, 'sync'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::put('/roles/{role}/permissions/sync', [RolePermissionController::class, 'sync'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::post('/roles/{role}/permissions/sync', [RolePermissionController::class, 'sync'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     Route::delete('/roles/{role}/permissions/{permission}', [RolePermissionController::class, 'detach'])
-        ->middleware('permission:roles.update');
+        ->middleware(['permission:roles.update', 'administrator']);
 
     /*
     |--------------------------------------------------------------------------
@@ -374,22 +373,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
     */
 
     Route::get('/stock-movements', [StockMovementController::class, 'index'])
-        ->middleware('permission:movements.view');
+        ->middleware('permission:stock.view');
+
+    Route::get('/stock-movements/stats', [StockMovementController::class, 'stats'])
+        ->middleware('permission:stock.view');
 
     Route::get('/stock-movements/{id}', [StockMovementController::class, 'show'])
-        ->middleware('permission:movements.view');
+        ->middleware('permission:stock.view');
 
     Route::post('/stock-movements', [StockMovementController::class, 'store'])
-        ->middleware('permission:movements.create');
-
-    Route::put('/stock-movements/{id}', [StockMovementController::class, 'update'])
-        ->middleware('permission:movements.create');
-
-    Route::patch('/stock-movements/{id}', [StockMovementController::class, 'update'])
-        ->middleware('permission:movements.create');
-
-    Route::delete('/stock-movements/{id}', [StockMovementController::class, 'destroy'])
-        ->middleware('permission:movements.create');
+        ->middleware('stock.movement');
 
     /*
     |--------------------------------------------------------------------------

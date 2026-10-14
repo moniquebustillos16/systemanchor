@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { isAxiosError } from "axios";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import { usePermissions } from "../../hooks/useCurrentUser";
 import {
   useStockMovementsList,
+  useStockMovementStats,
   useStockProductOptions,
   useStockWarehouseOptions,
   createStockMovement,
@@ -211,6 +213,10 @@ function num(v: number | string | null | undefined): number {
   return Number(v ?? 0);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /* ===================== COMPONENT ===================== */
 
 function StockMovements() {
@@ -242,6 +248,7 @@ function StockMovements() {
   /* Meta: TanStack Query (shared with Inventory / Locations — no custom module cache) */
   const productsQuery = useStockProductOptions({ enabled: true });
   const warehousesQuery = useStockWarehouseOptions({ enabled: true });
+  const movementStatsQuery = useStockMovementStats({ enabled: true });
 
   const products: ProductOpt[] = useMemo(() => {
     const raw = productsQuery.data;
@@ -285,6 +292,7 @@ function StockMovements() {
   const [ref, setRef] = useState("");
   const [reason, setReason] = useState("cycle-count");
   const [notes, setNotes] = useState("");
+  const idempotencyRequest = useRef<{ signature: string; key: string } | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 320);
@@ -354,8 +362,6 @@ function StockMovements() {
   );
 
   const stats = useMemo(() => {
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const today = history.filter((m) => (m.movement_date || "").startsWith(todayStr)).length;
     const ins = history.filter((m) => m.type?.toUpperCase() === "IN").length;
     const outs = history.filter((m) => m.type?.toUpperCase() === "OUT").length;
     const transfers = history.filter((m) => m.type?.toUpperCase() === "TRANSFER").length;
@@ -363,10 +369,18 @@ function StockMovements() {
       const t = m.type?.toUpperCase() ?? "";
       return t === "ADJUSTMENT" || t === "ADJUST";
     }).length;
-    return { today, ins, outs, transfers, adjusts, total: history.length };
-  }, [history]);
+    return {
+      today: Number(movementStatsQuery.data?.today ?? 0),
+      ins,
+      outs,
+      transfers,
+      adjusts,
+      total: history.length,
+    };
+  }, [history, movementStatsQuery.data?.today]);
 
   const resetForm = () => {
+    idempotencyRequest.current = null;
     setQty("");
     setRef("");
     setNotes("");
@@ -401,7 +415,11 @@ function StockMovements() {
   const validate = (): string | null => {
     const q = parseFloat(qty);
     if (!productId) return "Select a product.";
-    if (!q || q <= 0) return "Enter a quantity greater than zero.";
+    if (Number.isNaN(q) || (moveType === "adjust" ? q < 0 : q <= 0)) {
+      return moveType === "adjust"
+        ? "Enter an adjustment quantity of zero or greater."
+        : "Enter a quantity greater than zero.";
+    }
     if (moveType === "transfer") {
       if (!fromWh || !toWh) return "Select both From and To warehouses.";
       if (fromWh === toWh) return "From and To warehouses must be different.";
@@ -447,31 +465,50 @@ function StockMovements() {
       payload.reason = reason;
     }
 
+    const signature = JSON.stringify(payload);
+    if (idempotencyRequest.current?.signature !== signature) {
+      idempotencyRequest.current = {
+        signature,
+        key: crypto.randomUUID(),
+      };
+    }
+    payload.idempotency_key = idempotencyRequest.current.key;
+
     setSubmitting(true);
     try {
-      const body = (await createStockMovement(payload)) as Record<string, any>;
+      const response: unknown = await createStockMovement(payload);
+      const body = isRecord(response) ? response : {};
+      const movement = isRecord(body.movement) ? body.movement : {};
+      const data = isRecord(body.data) ? body.data : {};
       const movementNumber =
-        body?.movement?.movement_number ??
-        body?.movement_number ??
-        (body as any)?.data?.movement_number;
+        movement.movement_number ?? body.movement_number ?? data.movement_number;
       showToast(
         "success",
         "Movement posted",
         `${TYPE_META[moveType].label}${
-          movementNumber ? ` · ${movementNumber}` : ""
+          typeof movementNumber === "string" || typeof movementNumber === "number"
+            ? ` · ${movementNumber}`
+            : ""
         } saved. Inventory qty updated.`
       );
       resetForm();
       setModalOpen(false);
       await refetchMovements();
       void invalidateStockMovements();
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      const body = e.response?.data;
+      const responseData =
+        isAxiosError(e) && isRecord(e.response?.data) ? e.response.data : null;
+      const errors = isRecord(responseData?.errors) ? responseData.errors : {};
+      const validationMessages = Object.values(errors).flatMap((value) =>
+        Array.isArray(value)
+          ? value.filter((message): message is string => typeof message === "string")
+          : []
+      );
       const msg =
-        body?.message ||
-        (body?.errors && Object.values(body.errors).flat().join(" ")) ||
-        e.message ||
+        (typeof responseData?.message === "string" && responseData.message) ||
+        validationMessages.join(" ") ||
+        (e instanceof Error && e.message) ||
         "Could not post movement";
       setFormError(String(msg));
       showToast("error", "Failed", String(msg));
@@ -542,7 +579,7 @@ function StockMovements() {
           ) : (
           <>
 
-          {error && (
+          {(error || movementStatsQuery.isError) && (
             <div
               className="card"
               style={{
@@ -553,7 +590,9 @@ function StockMovements() {
               }}
             >
               <strong style={{ color: "var(--sa-clay)" }}>API error:</strong>{" "}
-              <span style={{ color: "var(--sa-text)" }}>{error}</span>
+              <span style={{ color: "var(--sa-text)" }}>
+                {error ?? "Could not load today's movement count."}
+              </span>
             </div>
           )}
 
@@ -565,7 +604,9 @@ function StockMovements() {
               onClick={() => setFilterType("all")}
             >
               <div className="stat-label">Today</div>
-              <div className="stat-value">{stats.today}</div>
+              <div className="stat-value">
+                {movementStatsQuery.isLoading || movementStatsQuery.isError ? "—" : stats.today}
+              </div>
               <div className="stat-hint">Posted today · all types</div>
             </button>
             <button

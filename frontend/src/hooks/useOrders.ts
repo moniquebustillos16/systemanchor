@@ -251,7 +251,9 @@ export function usePurchaseOrders(options: OrderListOptions = {}) {
     meta,
     stats,
     data: list.data,
-    isLoading: (list.isLoading || statsQ.isLoading) && !list.data,
+    isLoading:
+      (list.isFetching && list.isPlaceholderData) ||
+      (statsQ.isFetching && statsQ.isPlaceholderData),
     isFetching: list.isFetching || statsQ.isFetching,
     isError: list.isError || statsQ.isError,
     error: list.error ?? statsQ.error,
@@ -318,7 +320,9 @@ export function useSalesOrders(options: OrderListOptions = {}) {
     meta,
     stats,
     data: list.data,
-    isLoading: (list.isLoading || statsQ.isLoading) && !list.data,
+    isLoading:
+      (list.isFetching && list.isPlaceholderData) ||
+      (statsQ.isFetching && statsQ.isPlaceholderData),
     isFetching: list.isFetching || statsQ.isFetching,
     isError: list.isError || statsQ.isError,
     error: list.error ?? statsQ.error,

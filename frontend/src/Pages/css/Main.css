@@ -2955,3 +2955,156 @@ body.modal-open {
   outline: 2px solid var(--sa-brown);
   outline-offset: 2px;
 }
+
+/* Dashboard grid rules must follow the desktop fill rules above. */
+.dashboard .dash-bottom {
+  grid-template-columns: minmax(0, 1.45fr) repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 1200px) {
+  .dashboard .dash-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard .dash-ops-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard .dash-charts-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard .dash-charts-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard .dash-bottom {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard .dash-bottom > .dash-orders-card {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .dashboard .content {
+    padding: 16px 18px 30px;
+  }
+
+  .dashboard .dash-charts-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .dashboard .content {
+    padding: 14px 14px 26px;
+  }
+
+  .dashboard .dash-hero {
+    gap: 10px;
+  }
+
+  .dashboard .dash-hero-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .dashboard .dash-hero-actions .btn {
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .dashboard .dash-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .dashboard .dash-kpi {
+    min-width: 0;
+    padding: 13px 12px;
+  }
+
+  .dashboard .dash-kpi-top {
+    margin-bottom: 9px;
+  }
+
+  .dashboard .dash-kpi-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .dashboard .dash-kpi-value {
+    overflow-wrap: anywhere;
+    font-size: clamp(18px, 5vw, 22px);
+  }
+
+  .dashboard .dash-kpi-label {
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .dashboard .dash-ops-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .dashboard .dash-ops-card {
+    min-width: 0;
+    gap: 9px;
+    padding: 11px 10px;
+  }
+
+  .dashboard .dash-ops-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .dashboard .dash-ops-value {
+    font-size: 19px;
+  }
+
+  .dashboard .dash-ops-label {
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .dashboard .dash-ops-meta {
+    font-size: 10px;
+    line-height: 1.4;
+  }
+
+  .dashboard .dash-charts-2,
+  .dashboard .dash-charts-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dashboard .dash-charts-3 .dash-chart-card {
+    min-height: 220px;
+  }
+
+  .dashboard .dash-bottom {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .dashboard .dash-bottom > .dash-orders-card {
+    grid-column: auto;
+  }
+
+  .dashboard .dash-bottom > .card {
+    min-width: 0;
+  }
+
+  .dashboard .dash-chart-card .card-header {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .dashboard .dash-chart-meta {
+    font-size: 10.5px;
+    line-height: 1.45;
+  }
+}

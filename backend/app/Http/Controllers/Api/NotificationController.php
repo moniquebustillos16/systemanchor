@@ -43,9 +43,9 @@ class NotificationController extends Controller
             'data' => $paginator->items(),
             'meta' => [
                 'current_page' => $paginator->currentPage(),
-                'last_page'    => $paginator->lastPage(),
-                'per_page'     => $paginator->perPage(),
-                'total'        => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
                 'unread_count' => $unreadCount,
             ],
         ]);
@@ -84,11 +84,17 @@ class NotificationController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['required', 'uuid', 'exists:users,id'],
-            'type'    => ['required', 'string', Rule::in(Notification::TYPES)],
-            'title'   => ['required', 'string', 'max:255'],
+            'type' => ['required', 'string', Rule::in(Notification::TYPES)],
+            'title' => ['required', 'string', 'max:255'],
             'message' => ['nullable', 'string'],
-            'page'    => ['nullable', 'string', 'max:100'],
+            'page' => ['nullable', 'string', 'max:100'],
         ]);
+
+        $user = $request->user();
+        $isAdmin = strcasecmp((string) $user?->role?->name, 'Admin') === 0;
+        if (! $isAdmin && (string) $validated['user_id'] !== (string) $user?->id) {
+            abort(403, 'You may only create notifications for your own account.');
+        }
 
         $notification = Notification::create([
             ...$validated,
@@ -97,7 +103,7 @@ class NotificationController extends Controller
 
         return response()->json([
             'message' => 'Notification created.',
-            'data'    => $notification,
+            'data' => $notification,
         ], 201);
     }
 
@@ -111,7 +117,7 @@ class NotificationController extends Controller
 
         return response()->json([
             'message' => 'Notification marked as read.',
-            'data'    => $notification->fresh(),
+            'data' => $notification->fresh(),
         ]);
     }
 
@@ -126,7 +132,7 @@ class NotificationController extends Controller
 
         return response()->json([
             'message' => 'All notifications marked as read.',
-            'data'    => [
+            'data' => [
                 'updated' => $updated,
             ],
         ]);
@@ -154,7 +160,7 @@ class NotificationController extends Controller
 
         return response()->json([
             'message' => 'All notifications cleared.',
-            'data'    => [
+            'data' => [
                 'deleted' => $deleted,
             ],
         ]);

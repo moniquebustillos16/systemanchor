@@ -212,14 +212,7 @@ export function useInventoryPage(options: UseInventoryListOptions = {}) {
 
   const statsView = useMemo(() => {
     const s = stats.data as InventoryStats | Record<string, unknown> | undefined;
-    if (!s) {
-      return {
-        inventory_value: 0,
-        low_stock: 0,
-        out_of_stock: 0,
-        total_products: 0,
-      };
-    }
+    if (!s) return null;
     const raw =
       (s as { data?: Record<string, unknown> }).data &&
       typeof (s as { data?: unknown }).data === "object" &&

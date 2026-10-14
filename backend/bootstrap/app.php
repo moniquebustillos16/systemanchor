@@ -1,10 +1,15 @@
 <?php
 
+use App\Http\Middleware\AdministratorMiddleware;
+use App\Http\Middleware\EnsureActiveAccount;
+use App\Http\Middleware\PermissionMiddleware;
+use App\Http\Middleware\StockMovementPermissionMiddleware;
+use App\Http\Middleware\WarehouseAccessMiddleware;
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Middleware\HandleCors;
-use App\Http\Middleware\PermissionMiddleware;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -15,25 +20,28 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware) {
 
-    $middleware->prepend(HandleCors::class);
+        $middleware->prepend(HandleCors::class);
 
-    $middleware->alias([
-        'permission' => PermissionMiddleware::class,
-        'warehouse.access' => \App\Http\Middleware\WarehouseAccessMiddleware::class,
-    ]);
+        $middleware->alias([
+            'permission' => PermissionMiddleware::class,
+            'administrator' => AdministratorMiddleware::class,
+            'stock.movement' => StockMovementPermissionMiddleware::class,
+            'active' => EnsureActiveAccount::class,
+            'warehouse.access' => WarehouseAccessMiddleware::class,
+        ]);
 
-    $middleware->redirectGuestsTo(function ($request) {
-        if ($request->expectsJson() || $request->is('api/*')) {
-            return null;
-        }
+        $middleware->redirectGuestsTo(function ($request) {
+            if ($request->expectsJson() || $request->is('api/*')) {
+                return null;
+            }
 
-        return '/login';
-    });
-})
+            return '/login';
+        });
+    })
     ->withExceptions(function (Exceptions $exceptions) {
 
         $exceptions->render(function (
-            \Illuminate\Auth\AuthenticationException $e,
+            AuthenticationException $e,
             $request
         ) {
             if ($request->expectsJson() || $request->is('api/*')) {

@@ -23,16 +23,27 @@ class PermissionSeeder extends Seeder
             'stock.transfer',
             'stock.adjust',
 
-            'orders.view',
-            'orders.create',
-            'orders.update',
-            'orders.delete',
-            'orders.cancel',
+            'sales_orders.view',
+            'sales_orders.create',
+            'sales_orders.update',
+            'sales_orders.delete',
 
             'purchase_orders.view',
             'purchase_orders.create',
             'purchase_orders.update',
             'purchase_orders.delete',
+
+            'receiving.view',
+            'receiving.create',
+            'receiving.update',
+
+            'shipping.view',
+            'shipping.create',
+            'shipping.update',
+
+            'returns.view',
+            'returns.create',
+            'returns.update',
 
             'warehouses.view',
             'warehouses.create',
@@ -56,6 +67,9 @@ class PermissionSeeder extends Seeder
             'roles.update',
             'roles.delete',
             'roles.permissions',
+
+            'settings.view',
+            'settings.update',
 
             'reports.view',
             'reports.export',

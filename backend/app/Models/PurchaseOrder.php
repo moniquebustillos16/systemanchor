@@ -25,6 +25,7 @@ class PurchaseOrder extends Model
         'product_name',  // ← required
         'items',
         'total',
+        'lines',
         'status',
     ];
 
@@ -33,6 +34,7 @@ class PurchaseOrder extends Model
         'expected_date' => 'date',
         'total'         => 'float',
         'items'         => 'integer',
+        'lines'         => 'array',
     ];
 
     protected static function boot()

@@ -22,7 +22,7 @@ function extractArr<T>(json: unknown): T[] {
 }
 
 const STALE_MS = 60_000;
-const CATALOG_STALE_MS = 5 * 60_000; // roles/perms change rarely
+const CATALOG_STALE_MS = 5 * 60_000; // roles change rarely
 
 export type RoleRow = {
   id: string;
@@ -125,13 +125,13 @@ export function usePermissionsCatalog(options: { enabled?: boolean } = {}) {
   );
 
   const q = useQuery({
-    queryKey: queryKeys.permissions.list(params),
+    queryKey: [...queryKeys.permissions.list(params), "roles-access-v2"],
     queryFn: async () => {
       const { data } = await api.get("/permissions", { params });
       return data;
     },
     enabled,
-    staleTime: CATALOG_STALE_MS,
+    staleTime: 0,
     placeholderData: (prev) => prev ?? [],
   });
 

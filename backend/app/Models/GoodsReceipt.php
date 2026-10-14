@@ -25,6 +25,7 @@ class GoodsReceipt extends Model
         'date',
         'expected',
         'received',
+        'lines',
         'status',
     ];
 
@@ -32,6 +33,7 @@ class GoodsReceipt extends Model
         'date'       => 'date',
         'expected'   => 'decimal:4',
         'received'   => 'decimal:4',
+        'lines'      => 'array',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
         'deleted_at' => 'datetime',

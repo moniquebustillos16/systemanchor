@@ -35,6 +35,7 @@ class Product extends Model
 
     protected $casts = [
         'qty'          => 'decimal:4',
+        'unallocated_qty' => 'decimal:4',
         'min_stock'    => 'decimal:4',
         'max_stock'    => 'decimal:4',
         'price'        => 'decimal:2',
@@ -58,6 +59,11 @@ class Product extends Model
     public function supplier(): BelongsTo
     {
         return $this->belongsTo(Supplier::class, 'supplier_id', 'id');
+    }
+
+    public function inventoryBalances(): HasMany
+    {
+        return $this->hasMany(Inventory::class, 'product_id', 'id');
     }
 
     /** All images ordered by sort_order */

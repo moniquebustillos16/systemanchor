@@ -361,7 +361,6 @@ function CycleCount() {
       setSaving(true);
       const payload: Record<string, unknown> = {
         counted: editCounted,
-        system_qty: editSystem,
         counter: editCounter || editRow.counter,
       };
       if (complete) {

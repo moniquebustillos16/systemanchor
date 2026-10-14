@@ -19,12 +19,14 @@ class Shipment extends Model
         'warehouse_id',
         'packages',
         'date',
+        'lines',
         'status',
     ];
 
     protected $casts = [
         'packages' => 'integer',
         'date'     => 'date',
+        'lines'    => 'array',
     ];
 
     // Relationships

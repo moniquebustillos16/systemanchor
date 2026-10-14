@@ -5,10 +5,16 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Notification;
 use App\Models\ReturnModel;
+use App\Models\SalesOrder;
+use App\Models\Shipment;
 use App\Models\User;
+use App\Services\InventoryService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class ReturnController extends Controller
 {
@@ -18,9 +24,9 @@ class ReturnController extends Controller
      */
     private function allowedWarehouseIds(Request $request): ?array
     {
-        /** @var \App\Models\User|null $user */
+        /** @var User|null $user */
         $user = $request->user();
-        if (!$user) {
+        if (! $user) {
             return [];
         }
 
@@ -38,7 +44,7 @@ class ReturnController extends Controller
         }
 
         // Normalize Collection / array → string[]
-        if ($ids instanceof \Illuminate\Support\Collection) {
+        if ($ids instanceof Collection) {
             $list = $ids->map(fn ($id) => (string) $id)->filter()->values()->all();
         } elseif (is_array($ids)) {
             $list = array_values(array_unique(array_map('strval', $ids)));
@@ -47,14 +53,13 @@ class ReturnController extends Controller
         }
 
         // Include primary warehouse_id if set
-        if (!empty($user->warehouse_id)) {
+        if (! empty($user->warehouse_id)) {
             $list[] = (string) $user->warehouse_id;
             $list = array_values(array_unique($list));
         }
 
         return $list;
     }
-
 
     private function assertWarehouseAllowed(Request $request, ?string $warehouseId, string $action = 'access'): void
     {
@@ -67,7 +72,7 @@ class ReturnController extends Controller
             abort(403, "A warehouse is required to {$action} this return.");
         }
 
-        if (!in_array((string) $warehouseId, $allowed, true)) {
+        if (! in_array((string) $warehouseId, $allowed, true)) {
             abort(403, 'You do not have access to this warehouse.');
         }
     }
@@ -96,10 +101,10 @@ class ReturnController extends Controller
         if ($search = $request->query('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('return_number', 'ilike', "%{$search}%")
-                  ->orWhere('reason', 'ilike', "%{$search}%")
-                  ->orWhereHas('salesOrder', function ($so) use ($search) {
-                      $so->where('so_number', 'ilike', "%{$search}%");
-                  });
+                    ->orWhere('reason', 'ilike', "%{$search}%")
+                    ->orWhereHas('salesOrder', function ($so) use ($search) {
+                        $so->where('so_number', 'ilike', "%{$search}%");
+                    });
             });
         }
 
@@ -112,7 +117,7 @@ class ReturnController extends Controller
         if ($request->filled('warehouse_id') && $request->warehouse_id !== 'all') {
             $wid = (string) $request->warehouse_id;
             $allowed = $this->allowedWarehouseIds($request);
-            if (is_array($allowed) && !in_array($wid, $allowed, true)) {
+            if (is_array($allowed) && ! in_array($wid, $allowed, true)) {
                 abort(403, 'Warehouse not assigned to this user.');
             }
             $query->where('warehouse_id', $wid);
@@ -126,10 +131,10 @@ class ReturnController extends Controller
         $base = $this->applyWarehouseScope(ReturnModel::query(), $request);
 
         return response()->json([
-            'all'    => (clone $base)->count(),
-            'open'   => (clone $base)->whereIn('status', ['pending', 'processing'])->count(),
+            'all' => (clone $base)->count(),
+            'open' => (clone $base)->whereIn('status', ['pending', 'processing'])->count(),
             'closed' => (clone $base)->where('status', 'completed')->count(),
-            'items'  => (int) (clone $base)->sum('items'),
+            'items' => (int) (clone $base)->sum('items'),
         ]);
     }
 
@@ -147,12 +152,16 @@ class ReturnController extends Controller
     {
         $data = $request->validate([
             'sales_order_id' => ['required', 'uuid', 'exists:sales_orders,id'],
-            'warehouse_id'   => ['nullable', 'uuid', 'exists:warehouses,id'],
-            'reason'         => ['required', 'string', 'max:100'],
-            'disposition'    => ['required', 'string', 'max:100'],
-            'items'          => ['required', 'integer', 'min:1'],
-            'date'           => ['required', 'date'],
-            'status'         => ['nullable', Rule::in(['pending', 'processing', 'completed'])],
+            'warehouse_id' => ['required', 'uuid', 'exists:warehouses,id'],
+            'reason' => ['required', 'string', 'max:100'],
+            'disposition' => ['required', 'string', 'max:100'],
+            'items' => ['required', 'integer', 'min:1'],
+            'date' => ['required', 'date'],
+            'lines' => ['required', 'array', 'min:1'],
+            'lines.*.product_id' => ['required', 'uuid', 'exists:products,id'],
+            'lines.*.qty' => ['required', 'numeric', 'gt:0'],
+            'lines.*.unit_price' => ['nullable', 'numeric', 'min:0'],
+            'status' => ['nullable', Rule::in(['pending', 'processing'])],
         ]);
 
         $allowed = $this->allowedWarehouseIds($request);
@@ -163,12 +172,20 @@ class ReturnController extends Controller
             $this->assertWarehouseAllowed($request, (string) $data['warehouse_id'], 'create');
         }
 
-        $last = ReturnModel::withTrashed()->orderByDesc('created_at')->first();
-        $seq  = $last ? ((int) Str::after($last->return_number, 'RT-')) + 1 : 100;
-        $data['return_number'] = 'RT-' . $seq;
-        $data['status'] = $data['status'] ?? 'processing';
+        $return = DB::transaction(function () use ($request, $data) {
+            $salesOrder = SalesOrder::query()
+                ->lockForUpdate()
+                ->findOrFail($data['sales_order_id']);
+            $this->assertWarehouseAllowed($request, (string) $salesOrder->warehouse_id, 'create a return for');
+            $this->assertWithinShippedLines($salesOrder, $data['lines']);
 
-        $return = ReturnModel::create($data);
+            $last = ReturnModel::withTrashed()->orderByDesc('created_at')->first();
+            $seq = $last ? ((int) Str::after($last->return_number, 'RT-')) + 1 : 100;
+            $data['return_number'] = 'RT-'.$seq;
+            $data['status'] = $data['status'] ?? 'processing';
+
+            return ReturnModel::create($data);
+        }, 3);
         $return->load(['salesOrder.customer', 'warehouse']);
 
         $this->notifyAll(
@@ -189,14 +206,17 @@ class ReturnController extends Controller
         $oldStatus = $return->status;
 
         $data = $request->validate([
-            'sales_order_id' => ['sometimes', 'uuid', 'exists:sales_orders,id'],
-            'warehouse_id'   => ['nullable', 'uuid', 'exists:warehouses,id'],
-            'reason'         => ['sometimes', 'string', 'max:100'],
-            'disposition'    => ['sometimes', 'string', 'max:100'],
-            'items'          => ['sometimes', 'integer', 'min:1'],
-            'date'           => ['sometimes', 'date'],
-            'status'         => ['sometimes', Rule::in(['pending', 'processing', 'completed'])],
+            'warehouse_id' => ['sometimes', 'required', 'uuid', 'exists:warehouses,id'],
+            'reason' => ['sometimes', 'string', 'max:100'],
+            'disposition' => ['sometimes', 'string', 'max:100'],
+            'items' => ['sometimes', 'integer', 'min:1'],
+            'date' => ['sometimes', 'date'],
+            'status' => ['sometimes', Rule::in(['pending', 'processing'])],
         ]);
+
+        if ($return->status === 'completed') {
+            abort(409, 'A completed return cannot be changed.');
+        }
 
         if (array_key_exists('warehouse_id', $data) && $data['warehouse_id']) {
             $this->assertWarehouseAllowed($request, (string) $data['warehouse_id'], 'update');
@@ -218,35 +238,120 @@ class ReturnController extends Controller
         return response()->json($return);
     }
 
-    public function complete(Request $request, string $id)
+    public function complete(Request $request, string $id, InventoryService $inventoryService)
     {
-        $return = ReturnModel::findOrFail($id);
-        $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'update');
+        [$return, $wasCompleted] = DB::transaction(function () use ($request, $id, $inventoryService) {
+            $return = ReturnModel::lockForUpdate()->findOrFail($id);
+            $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'update');
 
-        if ($return->status === 'completed') {
-            return response()->json(['message' => 'RMA already closed'], 422);
+            if ($return->status === 'completed') {
+                return [$return, true];
+            }
+
+            if ($return->disposition === 'Inspect & restock') {
+                $inventoryService->postDocumentLines(
+                    'IN',
+                    $return->id,
+                    $return->return_number,
+                    $return->warehouse_id,
+                    $return->lines ?? [],
+                    $request->user()?->id,
+                    'qty',
+                    'customer-return'
+                );
+            }
+
+            $return->update(['status' => 'completed']);
+
+            return [$return->fresh(), false];
+        }, 3);
+        $return->load(['salesOrder.customer', 'warehouse']);
+
+        if (! $wasCompleted) {
+            $this->notifyAll(
+                'success',
+                'Return closed',
+                "{$return->return_number} marked completed",
+                '/returns'
+            );
         }
 
-        $return->update(['status' => 'completed']);
-        $return = $return->fresh()->load(['salesOrder.customer', 'warehouse']);
-
-        $this->notifyAll(
-            'success',
-            'Return closed',
-            "{$return->return_number} marked completed",
-            '/returns'
-        );
-
-        return response()->json($return);
+        return response()->json([
+            'message' => $wasCompleted ? 'RMA already closed' : 'Return completed',
+            'data' => $return,
+        ]);
     }
 
     public function destroy(Request $request, string $id)
     {
         $return = ReturnModel::findOrFail($id);
         $this->assertWarehouseAllowed($request, $return->warehouse_id ? (string) $return->warehouse_id : null, 'delete');
+        if ($return->status === 'completed') {
+            abort(409, 'A completed return cannot be deleted because its stock movement is permanent.');
+        }
         $return->delete();
 
         return response()->json(null, 204);
+    }
+
+    private function assertWithinShippedLines(SalesOrder $salesOrder, array $returnLines): void
+    {
+        $shipped = [];
+        $shipments = Shipment::query()
+            ->where('sales_order_id', $salesOrder->id)
+            ->where('status', '!=', 'cancelled')
+            ->get(['lines']);
+        foreach ($shipments as $shipment) {
+            foreach ($shipment->lines ?? [] as $line) {
+                $productId = (string) ($line['product_id'] ?? '');
+                if ($productId !== '') {
+                    $shipped[$productId] = ($shipped[$productId] ?? 0) + (float) ($line['qty'] ?? 0);
+                }
+            }
+        }
+
+        if ($shipped === [] && $shipments->count() === 1 && empty($shipments[0]->lines)) {
+            foreach ($salesOrder->lines ?? [] as $line) {
+                $productId = (string) ($line['product_id'] ?? '');
+                if ($productId !== '' && (float) ($line['qty'] ?? 0) > 0) {
+                    $shipped[$productId] = ($shipped[$productId] ?? 0) + (float) $line['qty'];
+                }
+            }
+        }
+
+        if ($shipped === []) {
+            throw ValidationException::withMessages([
+                'sales_order_id' => ['A return can only be opened for products that have been shipped.'],
+            ]);
+        }
+
+        $alreadyReturned = [];
+        ReturnModel::query()
+            ->where('sales_order_id', $salesOrder->id)
+            ->get(['lines'])
+            ->each(function (ReturnModel $existingReturn) use (&$alreadyReturned) {
+                foreach ($existingReturn->lines ?? [] as $line) {
+                    $productId = (string) ($line['product_id'] ?? '');
+                    if ($productId !== '') {
+                        $alreadyReturned[$productId] = ($alreadyReturned[$productId] ?? 0) + (float) ($line['qty'] ?? 0);
+                    }
+                }
+            });
+
+        $requested = [];
+        foreach ($returnLines as $line) {
+            $productId = (string) ($line['product_id'] ?? '');
+            $requested[$productId] = ($requested[$productId] ?? 0) + (float) ($line['qty'] ?? 0);
+        }
+
+        foreach ($requested as $productId => $quantity) {
+            if (! array_key_exists($productId, $shipped)
+                || $quantity + ($alreadyReturned[$productId] ?? 0) > $shipped[$productId]) {
+                throw ValidationException::withMessages([
+                    'lines' => ['Return quantities cannot exceed the unreturned shipped quantities.'],
+                ]);
+            }
+        }
     }
 
     private function notifyAll(string $type, string $title, string $message, string $page): void
@@ -259,10 +364,10 @@ class ReturnController extends Controller
                 foreach ($users as $user) {
                     Notification::create([
                         'user_id' => $user->id,
-                        'type'    => $type,
-                        'title'   => $title,
+                        'type' => $type,
+                        'title' => $title,
                         'message' => $message,
-                        'page'    => $page,
+                        'page' => $page,
                         'is_read' => false,
                     ]);
                 }

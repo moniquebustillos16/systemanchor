@@ -981,6 +981,7 @@ function Dashboard() {
   /* ── TanStack Query — single server source of truth ───────── */
   const {
     data: dash,
+    isLoading: dashLoading,
     isFetching: dashFetching,
     refetch: refetchDashboard,
     dataUpdatedAt,
@@ -1173,7 +1174,7 @@ function Dashboard() {
       : boot?.serverStockOut ?? null;
 
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
-  const loading = false;
+  const loading = !dash && !boot && dashLoading;
 
   /* Persist snapshot when live query data arrives (instant re-entry paint) */
   useEffect(() => {
@@ -1827,15 +1828,7 @@ function Dashboard() {
             )}
           </div>
 
-          <div
-            className="dash-bottom"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr)",
-              gap: 16,
-              alignItems: "stretch",
-            }}
-          >
+          <div className="dash-bottom">
             <div
               className="card dash-orders-card"
               style={{

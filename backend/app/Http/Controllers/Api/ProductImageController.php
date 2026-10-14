@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\ProductImage;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -19,8 +20,14 @@ class ProductImageController extends Controller
     public function index(Request $request)
     {
         $query = ProductImage::query()->with('product:id,name,sku');
+        $allowed = $this->allowedWarehouseIds($request->user());
+        if (is_array($allowed)) {
+            $query->whereHas('product', fn ($products) => $this->scopeProducts($products, $allowed));
+        }
 
         if ($request->filled('product_id')) {
+            $product = Product::findOrFail($request->product_id);
+            $this->assertProductAllowed($product, $allowed);
             $query->where('product_id', $request->product_id);
         }
 
@@ -45,14 +52,15 @@ class ProductImageController extends Controller
     {
         $validated = $request->validate([
             'product_id' => 'required|uuid|exists:products,id',
-            'images'     => 'required|array|min:1',
-            'images.*'   => 'image|mimes:jpeg,jpg,png,gif,webp|max:10240', // 10MB
+            'images' => 'required|array|min:1',
+            'images.*' => 'image|mimes:jpeg,jpg,png,gif,webp|max:10240', // 10MB
             'is_primary' => 'sometimes|boolean',
             'sort_order' => 'sometimes|integer|min:0',
         ]);
 
         // Reject soft-deleted products
         $product = Product::whereNull('deleted_at')->findOrFail($validated['product_id']);
+        $this->assertProductAllowed($product, $this->allowedWarehouseIds($request->user()));
         $uploaded = [];
 
         DB::transaction(function () use ($request, $product, $validated, &$uploaded) {
@@ -70,14 +78,14 @@ class ProductImageController extends Controller
                 $hasPrimary = false;
             }
 
-            $maxSort   = ProductImage::where('product_id', $product->id)->max('sort_order') ?? -1;
+            $maxSort = ProductImage::where('product_id', $product->id)->max('sort_order') ?? -1;
             $sortOrder = $validated['sort_order'] ?? ($maxSort + 1);
 
             foreach ($request->file('images') as $index => $file) {
                 $originalName = $file->getClientOriginalName();
-                $extension    = $file->getClientOriginalExtension() ?: 'jpg';
-                $fileName     = Str::uuid() . '.' . $extension;
-                $path         = $file->storeAs(
+                $extension = $file->getClientOriginalExtension() ?: 'jpg';
+                $fileName = Str::uuid().'.'.$extension;
+                $path = $file->storeAs(
                     "products/{$product->id}",
                     $fileName,
                     'public'
@@ -85,17 +93,17 @@ class ProductImageController extends Controller
 
                 // First image becomes primary if product has none (or request asked for primary)
                 $isPrimary = ($makePrimary && $index === 0)
-                    || (!$hasPrimary && $index === 0);
+                    || (! $hasPrimary && $index === 0);
 
                 $image = ProductImage::create([
-                    'id'         => (string) Str::uuid(),
+                    'id' => (string) Str::uuid(),
                     'product_id' => $product->id,
                     'image_path' => $path,
                     // Prefer generating URL from path (accessor / resource); keep column if schema requires it
-                    'image_url'  => Storage::disk('public')->url($path),
-                    'file_name'  => $originalName,
-                    'mime_type'  => $file->getMimeType(),
-                    'file_size'  => $file->getSize(),
+                    'image_url' => Storage::disk('public')->url($path),
+                    'file_name' => $originalName,
+                    'mime_type' => $file->getMimeType(),
+                    'file_size' => $file->getSize(),
                     'is_primary' => $isPrimary,
                     'sort_order' => $sortOrder + $index,
                 ]);
@@ -109,8 +117,8 @@ class ProductImageController extends Controller
         });
 
         return response()->json([
-            'message' => count($uploaded) . ' image(s) uploaded successfully',
-            'data'    => $uploaded,
+            'message' => count($uploaded).' image(s) uploaded successfully',
+            'data' => $uploaded,
         ], 201);
     }
 
@@ -118,9 +126,10 @@ class ProductImageController extends Controller
      * Show a single image.
      * GET /product-images/{id}
      */
-    public function show(string $id)
+    public function show(Request $request, string $id)
     {
-        $image = ProductImage::with('product:id,name,sku')->findOrFail($id);
+        $image = ProductImage::with('product')->findOrFail($id);
+        $this->assertProductAllowed($image->product, $this->allowedWarehouseIds($request->user()));
 
         return response()->json($this->decorate($image));
     }
@@ -133,6 +142,7 @@ class ProductImageController extends Controller
     public function update(Request $request, string $id)
     {
         $image = ProductImage::findOrFail($id);
+        $this->assertProductAllowed($image->product, $this->allowedWarehouseIds($request->user()));
 
         $validated = $request->validate([
             'is_primary' => 'sometimes|boolean',
@@ -152,7 +162,7 @@ class ProductImageController extends Controller
 
         return response()->json([
             'message' => 'Image updated successfully',
-            'data'    => $this->decorate($image->fresh()),
+            'data' => $this->decorate($image->fresh()),
         ]);
     }
 
@@ -160,12 +170,13 @@ class ProductImageController extends Controller
      * Soft-delete an image, remove file from storage, promote next primary if needed.
      * DELETE /product-images/{id}
      */
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
         $image = ProductImage::findOrFail($id);
+        $this->assertProductAllowed($image->product, $this->allowedWarehouseIds($request->user()));
 
         DB::transaction(function () use ($image) {
-            $productId  = $image->product_id;
+            $productId = $image->product_id;
             $wasPrimary = (bool) $image->is_primary;
 
             if ($image->image_path && Storage::disk('public')->exists($image->image_path)) {
@@ -196,9 +207,10 @@ class ProductImageController extends Controller
      * Set an image as the primary image for its product.
      * POST /product-images/{id}/primary
      */
-    public function setPrimary(string $id)
+    public function setPrimary(Request $request, string $id)
     {
         $image = ProductImage::findOrFail($id);
+        $this->assertProductAllowed($image->product, $this->allowedWarehouseIds($request->user()));
 
         DB::transaction(function () use ($image) {
             ProductImage::where('product_id', $image->product_id)
@@ -210,7 +222,7 @@ class ProductImageController extends Controller
 
         return response()->json([
             'message' => 'Primary image set successfully',
-            'data'    => $this->decorate($image->fresh()),
+            'data' => $this->decorate($image->fresh()),
         ]);
     }
 
@@ -223,9 +235,20 @@ class ProductImageController extends Controller
     {
         $validated = $request->validate([
             'product_id' => 'required|uuid|exists:products,id',
-            'order'      => 'required|array|min:1',
-            'order.*'    => 'uuid|exists:product_images,id',
+            'order' => 'required|array|min:1',
+            'order.*' => 'uuid|exists:product_images,id',
         ]);
+        $this->assertProductAllowed(
+            Product::findOrFail($validated['product_id']),
+            $this->allowedWarehouseIds($request->user())
+        );
+        $requestedImageIds = ProductImage::query()
+            ->whereIn('id', $validated['order'])
+            ->where('product_id', $validated['product_id'])
+            ->count();
+        if ($requestedImageIds !== count($validated['order'])) {
+            return response()->json(['message' => 'Every image must belong to the selected product.'], 422);
+        }
 
         DB::transaction(function () use ($validated) {
             foreach ($validated['order'] as $index => $imageId) {
@@ -248,29 +271,73 @@ class ProductImageController extends Controller
         $url = null;
         if ($img->image_path) {
             $url = Storage::disk('public')->url($img->image_path);
-        } elseif (!empty($img->image_url)) {
+        } elseif (! empty($img->image_url)) {
             $url = $img->image_url;
         }
 
         return [
-            'id'         => $img->id,
+            'id' => $img->id,
             'product_id' => $img->product_id,
             'image_path' => $img->image_path,
-            'image_url'  => $url,
-            'file_name'  => $img->file_name,
-            'mime_type'  => $img->mime_type ?? null,
-            'file_size'  => $img->file_size ?? null,
+            'image_url' => $url,
+            'file_name' => $img->file_name,
+            'mime_type' => $img->mime_type ?? null,
+            'file_size' => $img->file_size ?? null,
             'is_primary' => (bool) $img->is_primary,
             'sort_order' => (int) $img->sort_order,
             'created_at' => $img->created_at,
             'updated_at' => $img->updated_at,
-            'product'    => $img->relationLoaded('product') && $img->product
+            'product' => $img->relationLoaded('product') && $img->product
                 ? [
-                    'id'   => $img->product->id,
+                    'id' => $img->product->id,
                     'name' => $img->product->name,
-                    'sku'  => $img->product->sku,
+                    'sku' => $img->product->sku,
                 ]
                 : null,
         ];
+    }
+
+    private function allowedWarehouseIds(?User $user): ?array
+    {
+        if (! $user) {
+            return [];
+        }
+        if ($user->canAccessAllWarehouses()) {
+            return null;
+        }
+
+        $ids = $user->warehouses()->pluck('warehouses.id')->map(fn ($id) => (string) $id)->all();
+        if ($user->warehouse_id) {
+            $ids[] = (string) $user->warehouse_id;
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    private function scopeProducts($query, array $warehouseIds): void
+    {
+        $query->where(function ($products) use ($warehouseIds) {
+            $products->whereIn('warehouse_id', $warehouseIds)
+                ->orWhereHas('inventoryBalances', fn ($balances) => $balances
+                    ->whereIn('warehouse_id', $warehouseIds));
+        });
+    }
+
+    private function assertProductAllowed(?Product $product, ?array $warehouseIds): void
+    {
+        if (! $product) {
+            abort(404, 'Product not found.');
+        }
+        if ($warehouseIds === null) {
+            return;
+        }
+        if (($product->warehouse_id && in_array((string) $product->warehouse_id, $warehouseIds, true))
+            || ($warehouseIds !== [] && $product->inventoryBalances()
+                ->whereIn('warehouse_id', $warehouseIds)
+                ->exists())) {
+            return;
+        }
+
+        abort(404, 'Product not found.');
     }
 }

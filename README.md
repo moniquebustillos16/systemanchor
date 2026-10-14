@@ -6,6 +6,40 @@ SystemAnchor is a full-stack warehouse management system for recording products,
 
 The application manages products, categories, suppliers, customers, warehouses, purchase orders, goods receipts, sales orders, shipments, returns, stock movements, users, roles, and permissions. The frontend owns the user experience and server-state handling; the backend owns validation, authentication, authorization, and persisted operational data.
 
+## Project Documentation
+
+- [Contributing guide](./CONTRIBUTING.md) — development practices, checks, and pull request checklist
+- [Security policy](./SECURITY.md) — private vulnerability reporting and security-sensitive change guidance
+- [Frontend README](./frontend/README.md) — React client setup, development, build, and troubleshooting
+- [Backend README](./backend/README.md) — Laravel API setup, authorization, inventory integrity, and tests
+- [Architecture guide](./docs/ARCHITECTURE.md) — frontend/backend boundaries, authorization, and inventory invariants
+- [API reference](./docs/API_REFERENCE.md) — endpoint groups, authentication, and permission requirements
+- [Production readiness checklist](./docs/PRODUCTION_READINESS.md) — deployment prerequisites, release steps, and operational recovery
+- [Testing plan](./TESTING_PLAN.md) — current test coverage, known limitations, and safe test setup
+- [PostgreSQL migration runbook](./MIGRATION_RUNBOOK.md) — migration rehearsal, reconciliation, and recovery procedure
+
+## Demo Videos
+
+Click a GIF preview to open the compact recording, or use YouTube for the full walkthrough.
+
+### Application walkthrough
+
+This walkthrough covers the main warehouse workflow, including the dashboard,
+inventory, suppliers, purchase orders, receiving, sales orders, and fulfillment.
+
+[![Application walkthrough](docs/videos/main-demo-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/main-demo-small.mp4)
+
+[Watch on YouTube](https://youtu.be/x8MKAmA1D7g)
+
+### Role-based access walkthrough
+
+This walkthrough shows how an administrator manages users and roles, chooses
+what each user can view or edit, and limits users to specific warehouse data.
+
+[![Role-based access walkthrough](docs/videos/role-access-preview.gif)](https://github.com/moniquebustillos16/systemanchor/blob/main/docs/videos/role-access-small.mp4)
+
+[Watch on YouTube](https://youtu.be/TG1yWSiqX5g)
+
 ## Key Features
 
 - Product, category, supplier, customer, and warehouse management
@@ -57,23 +91,23 @@ flowchart LR
 
 Most operational routes are within `auth:sanctum` and declare a permission such as `inventory.view` or `purchase_orders.create`. `PermissionMiddleware` allows the `Admin` role through and otherwise checks role permissions. The client adjusts its navigation and controls, but the API is the authorization boundary.
 
-Users can have warehouse assignments and an `access_all_warehouses` flag. Warehouse-specific scope is implemented in relevant controllers, including purchase orders. Scope and authorization need review endpoint by endpoint as the system evolves.
+Users can have warehouse assignments and an `access_all_warehouses` flag. Protected API routes require Sanctum authentication and an active account. Warehouse-scoped controllers filter list and aggregate responses and check resource access on detail and mutation requests. Administrator-only middleware protects account, role, permission, and warehouse-assignment changes. Continue to apply these checks when adding endpoints.
 
 ## Database Overview
 
 Laravel migrations define users, roles, permissions, warehouses, zones, bins, products, inventories, stock movements, suppliers, customers, purchase orders, goods receipts, sales orders, shipments, returns, notifications, and user-warehouse assignments.
 
-PostgreSQL is the supported application database. PHPUnit is configured for in-memory SQLite, which is separate from the local application configuration and should be validated against the migration chain before relying on wider test coverage.
+PostgreSQL is the supported application and PHPUnit test database. PHPUnit is configured to use the dedicated `systemanchor_test` database; create it before running tests and provide PostgreSQL connection credentials through the backend environment. The suite uses `RefreshDatabase`, so it resets the test database. Never point it at development or production data. See [TESTING_PLAN.md](./TESTING_PLAN.md) for setup and coverage limits.
 
 ## Business Workflows
 
 ### Inventory, movements, and transfers
 
-Products carry current quantity and warehouse information. The stock-movement endpoint supports `IN`, `OUT`, `TRANSFER`, and `ADJUSTMENT`. Its create operation uses a database transaction and rejects outgoing or transfer quantities above the current product quantity. A transfer records source and destination warehouse IDs; the current implementation updates the product warehouse reference when a destination is supplied. Review this behavior before production use where independent per-warehouse balances are required.
+The `inventories` table stores a product balance per warehouse; the product quantity is not the source of truth for multi-warehouse balances. Stock posting is centralized in `InventoryService` and recorded in the stock-movement ledger. Transfers debit the source and credit the destination in one database transaction. Posting validates available stock, supports idempotency keys, and document workflows use the same service so inventory and movement history commit together.
 
 ### Purchasing and receiving
 
-Purchase orders are associated with suppliers and can be associated with warehouses. The purchase-order controller applies warehouse access checks for users without all-warehouse access. Goods receipts record expected and received quantities against a purchase order, supplier, warehouse, and optional receiver. Completing a receipt updates its status and can create a quantity-mismatch notification.
+Purchase orders and goods receipts are associated with warehouses. Receipt operations verify that the receipt warehouse matches its purchase order, and warehouse scope is checked for reads and writes. Completing a receipt posts its received lines to inventory transactionally and preserves the associated movement history.
 
 ### Sales, fulfillment, and permissions
 
@@ -159,9 +193,10 @@ npm run build
 # Backend
 cd ../backend
 composer test
+php artisan serve
 ```
 
-`composer test` clears Laravel configuration and runs `php artisan test`. The repository currently contains only the default example unit and feature tests; these commands have not been represented as passing in this README. Add feature coverage for authentication, permissions, warehouse scoping, migrations, and order workflows.
+`composer test` clears Laravel configuration and runs `php artisan test`. Feature coverage includes inventory posting and reconciliation, warehouse authorization, inactive accounts, notification ownership, privilege boundaries, and protected order workflows. Run the frontend build as well as linting; the build includes the TypeScript project check.
 
 ## Deployment
 
@@ -171,18 +206,18 @@ For an AWS deployment, define the hosting architecture outside this repository. 
 
 ## Known Limitations and Future Improvements
 
-- Automated coverage is minimal and does not validate critical business workflows.
-- Authorization and warehouse scope should be audited consistently across all endpoints.
-- Warehouse-transfer behavior needs stronger per-warehouse inventory modeling and production-grade data-integrity coverage.
-- Some migrations perform destructive or non-reversible transformations. Two identifier/status alignment migrations explicitly reject rollback; rehearse migrations and backup/restore procedures against a production-like database.
+- Automated tests use the dedicated PostgreSQL `systemanchor_test` database. A synchronized multi-process test calls `InventoryService` directly to exercise simultaneous competing withdrawals; it does not test concurrent HTTP requests or document-level receipt/shipment workflows. See [TESTING_PLAN.md](./TESTING_PLAN.md).
+- Supplier and purchase-order identifier/status migrations are forward-only and cannot be rolled back. Before applying them to a populated database, audit all dependent references and rehearse backup, restore, migration, and reconciliation steps using the [PostgreSQL migration safety runbook](./MIGRATION_RUNBOOK.md). Do not deploy the identifier migration as written until references such as `products.supplier_id` and `goods_receipts.purchase_order_id` have been checked and any required ID mapping is preserved.
 - No API/application AWS deployment configuration is versioned in this repository.
 
 ## Repository Layout
 
-- `backend/` — Laravel API, migrations, seeders, and tests
-- `frontend/` — React client, API modules, hooks, and route-level pages
-- `docs/` — static demo-page assets
-- `.github/workflows/` — GitHub Pages deployment workflow
+- `backend/` — Laravel API, migrations, seeders, tests, and backend-specific Composer/npm manifests
+- `frontend/` — React client, API modules, hooks, route-level pages, and frontend-specific npm manifests
+- `docs/` — static demo page, walkthrough recordings, and preview assets
+- `.github/workflows/` — GitHub Pages deployment workflow for `docs/`
+
+Install JavaScript dependencies from the project that owns them (`frontend/` or `backend/`); there is no root-level npm workspace.
 
 ## License
 

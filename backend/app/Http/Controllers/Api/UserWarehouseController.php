@@ -123,7 +123,6 @@ class UserWarehouseController extends Controller
                     'user_id'      => $user->id,
                     'warehouse_id' => $wid,
                     'created_at'   => $now,
-                    'updated_at'   => $now,
                 ], $ids);
                 foreach (array_chunk($rows, 100) as $chunk) {
                     UserWarehouse::insert($chunk);

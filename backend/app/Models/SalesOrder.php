@@ -21,6 +21,7 @@ class SalesOrder extends Model
         'order_date',
         'items',
         'total',
+        'lines',
         'status',
     ];
 
@@ -28,6 +29,7 @@ class SalesOrder extends Model
         'order_date' => 'date',
         'items'      => 'integer',
         'total'      => 'float',
+        'lines'      => 'array',
     ];
 
     protected static function boot()

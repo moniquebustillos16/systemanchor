@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import Sidebar from "../components/Sidebar";
 import Topbar from "../components/Topbar";
 import api from "../../api/axios";
 import { usePurchaseOrders } from "../../hooks/useOrders";
 import { useWarehouses } from "../../hooks/useWarehouses";
 import { invalidatePurchaseOrders } from "../../lib/invalidate";
-import { usePermissions, fetchCurrentUserCached } from "../../hooks/useCurrentUser";
-import { fetchUserWarehousesCached, fetchWarehousesCached } from "../../hooks/useWarehouses";
-import { extractAdminFlag } from "../../lib/permissions";
+import { usePermissions } from "../../hooks/useCurrentUser";
+import { lookupKeys } from "../../lib/cachedLookups";
 import "../css/Orders.css";
 
 
@@ -93,16 +93,9 @@ const IconBan = () => (
 type Supplier = {
   id: string;
   name: string;
-  product_offers?: string | null;
 };
 type Warehouse = { id: string; code: string; name?: string };
 
-/** Assigned warehouses for the logged-in user (same pattern as Inventory.tsx) */
-type UserWarehouseScope = {
-  accessAll: boolean;
-  warehouseIds: string[];
-  warehouses: Warehouse[];
-};
 type ProductOpt = {
   id: string;
   sku: string;
@@ -111,33 +104,12 @@ type ProductOpt = {
   qty?: number | string;
 };
 
-/** Split free-text product offers ("Steel, bolts, electrical…") into options from supplier */
-function parseProductOffers(raw: string | null | undefined): string[] {
-  if (!raw || !String(raw).trim()) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const part of String(raw).split(/[,;|/·\n]+/)) {
-    const tag = part.trim();
-    if (tag.length < 2) continue;
-    const key = tag.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(tag);
-  }
-  return out;
-}
-
 function truncateText(s: string, max = 48): string {
   const t = s.trim();
-  if (t.length <= max) return t;
-  return `${t.slice(0, max - 1)}…`;
+  return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
 }
 
-/**
- * PO line is driven by supplier product_offers (not inventory).
- * `offer` = selected product offer name from the supplier.
- * `product_id` is optional / kept for duplicate & display of older POs.
- */
+/** Every new PO line must identify a product from the catalog. */
 type PoLine = {
   key: string;
   offer: string;
@@ -240,16 +212,9 @@ type PurchaseOrder = {
   status: string;
   supplier?: Supplier | null;
   warehouse?: Warehouse | null;
-  /** Client-side / cached lines (product details live in product_transactions) */
+  /** Product lines returned by the purchase-order API. */
   lines?: PoLineServer[];
   order_items?: PoLineServer[];
-};
-
-type Stats = {
-  all: number;
-  pending: number;
-  total_value: number;
-  done: number;
 };
 
 type PoForm = {
@@ -294,30 +259,6 @@ function formTotals(lines: PoLine[]): { items: number; total: number } {
   const total = lines.reduce((sum, l) => sum + lineTotal(l), 0);
   return { items, total };
 }
-
-/** Cache line offers so the detail drawer can show them when API omits lines */
-function cachePoLines(poNumber: string, lines: PoLineServer[]) {
-  try {
-    if (!poNumber || lines.length === 0) return;
-    localStorage.setItem(`sa-po-lines:${poNumber}`, JSON.stringify(lines));
-  } catch {
-    /* ignore */
-  }
-}
-
-function readCachedPoLines(poNumber: string): PoLineServer[] {
-  try {
-    const raw = localStorage.getItem(`sa-po-lines:${poNumber}`);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as PoLineServer[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const STATUS_OPTIONS = [
   "pending",
@@ -391,107 +332,6 @@ function nextStepLabel(status: string): string | null {
 }
 
 
-/* ── List/stats cache (navigate away & back = instant paint) ─ */
-const PO_SOFT_TTL_MS = 60_000;
-const PO_HARD_TTL_MS = 10 * 60_000;
-const SS_PO_LIST = "po:lastList";
-const SS_PO_STATS = "po:lastStats";
-const SS_PO_META = "po:lastMeta";
-
-type PoListSnap = {
-  at: number;
-  key: string;
-  rows: PurchaseOrder[];
-  total: number;
-  lastPage: number;
-};
-type PoStatsSnap = { at: number; data: Stats };
-type PoMetaSnap = {
-  at: number;
-  warehouses: Warehouse[];
-  suppliers: Supplier[];
-  products: ProductOpt[];
-};
-
-type PoStore = {
-  list: PoListSnap | null;
-  stats: PoStatsSnap | null;
-  meta: PoMetaSnap | null;
-  listInflight: Map<string, Promise<void>>;
-  metaInflight: Promise<void> | null;
-};
-
-function poStore(): PoStore {
-  const g = globalThis as unknown as { __saPoCache?: PoStore };
-  if (!g.__saPoCache) {
-    g.__saPoCache = {
-      list: null,
-      stats: null,
-      meta: null,
-      listInflight: new Map(),
-      metaInflight: null,
-    };
-  }
-  return g.__saPoCache;
-}
-
-function isFresh(at: number, ttl: number) {
-  return Date.now() - at < ttl;
-}
-
-function readSS<T>(key: string): T | null {
-  try {
-    const raw = sessionStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : null;
-  } catch {
-    return null;
-  }
-}
-function writeSS(key: string, value: unknown) {
-  try {
-    sessionStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* quota */
-  }
-}
-
-function listCacheKey(parts: {
-  page: number;
-  search: string;
-  status: string;
-  wh: string;
-  supplier: string;
-}) {
-  return `p=${parts.page}|s=${parts.search}|st=${parts.status}|w=${parts.wh}|su=${parts.supplier}`;
-}
-
-function bootstrapPoList(key: string): PoListSnap | null {
-  const mem = poStore().list;
-  if (mem && mem.key === key && isFresh(mem.at, PO_HARD_TTL_MS)) return mem;
-  const ss = readSS<PoListSnap>(SS_PO_LIST);
-  if (ss && ss.key === key && isFresh(ss.at, PO_HARD_TTL_MS)) return ss;
-  // any recent list for instant paint (filters may differ)
-  if (mem && isFresh(mem.at, PO_HARD_TTL_MS)) return mem;
-  if (ss && isFresh(ss.at, PO_HARD_TTL_MS)) return ss;
-  return null;
-}
-
-function bootstrapPoStats(): Stats | null {
-  const mem = poStore().stats;
-  if (mem && isFresh(mem.at, PO_HARD_TTL_MS)) return mem.data;
-  const ss = readSS<PoStatsSnap>(SS_PO_STATS);
-  if (ss && isFresh(ss.at, PO_HARD_TTL_MS)) return ss.data;
-  return null;
-}
-
-function bootstrapPoMeta(): PoMetaSnap | null {
-  const mem = poStore().meta;
-  if (mem && isFresh(mem.at, PO_HARD_TTL_MS)) return mem;
-  const ss = readSS<PoMetaSnap>(SS_PO_META);
-  if (ss && isFresh(ss.at, PO_HARD_TTL_MS)) return ss;
-  return null;
-}
-
 function PurchaseOrders() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -502,15 +342,14 @@ function PurchaseOrders() {
   const [page, setPage] = useState(1);
   const pageSize = 15;
 
-  // Scope still loaded for optional client filter; dropdown matches Sales Orders
-  const [whScope, setWhScope] = useState<UserWarehouseScope | null>(null);
-
   const {
     rows: poRows,
     meta: poMeta,
     stats: poStats,
     isLoading: poLoading,
     isFetching: poFetching,
+    isError: poIsError,
+    error: poError,
     refetchAll: refetchPOs,
   } = usePurchaseOrders({
     page,
@@ -524,33 +363,6 @@ function PurchaseOrders() {
   });
 
 
-  const bootKey = listCacheKey({
-    page: 1,
-    search: "",
-    status: "all",
-    wh: "all",
-    supplier: "all",
-  });
-  const bootList = bootstrapPoList(bootKey);
-  const bootStats = bootstrapPoStats();
-  const bootMeta = bootstrapPoMeta();
-
-  const [orders, setOrders] = useState<PurchaseOrder[]>(() => bootList?.rows ?? []);
-  const [stats, setStats] = useState<Stats | null>(() => bootStats);
-  const [total, setTotal] = useState(() => bootList?.total ?? 0);
-  const [lastPage, setLastPage] = useState(() => bootList?.lastPage ?? 1);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const [warehouses, setWarehouses] = useState<Warehouse[]>(
-    () => bootMeta?.warehouses ?? []
-  );
-  const [suppliers, setSuppliers] = useState<Supplier[]>(
-    () => bootMeta?.suppliers ?? []
-  );
-  const [products, setProducts] = useState<ProductOpt[]>(
-    () => bootMeta?.products ?? []
-  );
 
   // Shared React Query cache (same as Dashboard / Receiving / Location)
   const {
@@ -559,6 +371,50 @@ function PurchaseOrders() {
     isFetching: whFetching,
     refetch: refetchWarehouses,
   } = useWarehouses({ enabled: true, perPage: 200 });
+
+  const supplierLookup = useQuery({
+    queryKey: [...lookupKeys.suppliers, "purchase-order-options"],
+    queryFn: async () => {
+      const { data } = await api.get("/suppliers", { params: { per_page: 200 } });
+      return extractList<Supplier>(data)
+        .map((supplier) => ({
+          id: String(supplier.id),
+          name: supplier.name,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+    staleTime: 5 * 60_000,
+  });
+  const productLookup = useQuery({
+    queryKey: [...lookupKeys.products, "purchase-order-catalog"],
+    queryFn: async () => {
+      const firstPage = await api.get("/inventories", {
+        params: { per_page: 100, page: 1 },
+      });
+      const lastPage = Math.max(1, Number(firstPage.data?.last_page) || 1);
+      const remainingPages = await Promise.all(
+        Array.from({ length: lastPage - 1 }, (_, index) =>
+          api.get("/inventories", {
+            params: { per_page: 100, page: index + 2 },
+          })
+        )
+      );
+      return [firstPage, ...remainingPages]
+        .flatMap(({ data }) => extractList<ProductOpt>(data))
+        .map((product) => ({
+          id: String(product.id),
+          sku: product.sku,
+          name: product.name,
+          price: product.price,
+          qty: product.qty,
+        }));
+    },
+    staleTime: 5 * 60_000,
+  });
+  const suppliers: Supplier[] = Array.isArray(supplierLookup.data)
+    ? supplierLookup.data
+    : [];
+  const products = Array.isArray(productLookup.data) ? productLookup.data : [];
 
   // Sales Orders pattern: dropdown = useWarehouses list (API already scopes non-admins)
   const warehousesFromQuery = useMemo<Warehouse[]>(() => {
@@ -574,11 +430,12 @@ function PurchaseOrders() {
       .filter((w) => !!w.id)
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
     if (fromQuery.length > 0) return fromQuery;
-    return warehouses;
-  }, [whRows, warehouses]);
+    return [];
+  }, [whRows]);
 
 
-  const whBusy = whLoading || whFetching;
+  const whBusy =
+    whLoading || whFetching || supplierLookup.isFetching || productLookup.isFetching;
 
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<PoForm>(emptyForm);
@@ -586,7 +443,6 @@ function PurchaseOrders() {
   const [formError, setFormError] = useState<string | null>(null);
 
   const [viewOrder, setViewOrder] = useState<PurchaseOrder | null>(null);
-  const [viewLoading, setViewLoading] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
     order: PurchaseOrder;
@@ -634,183 +490,6 @@ function PurchaseOrders() {
     "shipment.update"
   );
 
-  /** Load assigned warehouses — fast: localStorage first, then parallel API */
-  const fetchUserWarehouseScope = useCallback(async () => {
-    let userId: string | null = null;
-    let accessAll = false;
-    let warehousesList: Warehouse[] = [];
-    let roleName = "";
-
-    // —— Instant bootstrap from localStorage (no network) ——
-    try {
-      for (const key of ["user", "auth_user", "authUser", "currentUser", "sa-user"]) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        const parsed = JSON.parse(raw);
-        const u = parsed?.data ?? parsed?.user ?? parsed;
-        if (!u) continue;
-        userId = u?.id ? String(u.id) : userId;
-        accessAll = Boolean(u?.access_all_warehouses) || accessAll;
-        roleName = String(u?.role?.name ?? u?.role_name ?? roleName);
-        if (extractAdminFlag(parsed) || extractAdminFlag(u)) accessAll = true;
-
-        const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
-        if (Array.isArray(fromMe) && fromMe.length > 0) {
-          warehousesList = fromMe.map((w: any) =>
-            typeof w === "string"
-              ? { id: String(w), code: "", name: undefined }
-              : { id: String(w.id), code: w.code ?? "", name: w.name }
-          );
-        } else if (u?.warehouse_id) {
-          warehousesList = [
-            {
-              id: String(u.warehouse_id),
-              code: u.warehouse?.code ?? "",
-              name: u.warehouse?.name,
-            },
-          ];
-        }
-        if (userId) break;
-      }
-    } catch {
-      /* ignore */
-    }
-
-    const rn = roleName.toLowerCase().replace(/[_-]+/g, " ").trim();
-    if (
-      [
-        "admin",
-        "administrator",
-        "super admin",
-        "superadmin",
-        "system admin",
-        "system administrator",
-        "root",
-      ].includes(rn)
-    ) {
-      accessAll = true;
-    }
-
-    // Paint early if we already have something
-    if (accessAll || warehousesList.length > 0) {
-      setWhScope({
-        accessAll,
-        warehouseIds: Array.from(
-          new Set(warehousesList.map((w) => w.id).filter(Boolean))
-        ),
-        warehouses: warehousesList,
-      });
-      // Keep loading true until network confirms, but dropdown can show already
-    }
-
-    try {
-      // —— Parallel network: /me + /users/:id/warehouses ——
-      const mePromise = fetchCurrentUserCached().catch(() => null);
-      const whPromise = userId
-        ? fetchUserWarehousesCached(userId).catch(() => null)
-        : Promise.resolve(null);
-
-      let [me, whJson] = await Promise.all([mePromise, whPromise]);
-
-      if (me) {
-        const u = (me as any)?.data ?? (me as any)?.user ?? me;
-        userId = u?.id ? String(u.id) : userId;
-        if (Boolean(u?.access_all_warehouses)) accessAll = true;
-        if (extractAdminFlag(me) || extractAdminFlag(u)) accessAll = true;
-        const r2 = String(u?.role?.name ?? u?.role_name ?? "")
-          .toLowerCase()
-          .replace(/[_-]+/g, " ")
-          .trim();
-        if (
-          [
-            "admin",
-            "administrator",
-            "super admin",
-            "superadmin",
-            "system admin",
-            "system administrator",
-            "root",
-          ].includes(r2)
-        ) {
-          accessAll = true;
-        }
-
-        const fromMe = u?.warehouses ?? u?.warehouse_ids ?? null;
-        if (Array.isArray(fromMe) && fromMe.length > 0 && warehousesList.length === 0) {
-          warehousesList = fromMe.map((w: any) =>
-            typeof w === "string"
-              ? { id: String(w), code: "", name: undefined }
-              : { id: String(w.id), code: w.code ?? "", name: w.name }
-          );
-        }
-        if (!whJson && userId) {
-          // /me arrived first with userId we didn't have — fetch warehouses now
-          try {
-            const data = await fetchUserWarehousesCached(userId);
-            whJson = data;
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-
-      if (whJson) {
-        const payload = (whJson as any)?.data ?? whJson;
-        if (Boolean(payload?.access_all_warehouses)) accessAll = true;
-
-        let list: any[] = [];
-        const raw = payload?.warehouses ?? payload?.data ?? payload;
-        if (Array.isArray(raw)) list = raw;
-        else if (Array.isArray(raw?.data)) list = raw.data;
-        else if (raw && typeof raw === "object") {
-          list = Object.values(raw).filter(
-            (v: any) => v && typeof v === "object" && v.id
-          );
-        }
-
-        if (list.length > 0) {
-          warehousesList = list.map((w: any) => ({
-            id: String(w.id),
-            code: w.code ?? "",
-            name: w.name ?? "",
-          }));
-        }
-      }
-
-      // Primary warehouse fallback
-      if (warehousesList.length === 0 && !accessAll && me) {
-        const u = (me as any)?.data ?? (me as any)?.user ?? me;
-        if (u?.warehouse_id) {
-          warehousesList = [
-            {
-              id: String(u.warehouse_id),
-              code: u.warehouse?.code ?? "",
-              name: u.warehouse?.name,
-            },
-          ];
-        }
-      }
-
-      setWhScope({
-        accessAll,
-        warehouseIds: Array.from(
-          new Set(warehousesList.map((w) => w.id).filter(Boolean))
-        ),
-        warehouses: warehousesList,
-      });
-    } catch (e) {
-      console.error("[PurchaseOrders] warehouse scope failed", e);
-      if (!warehousesList.length && !accessAll) {
-        setWhScope({ accessAll: false, warehouseIds: [], warehouses: [] });
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    void fetchUserWarehouseScope();
-  }, [fetchUserWarehouseScope]);
-
-
   useEffect(() => {
     const t = setTimeout(() => {
       setDebouncedSearch(search);
@@ -819,168 +498,20 @@ function PurchaseOrders() {
     return () => clearTimeout(t);
   }, [search]);
 
-  /** Suppliers + warehouses + product catalog for the create form / filters */
-  const fetchMeta = useCallback(async (force = false): Promise<PoMetaSnap | null> => {
-    const store = poStore();
-    if (
-      !force &&
-      store.meta &&
-      isFresh(store.meta.at, PO_SOFT_TTL_MS) &&
-      store.meta.warehouses.length > 0
-    ) {
-      setWarehouses(store.meta.warehouses);
-      setSuppliers(store.meta.suppliers);
-      setProducts(store.meta.products);
-      return store.meta;
-    }
-    if (store.metaInflight && !force) {
-      await store.metaInflight;
-      const m = store.meta;
-      if (m) {
-        setWarehouses(m.warehouses);
-        setSuppliers(m.suppliers);
-        setProducts(m.products);
-      }
-      return m;
-    }
-
-    store.metaInflight = (async () => {
-      try {
-        const loadWarehouses = async (): Promise<Warehouse[]> => {
-          // GET /api/warehouses (WarehouseController)
-          try {
-            const _whRows = await fetchWarehousesCached();
-            const json = { data: _whRows };
-            const list = extractList<Warehouse>(json);
-            return list
-              .map((w) => {
-                const r = w as Warehouse & Record<string, unknown>;
-                return {
-                  id: String(r.id ?? ""),
-                  code: String(r.code ?? r.name ?? r.id ?? ""),
-                  name: r.name != null ? String(r.name) : undefined,
-                };
-              })
-              .filter((w) => !!w.id)
-              .sort((a, b) => a.code.localeCompare(b.code));
-          } catch (e) {
-            console.warn("[PurchaseOrders] /warehouses failed:", e);
-            return [];
-          }
-        };
-
-        const [supSettled, whList] = await Promise.all([
-          api
-            .get("/suppliers", { params: { per_page: 100 } })
-            .then((r) => r.data)
-            .catch(() => null),
-          loadWarehouses(),
-        ]);
-
-        let nextSuppliers: Supplier[] = store.meta?.suppliers ?? [];
-        if (supSettled != null) {
-          const list: Supplier[] = extractList<Supplier>(supSettled);
-          nextSuppliers = list
-            .map((s) => ({
-              id: String(s.id),
-              name: s.name,
-              product_offers: (s as Supplier).product_offers ?? null,
-            }))
-            .sort((a, b) => a.name.localeCompare(b.name));
-        }
-
-        let nextProducts: ProductOpt[] = store.meta?.products ?? [];
-        try {
-          const { data: prodJson } = await api.get("/inventories", {
-            params: { per_page: 100 },
-          });
-          const list: ProductOpt[] = extractList<ProductOpt>(prodJson);
-          nextProducts = list.map((p) => ({
-            id: String(p.id),
-            sku: p.sku,
-            name: p.name,
-            price: p.price,
-            qty: p.qty,
-          }));
-        } catch {
-          /* optional */
-        }
-
-        setWarehouses(whList);
-        setSuppliers(nextSuppliers);
-        setProducts(nextProducts);
-
-        const snap: PoMetaSnap = {
-          at: Date.now(),
-          warehouses: whList,
-          suppliers: nextSuppliers,
-          products: nextProducts,
-        };
-        // Always update in-memory store so openAdd can read immediately
-        store.meta = snap;
-        // Persist only when we have something useful
-        if (whList.length > 0 || nextSuppliers.length > 0) {
-          writeSS(SS_PO_META, snap);
-        }
-      } catch (e) {
-        console.error("[PurchaseOrders] meta fetch failed:", e);
-      } finally {
-        store.metaInflight = null;
-      }
-    })();
-
-    await store.metaInflight;
-    return store.meta;
-  }, []);
-
-  /* Phase 7: TanStack Query owns list + stats */
-  useEffect(() => {
-    if (!poRows) return;
-    const rows = (poRows as PurchaseOrder[]).map((row) => {
+  const orders = useMemo(() => {
+    return (poRows as PurchaseOrder[]).map((row) => {
       const r = row as PurchaseOrder & Record<string, unknown>;
       const lines = extractLines(r);
-      const cachedLines =
-        lines.length === 0 ? readCachedPoLines(String(r.po_number ?? "")) : [];
-      const resolved = lines.length ? lines : cachedLines;
       return {
         ...row,
-        lines: resolved.length ? resolved : row.lines,
-        order_items: resolved.length ? resolved : row.order_items,
+        lines: lines.length ? lines : row.lines,
+        order_items: lines.length ? lines : row.order_items,
       };
     });
-    setOrders(rows);
-    setTotal(poMeta.total);
-    setLastPage(poMeta.last_page);
-    setLoading(false);
-    setError(null);
-  }, [poRows, poMeta]);
-
-  useEffect(() => {
-    if (!poStats) return;
-    setStats(poStats as Stats);
-  }, [poStats]);
-
-  useEffect(() => {
-    if (poRows.length === 0 && poLoading) setLoading(true);
-    else if (!poLoading) setLoading(false);
-  }, [poLoading, poRows.length]);
-
-  useEffect(() => {
-    void fetchMeta();
-  }, [fetchMeta]);
+  }, [poRows]);
 
   // Sales Orders: keep filter default "all"
 
-
-  // Auto-select first warehouse when useWarehouses data arrives while modal is open
-  useEffect(() => {
-    if (!showAdd) return;
-    if (warehousesFromQuery.length === 0) return;
-    setForm((f) => {
-      if (f.warehouse_id && warehousesFromQuery.some((w) => w.id === f.warehouse_id)) return f;
-      return { ...f, warehouse_id: warehousesFromQuery[0].id };
-    });
-  }, [showAdd, warehousesFromQuery]);
 
   useEffect(() => {
     document.body.classList.toggle("modal-open", showAdd || !!viewOrder || !!confirmAction);
@@ -1006,53 +537,23 @@ function PurchaseOrders() {
     };
   }, [menuOpenId]);
 
-  const statsView = stats ?? { all: 0, pending: 0, total_value: 0, done: 0 };
-
-  /**
-   * Orders visible under warehouse assignment (Inventory-style condition).
-   * - Scope still loading → show current orders (no empty flash)
-   * - accessAll (admin / access_all_warehouses) → all orders
-   * - Assigned warehouses → only those POs
-   * - No assignment → empty
-   */
-  const scopedOrders = useMemo(() => {
-    if (!whScope) return orders; // loading
-    if (whScope.accessAll) return orders;
-    if (whScope.warehouseIds.length === 0) return [];
-    const allowed = new Set(whScope.warehouseIds.map(String));
-    return orders.filter((o) => {
-      const wid = o.warehouse_id ?? o.warehouse?.id ?? null;
-      if (!wid) return false;
-      return allowed.has(String(wid));
-    });
-  }, [orders, whScope]);
+  const statsView = poStats;
+  const total = poMeta.total;
+  const lastPage = poMeta.last_page;
+  const loading = poLoading;
+  const error = poIsError
+    ? poError instanceof Error
+      ? poError.message
+      : "Unable to load purchase orders."
+    : null;
 
   const selectedSupplier = suppliers.find((s) => s.id === form.supplier_id) ?? null;
 
-  /** "Products to purchase" options — solely from supplier.product_offers */
-  const supplierOffers = parseProductOffers(selectedSupplier?.product_offers);
-
-  const filteredOffers = supplierOffers.filter((offer) => {
+  const filteredProducts = products.filter((product) => {
     if (!productQuery.trim()) return true;
-    return offer.toLowerCase().includes(productQuery.trim().toLowerCase());
+    const query = productQuery.trim().toLowerCase();
+    return product.name.toLowerCase().includes(query) || product.sku.toLowerCase().includes(query);
   });
-
-  /** Optional: map an offer name to an inventory product_id when a close match exists */
-  const resolveInventoryId = (offer: string): string => {
-    if (!offer.trim() || products.length === 0) return "";
-    const q = offer.toLowerCase();
-    const exact = products.find(
-      (p) => p.name.toLowerCase() === q || p.sku.toLowerCase() === q
-    );
-    if (exact) return exact.id;
-    const partial = products.find(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.sku.toLowerCase().includes(q) ||
-        q.includes(p.name.toLowerCase())
-    );
-    return partial?.id ?? "";
-  };
 
   /** Open modal immediately — warehouses from useWarehouses (shared cache). */
   const openAdd = (prefill?: Partial<PoForm>) => {
@@ -1064,18 +565,10 @@ function PurchaseOrders() {
     setFormError(null);
     setProductQuery("");
 
-    const cached = poStore().meta;
     const whs = warehousesFromQuery;
-    const sups = suppliers.length
-      ? suppliers
-      : cached?.suppliers?.length
-        ? cached.suppliers
-        : [];
+    const sups = suppliers;
 
     const supplierId = prefill?.supplier_id ?? sups[0]?.id ?? "";
-    const supplier = sups.find((s) => s.id === supplierId);
-    const offers = parseProductOffers(supplier?.product_offers);
-    const firstOffer = offers[0] ?? "";
     const warehouseId = prefill?.warehouse_id ?? whs[0]?.id ?? "";
 
     setForm({
@@ -1086,58 +579,62 @@ function PurchaseOrders() {
       lines:
         prefill?.lines && prefill.lines.length > 0
           ? prefill.lines
-          : [emptyLine(firstOffer)],
+          : [emptyLine()],
     });
     setShowAdd(true);
 
-    // Warehouses: shared React Query (fast). Suppliers/products: local meta if needed.
-    if (whs.length === 0) void refetchWarehouses();
+    // Warehouse, supplier, and product lookups are shared through React Query.
+    if (whs.length === 0) {
+      void refetchWarehouses().then(({ data }) => {
+        const firstWarehouse = extractList<Record<string, unknown>>(data).find(
+          (warehouse) => warehouse.id
+        );
+        if (firstWarehouse?.id) {
+          setForm((current) => current.warehouse_id
+            ? current
+            : { ...current, warehouse_id: String(firstWarehouse.id) });
+        }
+      });
+    }
 
-    const needMeta =
-      sups.length === 0 ||
-      products.length === 0 ||
-      !cached ||
-      !isFresh(cached.at, PO_SOFT_TTL_MS);
+    const needMeta = sups.length === 0 || products.length === 0;
 
     if (needMeta) {
-      void fetchMeta(sups.length === 0).then((meta) => {
-        if (!meta) return;
-        const nextSup = meta.suppliers?.length ? meta.suppliers : sups;
-        if (nextSup.length) setSuppliers(nextSup);
-        if (meta.products?.length) setProducts(meta.products);
-
-        setForm((f) => {
-          const sid = f.supplier_id || nextSup[0]?.id || "";
-          const sup = nextSup.find((s) => s.id === sid);
-          const offs = parseProductOffers(sup?.product_offers);
-          const needLines =
-            !f.lines.length ||
-            (f.lines.length === 1 && !f.lines[0].offer.trim());
-          return {
-            ...f,
-            supplier_id: sid,
-            warehouse_id: f.warehouse_id || warehousesFromQuery[0]?.id || "",
-            lines: needLines && offs[0] ? [emptyLine(offs[0])] : f.lines,
-          };
-        });
-      });
+      void Promise.all([supplierLookup.refetch(), productLookup.refetch()]).then(
+        ([supplierResult, productResult]) => {
+          const nextSup = supplierResult.data ?? sups;
+          if (supplierResult.isError || productResult.isError) {
+            setFormError("Could not load suppliers or products. Try refreshing the page.");
+          }
+          setForm((f) => {
+            const sid = f.supplier_id || nextSup[0]?.id || "";
+            const needLines =
+              !f.lines.length ||
+              (f.lines.length === 1 && !f.lines[0].product_id);
+            return {
+              ...f,
+              supplier_id: sid,
+              warehouse_id: f.warehouse_id || warehousesFromQuery[0]?.id || "",
+              lines: needLines ? [emptyLine()] : f.lines,
+            };
+          });
+        }
+      );
     }
   };
 
-  /** When supplier changes: reset lines to that supplier's product offers */
+  /** When supplier changes, clear lines so each item is explicitly selected from the catalog. */
   const onSupplierChange = (supplierId: string) => {
-    const supplier = suppliers.find((s) => s.id === supplierId);
-    const offers = parseProductOffers(supplier?.product_offers);
     setProductQuery("");
     setForm((f) => ({
       ...f,
       supplier_id: supplierId,
-      lines: [emptyLine(offers[0] ?? "")],
+      lines: [emptyLine()],
     }));
   };
 
   const duplicateOrder = (order: PurchaseOrder) => {
-    const linesSrc = order.lines ?? order.order_items ?? readCachedPoLines(order.po_number);
+    const linesSrc = order.lines ?? order.order_items ?? [];
     const lines: PoLine[] =
       linesSrc.length > 0
         ? linesSrc.map((ln) => {
@@ -1155,7 +652,8 @@ function PurchaseOrders() {
 
     openAdd({
       supplier_id: order.supplier_id ?? order.supplier?.id ?? suppliers[0]?.id ?? "",
-      warehouse_id: order.warehouse_id ?? order.warehouse?.id ?? warehouses[0]?.id ?? "",
+      warehouse_id:
+        order.warehouse_id ?? order.warehouse?.id ?? warehousesFromQuery[0]?.id ?? "",
       reference: order.reference ? `Copy of ${order.reference}` : `Copy of ${order.po_number}`,
       notes: order.notes ?? "",
       status: "pending",
@@ -1189,24 +687,18 @@ function PurchaseOrders() {
     }));
   };
 
-  /** Select a product-to-purchase from supplier offers */
-  const onOfferChange = (key: string, offer: string) => {
-    const invId = resolveInventoryId(offer);
-    const inv = invId ? products.find((p) => p.id === invId) : undefined;
+  /** Select a catalog product for a purchase-order line. */
+  const onProductChange = (key: string, productId: string) => {
+    const product = products.find((candidate) => candidate.id === productId);
     setLine(key, {
-      offer,
-      product_id: invId,
-      unit_price: inv ? String(Number(inv.price) || 0) : undefined,
+      offer: product ? `${product.sku} — ${product.name}` : "",
+      product_id: productId,
+      unit_price: product ? String(Number(product.price) || 0) : "",
     });
   };
 
   const addLine = () => {
-    const used = new Set(form.lines.map((l) => l.offer.toLowerCase()).filter(Boolean));
-    const next = supplierOffers.find((o) => !used.has(o.toLowerCase())) ?? "";
-    setForm((f) => ({
-      ...f,
-      lines: [...f.lines, emptyLine(next)],
-    }));
+    setForm((f) => ({ ...f, lines: [...f.lines, emptyLine()] }));
   };
 
   const removeLine = (key: string) => {
@@ -1230,18 +722,23 @@ function PurchaseOrders() {
       return;
     }
 
-    if (supplierOffers.length === 0) {
+    if (products.length === 0) {
       setFormError(
-        "This supplier has no product offers. Add product offers on the Suppliers page first."
+        "No catalog products are available. Add products to the catalog before creating a purchase order."
       );
       return;
     }
 
-    const validLines = form.lines.filter((l) => l.offer.trim() && Number(l.qty) > 0);
-    if (validLines.length === 0) {
-      setFormError("Select a product to purchase and set quantity greater than zero.");
+    if (form.lines.some((line) => !line.product_id)) {
+      setFormError("Choose a catalog product for every purchase order line.");
       return;
     }
+    if (form.lines.some((line) => !line.qty.trim() || Number(line.qty) <= 0)) {
+      setFormError("Enter a quantity greater than zero for every purchase order line.");
+      return;
+    }
+
+    const validLines = form.lines;
 
     const { items: itemsTotal, total: orderTotal } = formTotals(validLines);
     const primaryOffer = validLines[0].offer.trim();
@@ -1257,6 +754,12 @@ function PurchaseOrders() {
       product_name: primaryOffer,
       items: Math.max(1, Math.round(itemsTotal)),
       total: orderTotal,
+      lines: validLines.map((line) => ({
+        product_id: line.product_id,
+        product_name: line.offer.trim(),
+        qty: Number(line.qty),
+        unit_price: Number(line.unit_price) || 0,
+      })),
       status: form.status || "pending",
     };
 
@@ -1286,44 +789,6 @@ function PurchaseOrders() {
         };
       });
 
-      // ProductTransactionController — sync lines after the PO is visible.
-      // The PO itself is authoritative; transaction logging must not block the
-      // user from seeing the newly created order.
-      let txOk = 0;
-      let txFail = 0;
-      const transactionSync = Promise.all(
-        validLines.map(async (l) => {
-          const q = Math.max(1, Math.round(Number(l.qty) || 1));
-          const price = Number(l.unit_price) || 0;
-          try {
-            await api.post("/product-transactions", {
-              product_id:
-                l.product_id && UUID_RE.test(l.product_id) ? l.product_id : null,
-              product_name: l.offer.trim(),
-              transaction_type: "purchase",
-              reference_id: poId && UUID_RE.test(poId) ? poId : null,
-              reference_number: poNumber,
-              partner_id: form.supplier_id,
-              partner_type: "supplier",
-              quantity: q,
-              unit_price: price,
-              status: form.status || "pending",
-            });
-            txOk += 1;
-          } catch {
-            txFail += 1;
-          }
-        })
-      ).then(() => {
-        if (txFail > 0) {
-          showToast(
-            "info",
-            "Partial product transactions",
-            `${txOk} saved, ${txFail} failed — check Product Transactions`
-          );
-        }
-      });
-
       const created: PurchaseOrder = {
         id: poId || String(Date.now()),
         po_number: poNumber,
@@ -1349,8 +814,6 @@ function PurchaseOrders() {
         order_items: createdLines,
       };
 
-      cachePoLines(created.po_number, createdLines);
-
       setShowAdd(false);
       showToast(
         "success",
@@ -1358,11 +821,8 @@ function PurchaseOrders() {
         `${created.po_number} · ${primaryOffer}${validLines.length > 1 ? ` +${validLines.length - 1}` : ""} · ${formatPeso(orderTotal)}`
       );
       setPage(1);
-      void transactionSync;
-      void refetchPOs();
-      void invalidatePurchaseOrders();
+      await invalidatePurchaseOrders();
       setViewOrder(created);
-      setViewLoading(false);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to create PO");
     } finally {
@@ -1478,36 +938,18 @@ function PurchaseOrders() {
 
   const updateStatus = async (order: PurchaseOrder, nextStatus: string, label?: string) => {
     if (!canUpdate) { showToast("error", "Permission denied", "You cannot update purchase orders."); return; }
-    const prevStatus = order.status;
     const updated: PurchaseOrder = { ...order, status: nextStatus };
 
-    // Optimistic UI — apply immediately, no full refetch
     setUpdatingId(order.id);
     setMenuOpenId(null);
     setConfirmAction(null);
-    setOrders((rows) => rows.map((r) => (r.id === order.id ? updated : r)));
     if (viewOrder?.id === order.id) setViewOrder(updated);
-    setStats((s) => {
-      if (!s) return s;
-      const next = { ...s };
-      if (prevStatus === "pending" && nextStatus !== "pending") {
-        next.pending = Math.max(0, next.pending - 1);
-      } else if (prevStatus !== "pending" && nextStatus === "pending") {
-        next.pending += 1;
-      }
-      const wasDone = prevStatus === "completed" || prevStatus === "received";
-      const isDone = nextStatus === "completed" || nextStatus === "received";
-      if (!wasDone && isDone) next.done += 1;
-      if (wasDone && !isDone) next.done = Math.max(0, next.done - 1);
-      return next;
-    });
 
     try {
       const { data: body } = await api.put(`/purchase-orders/${order.id}`, {
         status: nextStatus,
-        
       });
-            void invalidatePurchaseOrders();
+      await invalidatePurchaseOrders();
       // Merge server payload when present
       const serverOrder: PurchaseOrder | null =
         body?.data && typeof body.data === "object"
@@ -1516,11 +958,8 @@ function PurchaseOrders() {
             ? { ...updated, ...body }
             : null;
 
-      if (serverOrder) {
-        setOrders((rows) => rows.map((r) => (r.id === order.id ? { ...r, ...serverOrder } : r)));
-        if (viewOrder?.id === order.id) {
-          setViewOrder((v) => (v ? { ...v, ...serverOrder } : v));
-        }
+      if (serverOrder && viewOrder?.id === order.id) {
+        setViewOrder((v) => (v ? { ...v, ...serverOrder } : v));
       }
 
       showToast(
@@ -1539,38 +978,12 @@ function PurchaseOrders() {
         }, 400);
       }
 
-      // Background stats reconcile (non-blocking)
-      api.get("/purchase-orders/stats")
-        .then((r) => r.data)
-        .then((json) => {
-          if (json) setStats(json);
-        })
-        .catch(() => {
-          /* keep optimistic stats */
-        });
     } catch (err) {
-      // Rollback on failure
-      const rolled: PurchaseOrder = { ...order, status: prevStatus };
-      setOrders((rows) => rows.map((r) => (r.id === order.id ? rolled : r)));
-      if (viewOrder?.id === order.id) setViewOrder(rolled);
-      setStats((s) => {
-        if (!s) return s;
-        const next = { ...s };
-        if (prevStatus === "pending" && nextStatus !== "pending") {
-          next.pending += 1;
-        } else if (prevStatus !== "pending" && nextStatus === "pending") {
-          next.pending = Math.max(0, next.pending - 1);
-        }
-        const wasDone = prevStatus === "completed" || prevStatus === "received";
-        const isDone = nextStatus === "completed" || nextStatus === "received";
-        if (!wasDone && isDone) next.done = Math.max(0, next.done - 1);
-        if (wasDone && !isDone) next.done += 1;
-        return next;
-      });
+      if (viewOrder?.id === order.id) setViewOrder(order);
       showToast(
         "error",
         "Update failed",
-        err instanceof Error ? err.message : "Could not update status — reverted"
+        err instanceof Error ? err.message : "Could not update status."
       );
     } finally {
       setUpdatingId(null);
@@ -1640,9 +1053,8 @@ function PurchaseOrders() {
   );
 
   const openView = async (order: PurchaseOrder) => {
-    // Prefer any lines already on the row / from a just-created PO
+    // Prefer line data returned by the list endpoint while the detail loads.
     const existingLines = extractLines(order as unknown as Record<string, unknown>);
-    const cached = readCachedPoLines(order.po_number);
     const seedLines =
       existingLines.length > 0
         ? existingLines
@@ -1650,14 +1062,13 @@ function PurchaseOrders() {
           ? order.lines
           : order.order_items?.length
             ? order.order_items
-            : cached;
+            : [];
 
     setViewOrder({
       ...order,
       lines: seedLines.length ? seedLines : order.lines,
       order_items: seedLines.length ? seedLines : order.order_items,
     });
-    setViewLoading(true);
     setMenuOpenId(null);
 
     // Ensure product catalog is available for name resolution
@@ -1673,7 +1084,6 @@ function PurchaseOrders() {
           price: p.price,
           qty: p.qty,
         }));
-        setProducts(catalog);
       } catch {
         /* ignore */
       }
@@ -1695,11 +1105,7 @@ function PurchaseOrders() {
         if (rawLines.length === 0) {
           rawLines = extractLines(order as unknown as Record<string, unknown>);
         }
-        if (rawLines.length === 0) {
-          rawLines = readCachedPoLines(full.po_number || order.po_number);
-        }
         const lines = enrichLines(rawLines, catalog);
-        if (lines.length) cachePoLines(full.po_number || order.po_number, lines);
         setViewOrder({
           ...order,
           ...full,
@@ -1712,7 +1118,7 @@ function PurchaseOrders() {
         const raw =
           extractLines(order as unknown as Record<string, unknown>).length > 0
             ? extractLines(order as unknown as Record<string, unknown>)
-            : readCachedPoLines(order.po_number);
+            : [];
         const lines = enrichLines(raw, catalog);
         setViewOrder({ ...order, lines, order_items: lines });
       }
@@ -1720,11 +1126,9 @@ function PurchaseOrders() {
       const raw =
         extractLines(order as unknown as Record<string, unknown>).length > 0
           ? extractLines(order as unknown as Record<string, unknown>)
-          : readCachedPoLines(order.po_number);
+          : [];
       const lines = enrichLines(raw, catalog);
       setViewOrder({ ...order, lines, order_items: lines });
-    } finally {
-      setViewLoading(false);
     }
   };
 
@@ -1760,10 +1164,15 @@ function PurchaseOrders() {
                 onClick={() => {
                   void refetchPOs();
                   void refetchWarehouses();
-                  void fetchMeta(true);
+                  void Promise.all([supplierLookup.refetch(), productLookup.refetch()]);
                   showToast("success", "Refreshed", "Orders and suppliers reloaded.");
                 }}
-                disabled={poFetching || loading}
+                disabled={
+                  poFetching ||
+                  loading ||
+                  supplierLookup.isFetching ||
+                  productLookup.isFetching
+                }
               >
                 <IconRefresh /> {poFetching ? "Refreshing…" : "Refresh"}
               </button>
@@ -1975,7 +1384,7 @@ function PurchaseOrders() {
                         ))}
                       </tr>
                     ))
-                  ) : scopedOrders.length === 0 ? (
+                  ) : orders.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="empty-row">
                         <div
@@ -2006,7 +1415,7 @@ function PurchaseOrders() {
                       </td>
                     </tr>
                   ) : (
-                    scopedOrders.map((o) => {
+                    orders.map((o) => {
                       const next = nextStepLabel(o.status);
                       const lines = o.lines ?? o.order_items ?? [];
                       const productLabel = poProductLabel(o);
@@ -2175,7 +1584,7 @@ function PurchaseOrders() {
                   New Purchase Order
                 </h2>
                 <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--sa-muted)" }}>
-                  Pick a supplier, then choose from their product offers · totals in ₱
+                          Pick a supplier, then choose catalog products for each line · totals in ₱
                 </p>
               </div>
               <button type="button" className="btn btn-secondary" onClick={closeAdd} disabled={saving}>
@@ -2210,73 +1619,14 @@ function PurchaseOrders() {
                     disabled={saving}
                   >
                     <option value="">— Select supplier —</option>
-                    {suppliers.map((s) => {
-                      const offers = parseProductOffers(s.product_offers);
-                      let suffix = "";
-                      if (offers.length > 0) {
-                        const label =
-                          offers.slice(0, 3).join(", ") +
-                          (offers.length > 3 ? ` +${offers.length - 3}` : "");
-                        suffix = ` · ${truncateText(label)}`;
-                      }
-                      return (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                          {suffix}
-                        </option>
-                      );
-                    })}
+                    {suppliers.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
                   </select>
                   {suppliers.length === 0 && (
                     <span className="po-field-hint">No suppliers loaded — check Suppliers API</span>
-                  )}
-                  {selectedSupplier && supplierOffers.length > 0 && (
-                    <div className="po-supplier-offers">
-                      <div className="po-supplier-offers-head">
-                        <span className="po-supplier-offers-label">Product offers</span>
-                        <span className="po-supplier-offers-meta">
-                          {supplierOffers.length} available for this PO
-                        </span>
-                      </div>
-                      <div className="po-offer-chips">
-                        {supplierOffers.map((kw) => (
-                          <button
-                            key={kw}
-                            type="button"
-                            className="po-offer-chip"
-                            title={`Add “${kw}” as a line`}
-                            disabled={saving}
-                            onClick={() => {
-                              const exists = form.lines.some(
-                                (l) => l.offer.toLowerCase() === kw.toLowerCase()
-                              );
-                              if (exists) {
-                                setProductQuery(kw);
-                                return;
-                              }
-                              const emptyIdx = form.lines.findIndex((l) => !l.offer.trim());
-                              if (emptyIdx >= 0) {
-                                const target = form.lines[emptyIdx];
-                                onOfferChange(target.key, kw);
-                              } else {
-                                setForm((f) => ({
-                                  ...f,
-                                  lines: [...f.lines, emptyLine(kw)],
-                                }));
-                              }
-                            }}
-                          >
-                            {kw}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {selectedSupplier && supplierOffers.length === 0 && (
-                    <span className="po-field-hint">
-                      No product offers on this supplier. Add them on the Suppliers page (e.g.
-                      Steel, bolts) — those become the “Products to purchase” options.
-                    </span>
                   )}
                 </div>
 
@@ -2383,80 +1733,79 @@ function PurchaseOrders() {
                 </div>
               </div>
 
-              {/* Products to purchase — from selected supplier's product_offers only */}
+              {/* Purchase-order lines always select products from the catalog. */}
               <div className="po-lines-section">
                 <div className="po-lines-header">
                   <div>
-                    <span className="po-lines-title">Products to purchase</span>
-                    {form.supplier_id && (
-                      <span className="po-lines-hint">
-                        {supplierOffers.length > 0
-                          ? `Choose offers · recorded as product transactions`
-                          : "This supplier has no product offers yet"}
-                      </span>
-                    )}
-                    {!form.supplier_id && (
-                      <span className="po-lines-hint">Select a supplier to load their product offers</span>
-                    )}
+                    <span className="po-lines-title">Catalog products</span>
+                    <span className="po-lines-hint">
+                      Select a catalog product for every purchase order line
+                    </span>
                   </div>
                   <div className="po-lines-toolbar">
-                    {supplierOffers.length > 4 && (
+                    {products.length > 4 && (
                       <input
                         type="text"
                         className="po-product-filter"
-                        placeholder="Filter offers…"
+                        placeholder="Search SKU or product…"
                         value={productQuery}
                         onChange={(e) => setProductQuery(e.target.value)}
-                        disabled={saving || !form.supplier_id}
+                        disabled={saving || productLookup.isLoading}
                       />
                     )}
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={addLine}
-                      disabled={saving || !form.supplier_id || supplierOffers.length === 0}
+                      disabled={saving || !form.supplier_id || products.length === 0}
                     >
                       <IconPlus /> Add line
                     </button>
                   </div>
                 </div>
 
-                {form.supplier_id && supplierOffers.length === 0 && (
+                {productLookup.isLoading ? (
                   <p className="po-lines-empty po-lines-soft">
-                    No product offers on this supplier. Open the Suppliers page and add offers
-                    (e.g. Steel, bolts, electrical components) so they appear here.
+                    Loading catalog products…
                   </p>
+                ) : products.length === 0 ? (
+                  <p className="po-lines-empty po-lines-soft">
+                    No catalog products are available. Add products to the catalog first.
+                  </p>
+                ) : null}
+
+                {products.length > 0 && filteredProducts.length === 0 && (
+                  <p className="po-lines-empty po-lines-soft">No catalog products match your search.</p>
                 )}
 
                 <div className="po-lines-list">
                   {form.lines.map((line, idx) => {
-                    const options =
-                      line.offer &&
-                      !filteredOffers.some(
-                        (o) => o.toLowerCase() === line.offer.toLowerCase()
-                      )
-                        ? [line.offer, ...filteredOffers]
-                        : filteredOffers;
+                    const selectedProduct = products.find((product) => product.id === line.product_id);
                     return (
                       <div key={line.key} className="po-line-row">
                         <div className="form-field po-line-product">
-                          {idx === 0 && <label>Product offer *</label>}
+                          {idx === 0 && <label>Catalog product *</label>}
                           <select
-                            value={line.offer}
-                            onChange={(e) => onOfferChange(line.key, e.target.value)}
-                            disabled={saving || !form.supplier_id || supplierOffers.length === 0}
+                            value={line.product_id}
+                            onChange={(e) => onProductChange(line.key, e.target.value)}
+                            disabled={saving || !form.supplier_id || products.length === 0}
                             required
                           >
-                            <option value="">— Select product offer —</option>
-                            {options.map((offer) => (
-                              <option key={offer} value={offer}>
-                                {offer}
+                            <option value="">— Choose a catalog product —</option>
+                            {selectedProduct && !filteredProducts.some((product) => product.id === selectedProduct.id) && (
+                              <option value={selectedProduct.id}>
+                                {selectedProduct.sku} — {selectedProduct.name}
+                              </option>
+                            )}
+                            {filteredProducts.map((product) => (
+                              <option key={product.id} value={product.id}>
+                                {product.sku} — {product.name}
                               </option>
                             ))}
                           </select>
-                          {line.offer && (
+                          {selectedProduct && (
                             <span className="po-line-meta po-offer-match">
-                              From supplier product offers
+                              Catalog SKU: {selectedProduct.sku}
                             </span>
                           )}
                         </div>
@@ -2531,8 +1880,8 @@ function PurchaseOrders() {
                   <div>
                     <div style={{ fontSize: 12, color: "var(--sa-muted)" }}>Order summary</div>
                     <span>
-                      {form.lines.filter((l) => l.offer.trim()).length} line
-                      {form.lines.filter((l) => l.offer.trim()).length === 1 ? "" : "s"}
+                      {form.lines.filter((l) => l.product_id).length} line
+                      {form.lines.filter((l) => l.product_id).length === 1 ? "" : "s"}
                       {" · "}
                       {formTotals(form.lines).items.toLocaleString()} unit
                       {formTotals(form.lines).items === 1 ? "" : "s"}
@@ -2554,7 +1903,8 @@ function PurchaseOrders() {
                     saving ||
                     suppliers.length === 0 ||
                     !form.supplier_id ||
-                    supplierOffers.length === 0
+                    productLookup.isLoading ||
+                    products.length === 0
                   }
                 >
                   {saving ? "Saving…" : "Create PO"}
@@ -2570,12 +1920,8 @@ function PurchaseOrders() {
         const primary = primaryAction(viewOrder.status);
         const extras = extraActions(viewOrder.status);
         const busy = updatingId === viewOrder.id;
-        // Lines from client cache / form — product details live in product_transactions
         const rawLines =
-          (viewOrder.lines?.length ? viewOrder.lines : null) ??
-          (viewOrder.order_items?.length ? viewOrder.order_items : null) ??
-          extractLines(viewOrder as unknown as Record<string, unknown>) ??
-          readCachedPoLines(viewOrder.po_number);
+          extractLines(viewOrder as unknown as Record<string, unknown>);
         const lines = enrichLines(rawLines ?? [], products);
         const linesTotal = lines.reduce((sum, ln) => {
           const qty = parseQty(ln.qty);
@@ -2642,7 +1988,7 @@ function PurchaseOrders() {
                 <div>
                   <span className="meta-label">Units</span>
                   <span className="meta-value">
-                    {viewLoading ? "…" : rootQty.toLocaleString() || Number(viewOrder.items).toLocaleString()}
+                    {rootQty.toLocaleString() || Number(viewOrder.items).toLocaleString()}
                   </span>
                 </div>
                 <div>
@@ -2656,13 +2002,7 @@ function PurchaseOrders() {
               </div>
 
               <div className="roles-drawer-body po-drawer-body">
-                {viewLoading ? (
-                  <div className="roles-empty" style={{ padding: 32 }}>
-                    <span className="roles-spinner" />
-                    Loading details…
-                  </div>
-                ) : (
-                  <div className="roles-overview po-drawer-sections po-drawer-minimal">
+                <div className="roles-overview po-drawer-sections po-drawer-minimal">
                     {/* Product Purchase — primary content */}
                     <section className="po-drawer-section">
                       <h3>
@@ -2817,8 +2157,7 @@ function PurchaseOrders() {
                         </select>
                       </div>
                     </section>
-                  </div>
-                )}
+                </div>
               </div>
 
               <div className="roles-drawer-footer po-drawer-footer">

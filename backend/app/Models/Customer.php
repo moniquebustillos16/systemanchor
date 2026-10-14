@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Customer extends Model
@@ -11,6 +12,7 @@ class Customer extends Model
     use HasUuids, SoftDeletes;
 
     public $incrementing = false;
+
     protected $keyType = 'string';
 
     protected $table = 'customers';
@@ -23,4 +25,9 @@ class Customer extends Model
         'city',
         'status',
     ];
+
+    public function salesOrders(): HasMany
+    {
+        return $this->hasMany(SalesOrder::class);
+    }
 }
