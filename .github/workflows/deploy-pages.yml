@@ -3,8 +3,7 @@ name: Deploy SystemAnchor Frontend
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -20,11 +19,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -34,11 +31,11 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Build React application
+      - name: Build frontend
         working-directory: frontend
         run: npm run build
 
-      - name: Upload build
+      - name: Upload frontend
         uses: actions/upload-pages-artifact@v4
         with:
           path: frontend/dist
@@ -50,6 +47,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
