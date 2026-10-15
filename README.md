@@ -74,7 +74,7 @@ flowchart LR
 ### Frontend responsibilities
 
 - Provides routed pages and role-aware navigation and controls.
-- Uses Axios with `VITE_API_URL`, or `http://127.0.0.1:8000/api` by default.
+- Uses Axios with `VITE_API_URL`, or `https://systemanchor.duckdns.org/api` by default.
 - Sends the stored Sanctum bearer token and clears local authentication state after a `401` response.
 - Uses TanStack Query for cached server data, query keys, and mutation invalidation.
 
@@ -133,10 +133,10 @@ Copy-Item .env.example .env
 php artisan key:generate
 ```
 
-Configure the database values in `backend/.env`, then create the schema and sample data:
+Configure the database values in `backend/.env`, then create the schema:
 
 ```powershell
-php artisan migrate --seed
+php artisan migrate
 php artisan serve
 ```
 
@@ -174,11 +174,11 @@ For a non-default API address, create `frontend/.env.local`:
 VITE_API_URL=http://127.0.0.1:8000/api
 ```
 
-Never commit populated `.env` files, API tokens, or database passwords. The database seeder creates sample users and data for local development; inspect and change or remove seeded credentials before using any non-local environment.
+Never commit populated `.env` files, API tokens, or database passwords.
 
 ## Running the Application
 
-Keep the API and frontend servers running in separate terminals. After `php artisan migrate --seed`, sign in using a local seeded account listed in `backend/database/seeders/DatabaseSeeder.php`. Change seeded credentials before sharing an environment.
+Keep the API and frontend servers running in separate terminals. Sign in using an account provisioned for your local development environment.
 
 ## Testing
 
@@ -200,22 +200,48 @@ php artisan serve
 
 ## Deployment
 
-The repository contains a GitHub Pages workflow for the static documentation/demo page in `.github/workflows/deploy-pages.yml`. It does not contain AWS infrastructure, application deployment scripts, container definitions, or CI/CD configuration for the Laravel API and React application.
+### Current demo deployment
 
-For an AWS deployment, define the hosting architecture outside this repository. At minimum, provide production environment variables, a PostgreSQL instance, HTTPS, a Laravel migration process, persistent writable Laravel storage, and a method to serve the built frontend and API. Do not use local seed data or credentials in production.
+The demo has a React frontend hosted on GitHub Pages, a Laravel API deployed on AWS EC2, and a PostgreSQL database on AWS RDS.
+
+| Component | Hosting | URL / configuration |
+| --- | --- | --- |
+| Frontend | GitHub Pages | [https://moniquebustillos16.github.io/systemanchor/](https://moniquebustillos16.github.io/systemanchor/) |
+| Backend API | AWS EC2, with DuckDNS and HTTPS | [https://systemanchor.duckdns.org](https://systemanchor.duckdns.org), API base: `https://systemanchor.duckdns.org/api` |
+| Database | AWS RDS PostgreSQL | Private connection settings belong in the backend environment, never in Git |
+
+The frontend defaults to the HTTPS API base shown above. `VITE_API_URL` can override it at frontend build time; it is public browser configuration, so never put credentials or secrets in it. The API's CORS configuration must allow the frontend origin `https://moniquebustillos16.github.io`.
+
+### Deploying frontend changes
+
+Push reviewed changes to `main`. The workflow in `.github/workflows/deploy-pages.yml` installs dependencies, builds `frontend/`, and deploys `frontend/dist` to GitHub Pages. Ensure the repository Pages deployment source is set to **GitHub Actions**. Wait for the workflow to complete, then hard-refresh the site to load the new assets.
+
+### Deploying backend changes
+
+The GitHub Pages workflow deploys only the static frontend; it does not deploy the Laravel API or run migrations. Deploy backend code and schema changes through the AWS EC2 backend's approved process. Store `APP_KEY`, database credentials, and other production settings only in AWS environment/secret configuration. Back up and rehearse migrations against a separate production-like database before applying them to production.
+
+AWS infrastructure definitions and an automated backend deployment workflow are not currently versioned in this repository. See the [production readiness checklist](./docs/PRODUCTION_READINESS.md) before using the demo setup for real users or business data.
 
 ## Known Limitations and Future Improvements
 
-- Automated tests use the dedicated PostgreSQL `systemanchor_test` database. A synchronized multi-process test calls `InventoryService` directly to exercise simultaneous competing withdrawals; it does not test concurrent HTTP requests or document-level receipt/shipment workflows. See [TESTING_PLAN.md](./TESTING_PLAN.md).
-- Supplier and purchase-order identifier/status migrations are forward-only and cannot be rolled back. Before applying them to a populated database, audit all dependent references and rehearse backup, restore, migration, and reconciliation steps using the [PostgreSQL migration safety runbook](./MIGRATION_RUNBOOK.md). Do not deploy the identifier migration as written until references such as `products.supplier_id` and `goods_receipts.purchase_order_id` have been checked and any required ID mapping is preserved.
-- No API/application AWS deployment configuration is versioned in this repository.
+### Known limitations
+
+- Automated tests use the dedicated PostgreSQL `systemanchor_test` database. The synchronized multi-process test exercises competing withdrawals directly through `InventoryService`; concurrent HTTP requests and document-level receipt/shipment workflows are not covered. See [TESTING_PLAN.md](./TESTING_PLAN.md).
+- Supplier and purchase-order identifier/status migrations are forward-only. Before applying them to a populated database, verify dependent references (including `products.supplier_id` and `goods_receipts.purchase_order_id`) and rehearse backup, restore, migration, and reconciliation steps using the [PostgreSQL migration safety runbook](./MIGRATION_RUNBOOK.md). Do not deploy the identifier migration until any required ID mapping is preserved.
+- The backend is deployed on AWS EC2 and the PostgreSQL database is hosted on AWS RDS. AWS infrastructure definitions and automated backend deployment configuration are not included in this repository.
+
+### Future improvements
+
+- Extend integration coverage to concurrent HTTP requests and complete receipt/shipment workflows.
+- Add versioned AWS infrastructure and an automated backend deployment workflow.
+- Improve the forward-only identifier/status migrations so they can be applied safely to populated databases with verified reference mapping and recovery steps.
 
 ## Repository Layout
 
-- `backend/` — Laravel API, migrations, seeders, tests, and backend-specific Composer/npm manifests
+- `backend/` — Laravel API, migrations, tests, and backend-specific Composer/npm manifests
 - `frontend/` — React client, API modules, hooks, route-level pages, and frontend-specific npm manifests
 - `docs/` — static demo page, walkthrough recordings, and preview assets
-- `.github/workflows/` — GitHub Pages deployment workflow for `docs/`
+- `.github/workflows/` — GitHub Pages deployment workflow for `frontend/`
 
 Install JavaScript dependencies from the project that owns them (`frontend/` or `backend/`); there is no root-level npm workspace.
 
