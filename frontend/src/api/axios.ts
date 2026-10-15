@@ -4,7 +4,7 @@ import { queryClient } from "../lib/queryClient";
 import { queryPersister } from "../lib/queryPersistence";
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api",
+  baseURL: import.meta.env.VITE_API_URL || "http://3.107.88.93/api",
   // Dashboard and list endpoints can legitimately take longer while the
   // server computes aggregates. Query hooks keep cached data visible while
   // these requests complete, and callers can still set a shorter timeout.

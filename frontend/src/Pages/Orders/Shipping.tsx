@@ -256,9 +256,7 @@ function Shipping() {
   const [deliveringId, setDeliveringId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
-  const { rows: whRows, refetch: refetchWarehouses } = useWarehouses({
-    enabled: true,
-  });
+  const { rows: whRows } = useWarehouses({ enabled: true });
 
   const warehouses: Warehouse[] = useMemo(
     () =>
@@ -334,7 +332,7 @@ function Shipping() {
         fetchCachedLookup(
           "/inventories",
           [...lookupKeys.products, "shipping-stock-balances", "page", 1],
-          { per_page: 100, page: 1 }
+          { per_page: 200, page: 1 }
         ),
       ]);
 
@@ -347,7 +345,7 @@ function Shipping() {
           fetchCachedLookup(
             "/inventories",
             [...lookupKeys.products, "shipping-stock-balances", "page", index + 2],
-            { per_page: 100, page: index + 2 }
+            { per_page: 200, page: index + 2 }
           )
         )
       );
@@ -476,10 +474,6 @@ function Shipping() {
     }
   }, [showToast]);
 
-  useEffect(() => {
-    void loadLookups();
-  }, [loadLookups]);
-
   /* ── Product / SO helpers ────────────────────────────────── */
   const resolveProduct = (ln: SoLine): ProductOpt | undefined => {
     if (ln.product_id) {
@@ -583,7 +577,6 @@ function Shipping() {
     setShowAdd(true);
 
     const { soList, whList } = await loadLookups();
-    void refetchWarehouses();
 
     const options = soList.filter(
       (s) =>
@@ -858,8 +851,6 @@ function Shipping() {
 
   const handleRefresh = () => {
     void refetchAll();
-    void loadLookups();
-    void refetchWarehouses();
     showToast("success", "Refreshed", "Shipments reloaded.");
   };
 

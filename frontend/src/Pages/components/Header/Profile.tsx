@@ -325,7 +325,7 @@ function Profile() {
     const url = previewUrl || user?.image_url || user?.image_path || null;
     if (!url) return null;
     const apiOrigin = new URL(
-      import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api",
+      import.meta.env.VITE_API_URL || "http://3.107.88.93/api",
       window.location.origin
     ).origin;
     if (url.startsWith("blob:") || url.startsWith("data:")) return url;

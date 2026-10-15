@@ -287,7 +287,7 @@ function resolveMediaUrl(url: string | null | undefined): string | null {
   try {
     const base =
       (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
-      "http://127.0.0.1:8000/api";
+      "http://3.107.88.93/api";
 
     const origin = new URL(base, window.location.origin).origin;
 

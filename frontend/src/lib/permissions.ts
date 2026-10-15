@@ -99,7 +99,9 @@ export function extractAdminFlag(json: unknown): boolean {
   }
 
   const roleName =
-    (user?.role as Record<string, unknown> | undefined)?.name ||
+    (typeof user?.role === "string"
+      ? user.role
+      : (user?.role as Record<string, unknown> | undefined)?.name) ||
     user?.role_name ||
     (data?.role as Record<string, unknown> | undefined)?.name ||
     (j.role as Record<string, unknown> | undefined)?.name ||
