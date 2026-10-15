@@ -287,7 +287,7 @@ function resolveMediaUrl(url: string | null | undefined): string | null {
   try {
     const base =
       (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
-      "http://3.107.88.93/api";
+      "https://systemanchor.duckdns.org/api";
 
     const origin = new URL(base, window.location.origin).origin;
 
